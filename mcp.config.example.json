@@ -1,0 +1,20 @@
+{
+  "orgId": "acme",
+  "branding": {
+    "name": "Acme Knowledge MCP",
+    "instructions": "Knowledge MCP — access Drive, Slack, GitHub and Railway data. Meaning search -> semantic_search_drive; keyword/filename -> search_drive; exhaustive listing -> list_drive_folder. Answer only from results."
+  },
+  "drive": {
+    "roots": [
+      { "id": "PASTE_YOUR_DRIVE_FOLDER_ID", "name": "Docs", "source": "dev" }
+    ],
+    "excludeFolders": ["Private", "HR", "Contracts"]
+  },
+  "qdrant": { "collection": "acme_knowledge_v1" },
+  "data": { "schema": "public" },
+  "selfDomains": ["acme.com"],
+  "oauth": {
+    "allowedDomains": ["acme.com"],
+    "allowedEmails": []
+  }
+}

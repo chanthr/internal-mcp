@@ -1,0 +1,32 @@
+# Build artifacts
+node_modules
+dist
+*.log
+*.tsbuildinfo
+
+# Secrets / local config
+.env
+.env.local
+.env.*.local
+google-service-account.json
+google-service-account-*.json
+*-service-account.json
+
+# Git
+.git
+.gitignore
+.github
+
+# Docs / dev (이미지 size 절감)
+README.md
+docs
+scripts
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+*.swp
