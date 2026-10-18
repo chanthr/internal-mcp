@@ -1,0 +1,17 @@
+{
+  "eyebrow": "SELF-HOSTED MCP SERVER",
+  "title": "Knowledge MCP",
+  "subtitle": "Your Drive, Slack, GitHub and Railway, behind one MCP endpoint",
+  "steps": [
+    {"who": "Client", "title": "Connect", "desc": "Claude or an IDE calls /mcp with an API key or an OAuth token"},
+    {"who": "Server", "title": "Authorize", "desc": "Verifies the credential, then loads the user's role and scopes"},
+    {"who": "Server", "title": "Offer tools", "desc": "Lists only tool groups that are configured and allowed for this user"},
+    {"who": "Sources", "title": "Read", "desc": "Reads Drive, Slack, GitHub and Railway and returns the result"}
+  ],
+  "badges": [
+    {"file": "badge-license", "label": "license", "message": "MIT", "color": "neutral"},
+    {"file": "badge-node", "label": "node", "message": "22+", "color": "info"},
+    {"file": "badge-mcp", "label": "MCP", "message": "HTTP + stdio", "color": "info"},
+    {"file": "badge-auth", "label": "auth", "message": "Key + OAuth", "color": "#8250DF"}
+  ]
+}
