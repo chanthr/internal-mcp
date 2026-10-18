@@ -1,36 +1,33 @@
 # Build artifacts
 node_modules
-dist
-dist-scripts
+**/node_modules
+**/dist
 *.log
 *.tsbuildinfo
 
-# Secrets / local config
+# Secrets / local config / state
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 google-service-account.json
 google-service-account-*.json
 *-service-account.json
-# 배포 설정은 이미지에 굽지 않는다 (실행할 때 MCP_CONFIG_JSON 또는 마운트)
 mcp.config.json
-.drive_sync_state.json
-.reindex_checkpoint.json
+data
+**/data
 
-# Git
+# Git, docs, tests (smaller context)
 .git
-.gitignore
 .github
-
-# Docs / dev (이미지 size 절감). scripts 는 재색인을 이미지에서 돌리려고 포함한다.
 *.md
 docs
+packages/knowledge-mcp/test
+packages/create-knowledge-mcp/template
+packages/create-knowledge-mcp/test
 
-# OS
+# OS / IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode
 .idea
 *.swp

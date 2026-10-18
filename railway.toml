@@ -1,12 +1,11 @@
-# Railway deployment 설정
-# Dockerfile 우선, /health endpoint 로 healthcheck, 실패 시 재시작.
+# Railway deployment. Uses the Dockerfile (ENTRYPOINT knowledge-mcp, CMD serve), /health for health checks.
+# The SQLite store needs a volume mounted at /data; otherwise set MCP_STORE=supabase (state lost on redeploy).
 
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "node dist/index.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
