@@ -50,6 +50,10 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
         'files(id, name, mimeType, parents, modifiedTime, size, webViewLink, owners(emailAddress))',
       pageSize,
       orderBy: 'modifiedTime desc',
+      // 공유 드라이브까지 찾는다. 없으면 root 가 공유 드라이브일 때 결과가 늘 0건이다.
+      corpora: 'allDrives',
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
     });
 
     const raw = (res.data.files || []).map((f) => ({

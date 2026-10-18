@@ -87,11 +87,23 @@ async function cmdKeys(argv: string[]): Promise<void> {
     const role = roleArg(values.role, ['admin', 'member', 'viewer']);
     const email = values.email?.trim().toLowerCase();
     if (email) {
-      // A key with an email takes that person's role from app_users, so --role is saved there.
+      // A key with an email takes that person's role from their users entry. --role only registers a new person;
+      // it never changes an existing entry (that would silently demote or promote every key and sign-in they have).
+      if (role === 'viewer') {
+        throw new UsageError(
+          `keys create: --role viewer cannot be combined with --email. A person is a viewer when they have no users entry; omit --role (run "users remove ${email}" if they are registered).`,
+        );
+      }
       const existing = await store.getUser(email);
-      if (role) {
-        await store.upsertUser({ ...(existing ?? { email }), email, role: role === 'admin' ? 'admin' : 'member' });
-        if (role === 'viewer') info(`note: viewer is the role of people without a users entry; saved ${email} as member.`);
+      const current = existing ? (existing.role === 'admin' ? 'admin' : 'member') : null;
+      if (role && current && role !== current) {
+        throw new UsageError(
+          `keys create: ${email} is already registered as ${current}. To change the role run: knowledge-mcp users add ${email} --role ${role}`,
+        );
+      }
+      if (role && !existing) {
+        await store.upsertUser({ email, role });
+        info(`Registered ${email} as ${role}.`);
       } else if (!existing) {
         info(`note: ${email} is not registered, so this key gets the viewer role (ping only).`);
         info(`      Run: knowledge-mcp users add ${email} --role member   (or pass --role to this command)`);

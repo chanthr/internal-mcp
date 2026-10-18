@@ -162,6 +162,21 @@ test('loadPlugins loads every plugin file and skips _ files', async () => {
   assert.deepEqual(await loadPlugins('/nonexistent-dir-for-test'), []);
 });
 
+test('drive reindex refuses to run without drive.roots (a full run would wipe the index)', async () => {
+  const { runReindex } = await import('../src/plugins/drive/reindex.js');
+  await assert.rejects(runReindex([]), /drive\.roots is empty/);
+});
+
+test('.env.example has no trailing comments (docker --env-file keeps them in the value)', async () => {
+  const { readFileSync } = await import('node:fs');
+  for (const f of ['../../../.env.example', '../../create-knowledge-mcp/template/.env.example']) {
+    const bad = readFileSync(new URL(f, import.meta.url), 'utf8')
+      .split('\n')
+      .filter((l) => /^#?\s?[A-Z][A-Z0-9_]*=/.test(l) && /\s#/.test(l.replace(/^#\s?/, '')));
+    assert.deepEqual(bad, [], f);
+  }
+});
+
 test('built-in plugins load with no credentials and stay off', () => {
   const r = new Registry(builtinPlugins);
   assert.deepEqual(r.status().map((s) => [s.id, s.enabled]), [['drive', false], ['slack', false], ['github', false], ['railway', false]]);

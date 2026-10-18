@@ -3,10 +3,11 @@
 # To ship your own plugins, scaffold a project with `npx create-knowledge-mcp` (it has its own Dockerfile).
 #
 # Published image: ghcr.io/chanthr/knowledge-mcp (built by .github/workflows/docker.yml)
-#   docker run -d --name kmcp -p 8080:8080 -v kmcp-data:/data --env-file .env ghcr.io/chanthr/knowledge-mcp
+#   docker run -d --name kmcp -p 8080:8080 -v kmcp-data:/data -v ./mcp.config.json:/app/mcp.config.json:ro \
+#     --env-file .env ghcr.io/chanthr/knowledge-mcp
 #   docker exec kmcp knowledge-mcp keys create --email you@example.com --role admin
 #   docker exec kmcp knowledge-mcp doctor
-#   docker run --rm -v kmcp-data:/data --env-file .env ghcr.io/chanthr/knowledge-mcp drive reindex
+#   docker exec kmcp knowledge-mcp drive reindex     # first full Drive index (uses the same config)
 
 # === Build stage — workspace install + tsc ===
 FROM node:22-alpine AS builder

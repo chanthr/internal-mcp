@@ -58,7 +58,7 @@ function emailAllowed(email: string): boolean {
   return ALLOWED_EMAILS.includes(e) || ALLOWED_DOMAINS.includes(emailDomain(e));
 }
 
-const GOOGLE_CALLBACK = ISSUER ? `${ISSUER}/oauth/google/callback` : '';
+const GOOGLE_CALLBACK = ISSUER ? `${ISSUER}/oauth/google/callback` : ''; // = GOOGLE_CALLBACK_PATH
 const SCOPE = 'mcp';
 const ACCESS_TTL = 3600; // 1h
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
@@ -67,6 +67,9 @@ const STATE_TTL = 600; // 10m
 const CONSENT_TTL = 600; // 10m
 export const CONSENT_COOKIE = 'kmcp_consent';
 export const CONSENT_PATH = '/oauth/consent';
+/** Binds the Google round trip to the browser that approved the consent page (see consumeConsent). */
+export const LOGIN_COOKIE = 'kmcp_login';
+export const GOOGLE_CALLBACK_PATH = '/oauth/google/callback';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -111,7 +114,7 @@ interface AuthCodeEntry {
   resource?: string;
   exp: number;
 }
-interface GooglePending {
+interface LoginRequest {
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
@@ -120,7 +123,10 @@ interface GooglePending {
   resource?: string;
   exp: number;
 }
-interface ConsentPending extends GooglePending {
+interface GooglePending extends LoginRequest {
+  binding: string; // 승인한 브라우저에만 심은 쿠키 값 — Google 콜백에서 같은 값이 와야 code 를 낸다
+}
+interface ConsentPending extends LoginRequest {
   csrf: string; // 동의 화면이 심은 쿠키 값 — POST 의 폼 값·쿠키 값과 모두 같아야 승인
 }
 
@@ -163,6 +169,15 @@ button[value=approve]{background:#111;color:#fff;border-color:#111}
 <div class="row"><button type="submit" name="action" value="deny">Cancel</button>
 <button type="submit" name="action" value="approve">Continue with Google</button></div>
 </form></main></body></html>`;
+}
+
+/** client redirect_uri 로 OAuth 오류를 돌려줄 URL. */
+function clientError(p: LoginRequest, error: string, description: string): string {
+  const u = new URL(p.redirectUri);
+  u.searchParams.set('error', error);
+  u.searchParams.set('error_description', description);
+  if (p.clientState) u.searchParams.set('state', p.clientState);
+  return u.toString();
 }
 
 function sweep<T extends { exp: number }>(m: Map<string, T>): void {
@@ -233,14 +248,14 @@ async function verifyGoogleIdToken(idToken: string): Promise<{ email: string; hd
   const email = String(payload.email || '').toLowerCase();
   const hd = payload.hd ? String(payload.hd).toLowerCase() : undefined;
   const emailVerified = payload.email_verified === true || payload.email_verified === 'true';
-  if (!email || !emailVerified) throw new Error('google: email 미검증');
+  if (!email || !emailVerified) throw new Error('google: email not verified');
   // 허용 이메일 목록에 있으면 계정 종류와 무관하게 허용(외부 협력자 등).
   if (ALLOWED_EMAILS.includes(email)) return { email, hd };
   // 도메인으로 허용할 때는 hd 클레임이 그 도메인이어야 한다 — Workspace 가 관리하는 계정만.
   // (hd 파라미터는 힌트일 뿐이라 신뢰 불가. 회사 주소로 만든 개인 Google 계정은 hd 가 없다.)
   const domain = emailDomain(email);
   if (ALLOWED_DOMAINS.includes(domain) && hd === domain) return { email, hd };
-  throw new Error(`google: 허용되지 않은 계정(hd=${hd ?? 'none'})`);
+  throw new Error(`google: this account is not allowed (hd=${hd ?? 'none'})`);
 }
 
 // ── refresh token 상태 (저장소 mcp_refresh_tokens) ──
@@ -254,7 +269,7 @@ async function recordRefreshToken(jti: string, email: string, clientId: string):
   try {
     await store.recordRefreshToken(jti, email, clientId, new Date(Date.now() + REFRESH_TTL * 1000).toISOString());
   } catch (e) {
-    throw new Error(`refresh 토큰 기록 실패: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`could not record the refresh token: ${e instanceof Error ? e.message : String(e)}`);
   }
   void store.purgeExpiredRefreshTokens().catch((e: unknown) => {
     console.error('[oauth] refresh 만료분 정리 실패:', e instanceof Error ? e.message : e);
@@ -274,7 +289,7 @@ async function consumeRefreshToken(jti: string, email: string, rotatedTo: string
   try {
     state = await store.consumeRefreshToken(jti, rotatedTo);
   } catch (e) {
-    throw new Error(`refresh 상태 확인 실패: ${e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`could not check the refresh token: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (state !== 'revoked') return state;
   console.error(`[oauth] ⚠️ 폐기된 refresh 재사용 감지 — ${email} 의 활성 refresh 전부 폐기`);
@@ -349,32 +364,31 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * 동의 화면의 POST 처리 (server/http.ts 의 POST /oauth/consent 가 호출). 돌려줄 redirect URL 을 반환한다.
+   * 동의 화면의 POST 처리 (server/http.ts 의 POST /oauth/consent 가 호출).
    * 승인: 폼 csrf·쿠키 csrf·저장된 csrf 가 모두 같을 때만 Google 로그인으로. 거절: client 로 access_denied.
    * 검증 실패는 throw — 호출부가 400 으로 끝낸다(공격자 redirect_uri 로 보내지 않는다).
+   *
+   * 승인하면 loginBinding 을 돌려준다. 호출부는 이 값을 Google 콜백 경로 전용 쿠키로 심는다. 콜백은 같은 쿠키가
+   * 올 때만 code 를 낸다. 이게 없으면 공격자가 자기 브라우저에서 승인한 뒤 Google 로그인 URL 만 피해자에게 보내,
+   * 피해자는 동의 화면을 보지 않고 Google 계정만 고르고, code 는 공격자 redirect_uri 로 간다.
    */
-  consumeConsent(id: string, formCsrf: string, cookieCsrf: string, approve: boolean): string {
+  consumeConsent(id: string, formCsrf: string, cookieCsrf: string, approve: boolean): { redirect: string; loginBinding?: string } {
     sweep(_consentPending);
     const pending = _consentPending.get(id);
-    if (!pending) throw new Error('알 수 없거나 만료된 요청입니다. 연결을 처음부터 다시 시작해 주세요.');
+    if (!pending) throw new Error('Unknown or expired request. Start the connection again.');
     if (
       !formCsrf ||
       !cookieCsrf ||
       !timingSafeEqualStr(formCsrf, pending.csrf) ||
       !timingSafeEqualStr(cookieCsrf, pending.csrf)
     ) {
-      throw new Error('요청을 확인할 수 없습니다. 연결을 처음부터 다시 시작해 주세요.');
+      throw new Error('Could not verify this request. Start the connection again.');
     }
     _consentPending.delete(id);
-    if (!approve) {
-      const u = new URL(pending.redirectUri);
-      u.searchParams.set('error', 'access_denied');
-      u.searchParams.set('error_description', 'user cancelled');
-      if (pending.clientState) u.searchParams.set('state', pending.clientState);
-      return u.toString();
-    }
-    const { csrf: _csrf, ...rest } = pending;
-    return this.googleRedirect(rest);
+    if (!approve) return { redirect: clientError(pending, 'access_denied', 'user cancelled') };
+    const { csrf: _csrf, ...request } = pending;
+    const loginBinding = randomBytes(24).toString('base64url');
+    return { redirect: this.googleRedirect({ ...request, binding: loginBinding }), loginBinding };
   }
 
   /** Google 로그인 URL 을 만들고 state 를 기록한다. */
@@ -397,21 +411,23 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
 
   /**
    * Google 콜백 처리 (server/http.ts 의 /oauth/google/callback 라우트가 호출).
+   * binding 은 승인한 브라우저의 로그인 쿠키 값이다. 맞지 않으면 throw — client 로 아무것도 보내지 않는다.
+   * Google 에서 취소(error)했으면 client redirect_uri 로 access_denied 를 돌려준다(커넥터가 멈춰 있지 않게).
    * 성공/실패 모두 client redirect_uri 로 돌려보낼 URL 을 반환한다.
    */
-  async completeGoogleLogin(googleCode: string, state: string): Promise<string> {
+  async completeGoogleLogin(params: { code?: string; error?: string; state: string; binding: string }): Promise<string> {
     sweep(_googlePending);
-    const pending = _googlePending.get(state);
-    if (!pending) throw new Error('알 수 없거나 만료된 state');
-    _googlePending.delete(state);
-
-    const redirectErr = (err: string, desc: string) => {
-      const u = new URL(pending.redirectUri);
-      u.searchParams.set('error', err);
-      u.searchParams.set('error_description', desc);
-      if (pending.clientState) u.searchParams.set('state', pending.clientState);
-      return u.toString();
-    };
+    const pending = _googlePending.get(params.state);
+    if (!pending) throw new Error('Unknown or expired sign-in. Start the connection again.');
+    if (!params.binding || !timingSafeEqualStr(params.binding, pending.binding)) {
+      // 다른 브라우저(링크를 전달받은 사람)에서 온 콜백. 이 state 는 버린다.
+      _googlePending.delete(params.state);
+      throw new Error('This sign-in was started in a different browser. Start the connection again from your app.');
+    }
+    _googlePending.delete(params.state);
+    const redirectErr = (err: string, desc: string) => clientError(pending, err, desc);
+    if (params.error || !params.code) return redirectErr('access_denied', params.error || 'missing code');
+    const googleCode = params.code;
 
     let email: string;
     try {
@@ -432,7 +448,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       if (!r.ok || !j.id_token) throw new Error(j.error_description || j.error || `google token ${r.status}`);
       ({ email } = await verifyGoogleIdToken(j.id_token));
     } catch (e) {
-      return redirectErr('access_denied', e instanceof Error ? e.message : '로그인 실패');
+      return redirectErr('access_denied', e instanceof Error ? e.message : 'sign-in failed');
     }
 
     // 우리 authorization code 발급 (one-time, 짧은 TTL)
@@ -455,7 +471,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
     const entry = _authCodes.get(authorizationCode);
-    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('authorization code 없음/만료');
+    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('unknown or expired authorization code');
     return entry.codeChallenge;
   }
 
@@ -467,10 +483,10 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     _resource?: URL,
   ): Promise<OAuthTokens> {
     const entry = _authCodes.get(authorizationCode);
-    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('authorization code 없음/만료');
+    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('unknown or expired authorization code');
     _authCodes.delete(authorizationCode); // one-time
-    if (entry.clientId !== client.client_id) throw new InvalidGrantError('client 불일치');
-    if (redirectUri && redirectUri !== entry.redirectUri) throw new InvalidGrantError('redirect_uri 불일치');
+    if (entry.clientId !== client.client_id) throw new InvalidGrantError('authorization code was issued to another client');
+    if (redirectUri && redirectUri !== entry.redirectUri) throw new InvalidGrantError('redirect_uri does not match');
 
     const scope = entry.scopes.join(' ') || SCOPE;
     const claims = { sub: entry.email, email: entry.email, scope, client_id: client.client_id };
@@ -504,20 +520,20 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       tokenClientId = typeof payload.client_id === 'string' ? payload.client_id : '';
       grantedScopes = String(payload.scope || SCOPE).split(' ').filter(Boolean);
     } catch {
-      throw new InvalidGrantError('refresh token 무효');
+      throw new InvalidGrantError('invalid refresh token');
     }
     // refresh token 은 발급받은 client 만 쓸 수 있다 — 새어 나간 토큰을 다른(공격자가 등록한) client 로 바꾸지 못하게.
-    if (!tokenClientId || tokenClientId !== client.client_id) throw new InvalidGrantError('refresh token 의 client 불일치');
+    if (!tokenClientId || tokenClientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to another client');
     // 처음 허용된 범위보다 넓힐 수 없다.
-    if (scopes && scopes.some((s) => !grantedScopes.includes(s))) throw new InvalidScopeError('요청 scope 가 원래 범위를 넘습니다');
+    if (scopes && scopes.some((s) => !grantedScopes.includes(s))) throw new InvalidScopeError('requested scope exceeds the original grant');
     // refresh 시 허용 목록 재확인 — 빠진 계정은 30일 refresh 가 남아도 즉시 차단.
-    if (!emailAllowed(email)) throw new InvalidGrantError('계정이 더 이상 허용되지 않음');
+    if (!emailAllowed(email)) throw new InvalidGrantError('this account is no longer allowed');
     // jti 없는 구형 refresh 는 거부(재로그인 1회 유도). jti 는 DB 에서 소비(rotation) —
     // 옛 토큰 즉시 폐기, 폐기된 토큰 재사용(탈취 신호)이면 계정 전체 refresh 폐기.
-    if (!jti) throw new InvalidGrantError('refresh token 무효(구형) — 재로그인 필요');
+    if (!jti) throw new InvalidGrantError('outdated refresh token; sign in again');
     const newJti = randomUUID();
     const state = await consumeRefreshToken(jti, email, newJti);
-    if (state !== 'ok') throw new InvalidGrantError('refresh token 무효(폐기됨) — 재로그인 필요');
+    if (state !== 'ok') throw new InvalidGrantError('refresh token was revoked; sign in again');
 
     const scope = (scopes && scopes.length ? scopes : grantedScopes).join(' ') || SCOPE;
     const claims = { sub: email, email, scope, client_id: client.client_id };
@@ -534,10 +550,10 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       audience: RESOURCE,
       algorithms: ['HS256'], // alg 고정 (none/RS256 confusion 차단)
     });
-    if (payload.typ === 'refresh') throw new Error('refresh token 으로 접근 불가');
+    if (payload.typ === 'refresh') throw new Error('a refresh token cannot be used as an access token');
     const email = typeof payload.sub === 'string' ? payload.sub : '';
     // P1: 매 요청 allowlist 재확인 — allowlist 에서 빠지면 미만료 토큰도 즉시 거부.
-    if (!emailAllowed(email)) throw new Error('계정이 더 이상 허용되지 않음');
+    if (!emailAllowed(email)) throw new Error('this account is no longer allowed');
     const scopes = String(payload.scope || '').split(' ').filter(Boolean);
     return {
       token,
