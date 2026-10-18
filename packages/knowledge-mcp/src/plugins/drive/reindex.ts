@@ -17,7 +17,7 @@
  * 전체 root 로 돌리면(--root/--biz-only/--dev-only 없이) 끝에서 이번 목록에 없는 파일의 벡터를 지운다.
  * 제외 폴더로 옮긴 파일, 나중에 excludeFolders 에 넣은 폴더, config 에서 뺀 root 의 청크가 여기서 정리된다.
  */
-import type { drive_v3 } from 'googleapis';
+import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { chunkMarkdown, parseFrontmatter } from './chunker.js';
 import { embedTexts } from './embeddings.js';
@@ -117,7 +117,7 @@ interface ListedFile {
  * 폴더 ID 의 지원 형식 파일 recursive list (deprecated 제외).
  */
 async function listAllMarkdown(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   folderId: string,
   pathPrefix: string,
 ): Promise<ListedFile[]> {
@@ -165,7 +165,7 @@ async function listAllMarkdown(
   return out;
 }
 
-async function downloadMarkdown(drive: drive_v3.Drive, fileId: string): Promise<string> {
+async function downloadMarkdown(drive: DriveClient, fileId: string): Promise<string> {
   const resp = await drive.files.get(
     { fileId, alt: 'media', supportsAllDrives: true },
     { responseType: 'text' },

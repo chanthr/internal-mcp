@@ -9,7 +9,7 @@
  * startup 1회 (첫 실행 = token 초기화만) + setInterval(기본 30분).
  * graceful: 오류 시 로그만, server 영향 X.
  */
-import type { drive_v3 } from 'googleapis';
+import type { DriveChangeList, DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
 import { getSyncToken, setSyncToken } from './sync_state.js';
@@ -23,7 +23,7 @@ import { getFolderMeta } from './path.js';
  * 매번 조회(변경 파일이라 캐시 무의미). 폴더 조회 실패 시 getFolderMeta 가 빈 값 → walk 종료(graceful).
  */
 async function resolvePathAndSource(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   fileId: string,
   fileName: string,
 ): Promise<{ path: string; source: 'dev' | 'biz' } | null> {
@@ -69,7 +69,7 @@ export async function runIncrementalSync(): Promise<SyncResult> {
   let cursor: string | undefined = token;
 
   while (cursor) {
-    const data: drive_v3.Schema$ChangeList = (
+    const data: DriveChangeList = (
       await drive.changes.list({
         pageToken: cursor,
         fields:

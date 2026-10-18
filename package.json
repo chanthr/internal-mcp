@@ -1,7 +1,7 @@
 {
   "name": "knowledge-mcp-monorepo",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Knowledge MCP: the @chnxthr/knowledge-mcp framework and the create-knowledge-mcp generator.",
   "license": "MIT",
   "type": "module",
@@ -14,7 +14,8 @@
     "typecheck": "npm run typecheck -w @chnxthr/knowledge-mcp",
     "test": "npm test -w @chnxthr/knowledge-mcp && npm test -w create-knowledge-mcp",
     "dev": "npm run dev -w @chnxthr/knowledge-mcp",
-    "smoke:create": "bash scripts/smoke-create.sh"
+    "smoke:create": "bash scripts/smoke-create.sh",
+    "check:install": "bash scripts/check-install.sh"
   },
   "engines": {
     "node": ">=22.13.0"

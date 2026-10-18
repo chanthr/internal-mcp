@@ -151,7 +151,7 @@ async function readOne(
       body = String(res.data ?? '');
     } else if (isExtractableBinary(mimeType)) {
       // PDF·docx·pptx·xlsx·image. 색인된 파일이면 Qdrant 청크 재조립(색인 시 추출·OCR 한 텍스트 재사용
-      // → 재다운로드·재OCR 0)을 우선. 미색인이면 extract_text 파이프라인(pdf-parse·mammoth·Mathpix OCR 등).
+      // → 재다운로드·재OCR 0)을 우선. 미색인이면 extract_text 파이프라인(pdf-parse·ooxml·Mathpix OCR 등).
       // 예전엔 바이너리를 String() 해 깨진 텍스트를 반환했다(검색 챗봇 PDF 읽기 실패의 원인).
       const reassembled = await reassembleFromIndex(fileId);
       if (reassembled && reassembled.trim()) {

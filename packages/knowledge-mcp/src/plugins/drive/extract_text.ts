@@ -6,16 +6,16 @@
  *   - Google Docs                    → Drive export text/markdown
  *   - Google Sheets                  → Drive export text/csv
  *   - Google Slides                  → Drive export text/plain
- *   - Word .docx                     → mammoth (텍스트 레이어)
+ *   - Word .docx                     → ooxml.ts (zip 안 XML 의 문단 텍스트)
  *   - PDF (digital)                  → pdf-parse (텍스트 레이어)
  *
  * OCR 필요 (후속 — Mathpix):
  *   - PDF (스캔본, 텍스트 부족)        → Mathpix
  *   - .pptx / image                  → Mathpix / Gemini multimodal
  *
- * lazy import (mammoth/pdf-parse) — 필요 시에만 로드.
+ * lazy import (pdf-parse, xlsx) — 필요 시에만 로드.
  */
-import type { drive_v3 } from 'googleapis';
+import type { DriveClient } from './client.js';
 import { cleanExtractedText } from './clean_text.js';
 
 export interface ExtractResult {
@@ -28,7 +28,7 @@ export interface ExtractResult {
 /** 스캔본 판정 threshold — 페이지당 평균 글자 수 */
 const MIN_CHARS_PER_PAGE = 80;
 
-async function downloadText(drive: drive_v3.Drive, fileId: string): Promise<string> {
+async function downloadText(drive: DriveClient, fileId: string): Promise<string> {
   const r = await drive.files.get(
     { fileId, alt: 'media', supportsAllDrives: true },
     { responseType: 'text' },
@@ -36,7 +36,7 @@ async function downloadText(drive: drive_v3.Drive, fileId: string): Promise<stri
   return r.data as unknown as string;
 }
 
-async function downloadBuffer(drive: drive_v3.Drive, fileId: string): Promise<Buffer> {
+async function downloadBuffer(drive: DriveClient, fileId: string): Promise<Buffer> {
   const r = await drive.files.get(
     { fileId, alt: 'media', supportsAllDrives: true },
     { responseType: 'arraybuffer' },
@@ -45,7 +45,7 @@ async function downloadBuffer(drive: drive_v3.Drive, fileId: string): Promise<Bu
 }
 
 async function exportGoogle(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   fileId: string,
   mimeType: string,
 ): Promise<string> {
@@ -55,7 +55,7 @@ async function exportGoogle(
 
 /** 추출 + 정제 (노이즈 cleanup). 색인·검색 진입점. */
 export async function extractText(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   fileId: string,
   mimeType: string,
 ): Promise<ExtractResult> {
@@ -65,7 +65,7 @@ export async function extractText(
 
 /** 형식별 원본 추출 (정제 전). */
 async function extractRaw(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   fileId: string,
   mimeType: string,
 ): Promise<ExtractResult> {
@@ -85,12 +85,11 @@ async function extractRaw(
     return { text: await exportGoogle(drive, fileId, 'text/plain'), method: 'gslide→txt' };
   }
 
-  // 3. Word .docx — mammoth (텍스트 레이어)
+  // 3. Word .docx — 의존성 없는 zip/XML 읽기 (ooxml.ts). 문단 사이 빈 줄 — 예전 mammoth extractRawText 와 같은 모양
   if (mimeType.includes('wordprocessingml')) {
-    const mammoth = (await import('mammoth')).default ?? (await import('mammoth'));
+    const { docxText } = await import('./ooxml.js');
     const buffer = await downloadBuffer(drive, fileId);
-    const result = await (mammoth as any).extractRawText({ buffer });
-    return { text: result.value as string, method: 'docx→mammoth' };
+    return { text: docxText(buffer), method: 'docx→ooxml' };
   }
 
   // 4. PDF — pdf-parse v2. digital 텍스트, 스캔본(<MIN) 은 Mathpix OCR fallback
@@ -121,21 +120,11 @@ async function extractRaw(
     };
   }
 
-  // 5. PowerPoint .pptx → officeparser (슬라이드 텍스트)
-  //    v7 parseOffice 는 OfficeParserAST 반환 → markdown(.to('md')) 우선, 실패 시 toText().
+  // 5. PowerPoint .pptx → 슬라이드마다 "## Slide N" + 본문 + 발표자 노트 (ooxml.ts)
   if (mimeType.includes('presentationml')) {
-    const { parseOffice } = await import('officeparser');
+    const { pptxText } = await import('./ooxml.js');
     const buffer = await downloadBuffer(drive, fileId);
-    const ast = (await parseOffice(buffer)) as any;
-    let text = '';
-    try {
-      const md = await ast.to('md');
-      text = (md?.value as string) ?? '';
-    } catch {
-      /* md 변환 실패 → toText fallback */
-    }
-    if (!text.trim()) text = ast.toText() as string;
-    return { text, method: 'pptx→officeparser' };
+    return { text: pptxText(buffer), method: 'pptx→ooxml' };
   }
 
   // 6. Excel .xlsx → SheetJS (시트별 csv)
