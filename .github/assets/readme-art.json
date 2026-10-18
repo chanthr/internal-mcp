@@ -1,17 +1,53 @@
 {
-  "eyebrow": "SELF-HOSTED MCP SERVER",
+  "eyebrow": "MCP SERVER FRAMEWORK",
   "title": "Knowledge MCP",
-  "subtitle": "Your Drive, Slack, GitHub and Railway, behind one MCP endpoint",
+  "subtitle": "Build your own MCP server from plugins. Auth and permissions are built in",
   "steps": [
-    {"who": "Client", "title": "Connect", "desc": "Claude or an IDE calls /mcp with an API key or an OAuth token"},
-    {"who": "Server", "title": "Authorize", "desc": "Verifies the credential, then loads the user's role and scopes"},
-    {"who": "Server", "title": "Offer tools", "desc": "Lists only tool groups that are configured and allowed for this user"},
-    {"who": "Sources", "title": "Read", "desc": "Reads Drive, Slack, GitHub and Railway and returns the result"}
+    {
+      "who": "You",
+      "title": "Create",
+      "desc": "npx create-knowledge-mcp makes a server with a local store. Or run one Docker command"
+    },
+    {
+      "who": "You",
+      "title": "Add a tool",
+      "desc": "One file in src/plugins: a name, a zod input and a run function"
+    },
+    {
+      "who": "Server",
+      "title": "Authorize",
+      "desc": "Checks the API key or OAuth token, then loads the person's role"
+    },
+    {
+      "who": "Client",
+      "title": "Use",
+      "desc": "Claude sees only the tools this person may use, and calls them"
+    }
   ],
   "badges": [
-    {"file": "badge-license", "label": "license", "message": "MIT", "color": "neutral"},
-    {"file": "badge-node", "label": "node", "message": "22+", "color": "info"},
-    {"file": "badge-mcp", "label": "MCP", "message": "HTTP + stdio", "color": "info"},
-    {"file": "badge-auth", "label": "auth", "message": "Key + OAuth", "color": "#8250DF"}
+    {
+      "file": "badge-license",
+      "label": "license",
+      "message": "MIT",
+      "color": "neutral"
+    },
+    {
+      "file": "badge-node",
+      "label": "node",
+      "message": "22.13+",
+      "color": "info"
+    },
+    {
+      "file": "badge-mcp",
+      "label": "MCP",
+      "message": "HTTP + stdio",
+      "color": "info"
+    },
+    {
+      "file": "badge-auth",
+      "label": "auth",
+      "message": "Key + OAuth",
+      "color": "#8250DF"
+    }
   ]
 }

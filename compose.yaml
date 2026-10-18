@@ -1,27 +1,22 @@
 # Knowledge MCP — run the published image with Docker Compose.
 #
-#   cp .env.example .env                        # fill in credentials
-#   cp mcp.config.example.json mcp.config.json  # set Drive folder IDs, domains, allowlist
+#   cp .env.example .env                        # fill in the connectors you want (all optional)
+#   cp mcp.config.example.json mcp.config.json  # Drive folders, excluded folders, sign-in allowlist
 #   docker compose up -d
-#   docker compose run --rm reindex             # first full Drive index (semantic_search_drive)
+#   docker compose exec knowledge-mcp knowledge-mcp keys create --email you@example.com --role admin
+#   docker compose run --rm knowledge-mcp drive reindex   # first full Drive index (semantic search)
 #
 # The server listens on http://localhost:8080/mcp. Put it behind HTTPS before connecting remote clients.
 services:
   knowledge-mcp:
     image: ghcr.io/chanthr/knowledge-mcp:latest
     env_file: .env
-    environment:
-      MCP_TRANSPORT: http
     ports:
       - "8080:8080"
     volumes:
+      - knowledge-data:/data
       - ./mcp.config.json:/app/mcp.config.json:ro
     restart: unless-stopped
 
-  reindex:
-    image: ghcr.io/chanthr/knowledge-mcp:latest
-    profiles: ["tools"]
-    env_file: .env
-    volumes:
-      - ./mcp.config.json:/app/mcp.config.json:ro
-    command: ["node", "dist-scripts/scripts/index_drive.js"]
+volumes:
+  knowledge-data:

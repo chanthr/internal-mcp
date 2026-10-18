@@ -1,8 +1,7 @@
 {
   "orgId": "acme",
   "branding": {
-    "name": "Acme Knowledge MCP",
-    "instructions": "Knowledge MCP — access Drive, Slack, GitHub and Railway data. Meaning search -> semantic_search_drive; keyword/filename -> search_drive; exhaustive listing -> list_drive_folder. Answer only from results."
+    "name": "Acme Knowledge MCP"
   },
   "drive": {
     "roots": [
@@ -17,5 +16,7 @@
     "allowedDomains": ["acme.com"],
     "allowedEmails": []
   },
-  "access": { "viewerTools": [] }
+  "access": { "viewerTools": [] },
+  "plugins": {},
+  "upstreams": []
 }

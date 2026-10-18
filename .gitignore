@@ -1,19 +1,18 @@
 node_modules/
 dist/
-dist-scripts/
 .env
 .env.local
 *.log
 .DS_Store
+*.tgz
 
 # Google credentials — never commit
 google-service-account.json
 google-service-account-*.json
 *-service-account.json
 
-# Local runtime state
-.drive_sync_state.json
-.reindex_checkpoint.json
+# Local runtime state (SQLite store, checkpoints)
+data/
 
 # Your own deployment config (may reference your infrastructure) — ship mcp.config.example.json instead
 mcp.config.json
