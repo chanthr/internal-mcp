@@ -68,6 +68,18 @@ const ConfigSchema = z
         roots: z.array(DriveRootSchema).default([]),
         /** Folder names to exclude from the search index (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */
         excludeFolders: z.array(z.string()).default([]),
+        /**
+         * Top-level folders (under a "biz" root) that hold one subfolder per customer: Clients/Acme/... → customer "Acme".
+         * Matched case-insensitively, ignoring a leading "01_" style number. Powers the semantic_search_drive `customer` filter.
+         */
+        customerFolders: z.array(z.string()).default(['Clients', 'Customers', '고객사']),
+        /**
+         * Optional ranking rules for semantic_search_drive: results whose path starts with `prefix` are labelled and
+         * their score multiplied by `weight` (e.g. prefer "Current/" over "Archive/"). First match wins. Default: none.
+         */
+        rank: z
+          .array(z.object({ prefix: z.string().min(1), label: z.string().min(1), weight: z.number().positive().max(10) }).strict())
+          .default([]),
       })
       .default({}),
     qdrant: z

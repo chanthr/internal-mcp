@@ -1,7 +1,7 @@
 /**
  * Drive 파일의 부모 체인 분류 — search_drive 가 민감/제외 폴더를 응답에서 거르는 데 사용.
  *
- * 왜: semantic 색인은 `06_증빙_PII`·`02_계약_법무`·`07_채용_HR`·deprecated 를 제외(exclude.ts)하지만,
+ * 왜: semantic 색인은 제외 폴더(config drive.excludeFolders, 예: "HR", "Contracts")를 건너뛰지만(exclude.ts),
  * search_drive 는 Drive API 를 직접 때려 service account 가 공유받은 전체를 노출했다 → 계약·PII·HR 유출 위험.
  * 이 모듈로 검색 결과를 "dev/biz root 하위 + 제외 폴더 미경유"로 한정한다.
  *
@@ -13,7 +13,7 @@ import { isExcludedName } from './exclude.js';
 
 const ROOT_IDS = new Set(DRIVE_ROOTS.map((r) => r.id));
 
-// 폴더 메타 캐시 (id → {name, parent}). TTL 부여 — 영구 캐시면 폴더를 민감 분류(`06_증빙_PII` 등)로
+// 폴더 메타 캐시 (id → {name, parent}). TTL 부여 — 영구 캐시면 폴더를 제외 이름(예: "HR")으로
 // rename 하거나 제외 폴더로 move 해도 옛 이름으로 분류돼 새로 민감해진 폴더가 재배포 전까지
 // 노출(under-exclude)된다. 짧은 TTL(기본 10분)로 분류 변경을 반영. rename/move 는 드물어 캐시 효과는 유지.
 const FOLDER_META_TTL_MS = Number(process.env.FOLDER_META_TTL_MS ?? 600_000);
@@ -75,7 +75,7 @@ export async function classifyAndPath(
 /**
  * 폴더 자신을 분류 — list_drive_folder 의 시작 폴더 검사용.
  * root 폴더면 'ok'(path ''), 그 밖에는 자기 이름이 제외 대상인지 본 뒤 부모 체인을 classifyAndPath 로 분류한다.
- * path 는 root 바로 아래부터 이 폴더까지(자기 이름 포함). 예: root/01_고객사/Acme → "01_고객사/Acme".
+ * path 는 root 바로 아래부터 이 폴더까지(자기 이름 포함). 예: root/Clients/Acme → "Clients/Acme".
  */
 export async function classifyFolder(
   drive: DriveClient,

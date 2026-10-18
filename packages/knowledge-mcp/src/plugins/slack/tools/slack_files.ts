@@ -20,18 +20,18 @@ import {
 /* ── slack_find_files ─────────────────────────────────── */
 
 const findInput = z.object({
-  query: z.string().optional().describe('선택. 파일명/내용 키워드 검색 (User token 필요).'),
-  channel: z.string().optional().describe('선택. 채널 ID(C…) 로 필터 (목록 모드).'),
-  user: z.string().optional().describe('선택. 업로더 user ID 로 필터 (목록 모드).'),
-  count: z.number().int().min(1).max(50).default(20).describe('최대 결과 수 (1-50). default 20.'),
+  query: z.string().optional().describe('Optional. Keyword search on file name/content (requires a User token).'),
+  channel: z.string().optional().describe('Optional. Filter by channel ID (C…) (list mode).'),
+  user: z.string().optional().describe('Optional. Filter by uploader user ID (list mode).'),
+  count: z.number().int().min(1).max(50).default(20).describe('Max number of results (1-50). default 20.'),
 });
 
 export const slackFindFilesTool = defineTool({
   name: 'slack_find_files',
   description:
-    'Slack 파일을 검색/목록. query 가 있으면 키워드 검색(User token — 봇이 멤버인 채널에 공유된 파일만), ' +
-    '없으면 채널/유저 필터로 목록(Bot token — 봇이 초대된 대화). ' +
-    '결과의 fileId 를 slack_get_file 에 넘겨 본문 다운로드.',
+    'Search or list Slack files. With query, runs a keyword search (User token; only files shared in channels the bot is a member of); ' +
+    'without it, lists files by channel/user filter (Bot token; conversations the bot was invited to). ' +
+    'Pass a fileId from the results to slack_get_file to download the content.',
   input: findInput,
   annotations: { readOnlyHint: true },
   run: (args) => handleSlackFindFiles(args),
@@ -70,7 +70,7 @@ function fileInScope(f: SlackFile, scope: Set<string> | null): boolean {
 function mapFile(f: SlackFile) {
   return {
     fileId: f.id,
-    name: f.name ?? f.title ?? '(이름 없음)',
+    name: f.name ?? f.title ?? '(no name)',
     title: f.title ?? null,
     mimetype: f.mimetype ?? null,
     filetype: f.filetype ?? null,
@@ -93,7 +93,7 @@ export async function handleSlackFindFiles(args: z.infer<typeof findInput>) {
       content: [
         {
           type: 'text' as const,
-          text: `[forbidden] 채널 '${channel}' 은 현재 직원 권한으로 접근 불가입니다.`,
+          text: `[forbidden] Channel '${channel}' is not accessible with your current permissions.`,
         },
       ],
       isError: true,
@@ -161,16 +161,16 @@ export async function handleSlackFindFiles(args: z.infer<typeof findInput>) {
 /* ── slack_get_file ───────────────────────────────────── */
 
 const getInput = z.object({
-  fileId: z.string().min(1).describe('Slack 파일 ID (예: F0123ABCD).'),
-  maxBytes: z.number().int().min(1).max(1_000_000).default(200_000).describe('텍스트 본문 최대 바이트 (default 200000).'),
+  fileId: z.string().min(1).describe('Slack file ID (e.g. F0123ABCD).'),
+  maxBytes: z.number().int().min(1).max(1_000_000).default(200_000).describe('Max bytes of text content (default 200000).'),
 });
 
 export const slackGetFileTool = defineTool({
   name: 'slack_get_file',
   description:
-    'Slack 파일 1개의 메타데이터 + 본문을 가져온다. 텍스트 파일(.md/.txt/.csv/.json/코드)은 ' +
-    '본문을 반환하고, 이미지·PDF 등 바이너리는 메타 + 다운로드 URL 만 반환. ' +
-    'fileId 는 slack_find_files 결과에서 얻는다.',
+    'Fetches the metadata + content of one Slack file. Text files (.md/.txt/.csv/.json/code) ' +
+    'return their content; binaries such as images and PDFs return metadata + a download URL only. ' +
+    'Get fileId from slack_find_files results.',
   input: getInput,
   annotations: { readOnlyHint: true },
   run: (args) => handleSlackGetFile(args),
@@ -198,7 +198,7 @@ export async function handleSlackGetFile(args: z.infer<typeof getInput>) {
         content: [
           {
             type: 'text' as const,
-            text: `[forbidden] 파일 '${fileId}' 은 봇이 멤버인 채널에 공유된 파일이 아닙니다.`,
+            text: `[forbidden] File '${fileId}' is not shared in any channel the bot is a member of.`,
           },
         ],
         isError: true,
@@ -211,7 +211,7 @@ export async function handleSlackGetFile(args: z.infer<typeof getInput>) {
         content: [
           {
             type: 'text' as const,
-            text: `[forbidden] 파일 '${fileId}' 은 현재 직원 권한으로 접근 불가입니다 (허용 채널 밖).`,
+            text: `[forbidden] File '${fileId}' is not accessible with your current permissions (outside the allowed channels).`,
           },
         ],
         isError: true,
@@ -247,7 +247,7 @@ export async function handleSlackGetFile(args: z.infer<typeof getInput>) {
             {
               ...meta,
               binary: true,
-              note: '바이너리 파일 — 본문 미포함. downloadUrl 은 Authorization: Bearer <SLACK token> 헤더로 받아야 함.',
+              note: 'Binary file; content not included. Fetch downloadUrl with an Authorization: Bearer <SLACK token> header.',
               downloadUrl: downloadUrl ?? null,
             },
             null,

@@ -233,7 +233,7 @@ export async function runReindex(argv: string[]): Promise<void> {
     if (recreate) {
       try {
         await (await getQdrantClient()).deleteCollection(DRIVE_COLLECTION);
-        console.log(`[index] collection '${DRIVE_COLLECTION}' 삭제 (recreate)`);
+        console.log(`[index] collection '${DRIVE_COLLECTION}' deleted (recreate)`);
       } catch {
         /* 없으면 무시 */
       }
@@ -257,7 +257,7 @@ export async function runReindex(argv: string[]): Promise<void> {
   //    체크포인트 — recreate 면 초기화, 아니면 이전 진행분 skip (429 중단 후 재개)
   if (recreate) clearCheckpoint();
   const done: Checkpoint = dryRun ? new Map() : loadCheckpoint();
-  if (done.size > 0) console.log(`[index] 체크포인트 — 이미 처리 ${done.size}개 skip`);
+  if (done.size > 0) console.log(`[index] checkpoint — skipping ${done.size} already processed files`);
 
   let totalChunks = 0;
   let totalTokens = 0;
@@ -349,7 +349,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       console.error('[index] listed 0 files — skipping cleanup so the existing index is not wiped. Check drive.roots and sharing.');
     } else {
       const pruned = await pruneStaleVectors(new Set(allFiles.map((f) => f.id)));
-      console.log(`[index] 정리 — 목록에 없는 파일 ${pruned}개의 벡터 삭제`);
+      console.log(`[index] cleanup — deleted vectors of ${pruned} files no longer listed`);
     }
   }
 

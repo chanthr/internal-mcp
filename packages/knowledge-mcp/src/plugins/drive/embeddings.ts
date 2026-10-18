@@ -103,7 +103,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
         const m = body.match(/try again in ([\d.]+)s/i);
         const base = m ? Math.ceil(parseFloat(m[1]) * 1000) : Math.min(60_000, 1000 * 2 ** attempt);
         const wait = Math.round(base + base * 0.3 * Math.random());
-        console.error(`[embeddings] ${resp.status} retry ${attempt + 1}/${policy.maxRetries} — ${wait}ms 대기`);
+        console.error(`[embeddings] ${resp.status} retry ${attempt + 1}/${policy.maxRetries} — waiting ${wait}ms`);
         await sleep(wait);
         continue;
       }
@@ -114,7 +114,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
       const vecs = sorted.map((d) => d.embedding);
       if (vecs.length !== inputs.length || vecs[0]?.length !== EMBEDDING_DIM) {
         throw new Error(
-          `[embeddings] 응답 불일치 — vecs=${vecs.length}/${inputs.length}, dim=${vecs[0]?.length}/${EMBEDDING_DIM}`,
+          `[embeddings] response mismatch — vecs=${vecs.length}/${inputs.length}, dim=${vecs[0]?.length}/${EMBEDDING_DIM}`,
         );
       }
       return vecs;
@@ -123,7 +123,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
       if (attempt >= policy.maxRetries || !parseRetryable(null, msg)) throw err;
       const base = Math.min(60_000, 1000 * 2 ** attempt);
       const wait = Math.round(base + base * 0.3 * Math.random());
-      console.error(`[embeddings] 예외 retry ${attempt + 1}/${policy.maxRetries} — ${wait}ms 대기 (${msg.slice(0, 80)})`);
+      console.error(`[embeddings] exception retry ${attempt + 1}/${policy.maxRetries} — waiting ${wait}ms (${msg.slice(0, 80)})`);
       await sleep(wait);
     }
   }

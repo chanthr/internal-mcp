@@ -215,11 +215,11 @@ class ClientsStore implements OAuthRegisteredClientsStore {
       this.putCache(client);
       // last_used 갱신 (best-effort — cleanup 판단용, 실패 무시)
       void store.touchOAuthClient(clientId).catch((e: unknown) => {
-        console.error('[oauth] client last_used 갱신 실패:', e instanceof Error ? e.message : e);
+        console.error('[oauth] could not update client last_used:', e instanceof Error ? e.message : e);
       });
       return client;
     } catch (e) {
-      console.error('[oauth] client 조회 실패(캐시 폴백):', e instanceof Error ? e.message : e);
+      console.error('[oauth] client lookup failed (cache only):', e instanceof Error ? e.message : e);
       return undefined;
     }
   }
@@ -232,7 +232,7 @@ class ClientsStore implements OAuthRegisteredClientsStore {
     } catch (e) {
       // fail-open: 저장 실패해도 등록은 성공(그 세션 동안 캐시로 유효). 커넥터 설정을 하드 실패시키는
       // 것보단 낫다(저장소 장애는 드묾). 경고 로그로 노출 — 재시작 시 유실될 수 있음.
-      console.error('[oauth] client 저장 실패(메모리만 유지, 재시작 시 유실 가능):', e instanceof Error ? e.message : e);
+      console.error('[oauth] could not save the client (kept in memory; lost on restart):', e instanceof Error ? e.message : e);
     }
     return client;
   }
@@ -272,7 +272,7 @@ async function recordRefreshToken(jti: string, email: string, clientId: string):
     throw new Error(`could not record the refresh token: ${e instanceof Error ? e.message : String(e)}`);
   }
   void store.purgeExpiredRefreshTokens().catch((e: unknown) => {
-    console.error('[oauth] refresh 만료분 정리 실패:', e instanceof Error ? e.message : e);
+    console.error('[oauth] could not purge expired refresh tokens:', e instanceof Error ? e.message : e);
   });
 }
 
@@ -292,11 +292,11 @@ async function consumeRefreshToken(jti: string, email: string, rotatedTo: string
     throw new Error(`could not check the refresh token: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (state !== 'revoked') return state;
-  console.error(`[oauth] ⚠️ 폐기된 refresh 재사용 감지 — ${email} 의 활성 refresh 전부 폐기`);
+  console.error(`[oauth] ⚠️ revoked refresh token reused — revoking every active refresh token of ${email}`);
   try {
     await store.revokeAllRefreshForEmail(email);
   } catch (e) {
-    console.error('[oauth] 계정 refresh 일괄 폐기 실패:', e instanceof Error ? e.message : e);
+    console.error('[oauth] could not revoke the account refresh tokens:', e instanceof Error ? e.message : e);
   }
   return 'reused';
 }

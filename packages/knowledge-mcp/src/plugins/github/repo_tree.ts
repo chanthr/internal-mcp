@@ -36,17 +36,17 @@ async function ghFetch(url: string, headers: Record<string, string>): Promise<Re
 const inputSchema = z.object({
   owner: z.string().min(1).describe('e.g. my-org'),
   repo: z.string().min(1).describe('e.g. my-repo'),
-  ref: z.string().optional().describe('브랜치/SHA (생략 시 default branch)'),
-  filterExt: z.string().optional().describe('확장자 필터 (쉼표구분, 예: "ts,tsx"). 생략 시 전체'),
+  ref: z.string().optional().describe('Branch/SHA (default branch if omitted)'),
+  filterExt: z.string().optional().describe('Extension filter (comma-separated, e.g. "ts,tsx"). All files if omitted'),
 });
 
 export const repoTreeTool = defineTool({
   name: 'repo_tree',
   description:
-    'GitHub repo 의 전체 파일 트리(경로 목록)를 반환. 사내 코드 질문 시 가장 먼저 호출해 구조를 파악한 뒤, ' +
-    '필요한 파일만 github_get_file_contents(owner, repo, path) 로 읽어 답하라. ' +
+    'Returns the full file tree (list of paths) of a GitHub repo. For questions about your code, call this first to learn the structure, ' +
+    'then read only the files you need with github_get_file_contents(owner, repo, path) and answer. ' +
     'Works with private repos too (search_code cannot index private repos, so use this tree+get combo). ' +
-    'filterExt 로 확장자 한정 가능(예: "ts,tsx,py").',
+    'Use filterExt to limit by extension (e.g. "ts,tsx,py").',
   input: inputSchema,
   annotations: { readOnlyHint: true },
   run: (args) => handleRepoTree(args),
@@ -68,7 +68,7 @@ export async function handleRepoTree(args: z.infer<typeof inputSchema>) {
   const { owner, repo, ref, filterExt } = args;
   if (!GH_NAME_RE.test(owner) || !GH_NAME_RE.test(repo)) {
     return {
-      content: [{ type: 'text' as const, text: '[invalid_input] owner/repo 이름 형식이 올바르지 않습니다.' }],
+      content: [{ type: 'text' as const, text: '[invalid_input] owner/repo name format is invalid.' }],
       isError: true,
     };
   }
@@ -81,7 +81,7 @@ export async function handleRepoTree(args: z.infer<typeof inputSchema>) {
       const r = await ghFetch(`${GITHUB_API}/repos/${owner}/${repo}`, headers);
       if (!r.ok) {
         return {
-          content: [{ type: 'text' as const, text: `[error] repo ${owner}/${repo} 접근 실패 (HTTP ${r.status}). 권한/이름 확인.` }],
+          content: [{ type: 'text' as const, text: `[error] Could not access repo ${owner}/${repo} (HTTP ${r.status}). Check permissions and the name.` }],
           isError: true,
         };
       }
@@ -94,7 +94,7 @@ export async function handleRepoTree(args: z.infer<typeof inputSchema>) {
     );
     if (!tr.ok) {
       return {
-        content: [{ type: 'text' as const, text: `[error] tree 조회 실패 (HTTP ${tr.status}, ref=${sha})` }],
+        content: [{ type: 'text' as const, text: `[error] Tree lookup failed (HTTP ${tr.status}, ref=${sha})` }],
         isError: true,
       };
     }
@@ -124,7 +124,7 @@ export async function handleRepoTree(args: z.infer<typeof inputSchema>) {
               total_files: files.length,
               shown: shown.length,
               truncated,
-              note: '필요 파일은 github_get_file_contents(owner, repo, path, ref) 로 조회',
+              note: 'Fetch the files you need with github_get_file_contents(owner, repo, path, ref)',
               files: shown,
             },
             null,

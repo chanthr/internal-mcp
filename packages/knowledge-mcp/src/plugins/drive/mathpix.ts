@@ -18,7 +18,7 @@ export function mathpixConfigured(): boolean {
 function mathpixHeaders(): Record<string, string> {
   const appId = process.env.MATHPIX_APP_ID;
   const appKey = process.env.MATHPIX_APP_KEY;
-  if (!appId || !appKey) throw new Error('[mathpix] MATHPIX_APP_ID / MATHPIX_APP_KEY 미설정');
+  if (!appId || !appKey) throw new Error('[mathpix] MATHPIX_APP_ID / MATHPIX_APP_KEY is not set');
   return { app_id: appId, app_key: appKey };
 }
 
@@ -50,7 +50,7 @@ async function mpFetch(
         continue;
       }
       throw new Error(
-        `[mathpix] fetch 실패(${url.split('/').slice(-1)[0]}): ${e instanceof Error ? e.message : String(e)}`,
+        `[mathpix] fetch failed (${url.split('/').slice(-1)[0]}): ${e instanceof Error ? e.message : String(e)}`,
       );
     }
   }
@@ -75,9 +75,9 @@ export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Pr
   );
 
   const upResp = await mpFetch(`${MATHPIX_API}/pdf`, { method: 'POST', headers, body: form }, 60_000);
-  if (!upResp.ok) throw new Error(`[mathpix] upload 실패 HTTP ${upResp.status}: ${(await upResp.text()).slice(0, 200)}`);
+  if (!upResp.ok) throw new Error(`[mathpix] upload failed HTTP ${upResp.status}: ${(await upResp.text()).slice(0, 200)}`);
   const { pdf_id } = (await upResp.json()) as { pdf_id?: string };
-  if (!pdf_id) throw new Error('[mathpix] pdf_id 없음');
+  if (!pdf_id) throw new Error('[mathpix] missing pdf_id');
 
   // 2. Poll (2s 간격)
   const deadline = Date.now() + maxWaitSec * 1000;
@@ -92,7 +92,7 @@ export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Pr
       if (!md.trim()) throw new Error('[mathpix] completed but empty markdown');
       return md;
     }
-    if (stData.status === 'error') throw new Error('[mathpix] 처리 error');
+    if (stData.status === 'error') throw new Error('[mathpix] processing error');
   }
   throw new Error(`[mathpix] timeout ${maxWaitSec}s (pdf_id=${pdf_id})`);
 }
@@ -111,7 +111,7 @@ export async function mathpixImageToMarkdown(buffer: Buffer, mimeType: string): 
       rm_spaces: false,
     }),
   });
-  if (!resp.ok) throw new Error(`[mathpix] image 실패 HTTP ${resp.status}`);
+  if (!resp.ok) throw new Error(`[mathpix] image failed HTTP ${resp.status}`);
   const data = (await resp.json()) as { text?: string };
   return data.text ?? '';
 }

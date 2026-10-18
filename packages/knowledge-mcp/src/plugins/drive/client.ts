@@ -138,8 +138,8 @@ export function resolveCredentials(env: NodeJS.ProcessEnv = process.env): Creden
   }
   throw new Error(
     '[drive] Drive credentials missing. Use one of:\n' +
-      '  (1) GOOGLE_SERVICE_ACCOUNT_KEY (inline JSON) ← 권장\n' +
-      '  (2) GOOGLE_APPLICATION_CREDENTIALS (JSON file path) ← 권장\n' +
+      '  (1) GOOGLE_SERVICE_ACCOUNT_KEY (inline JSON) ← recommended\n' +
+      '  (2) GOOGLE_APPLICATION_CREDENTIALS (JSON file path) ← recommended\n' +
       '  (3) GOOGLE_OAUTH_CLIENT_ID + _SECRET + _REFRESH_TOKEN ← fallback',
   );
 }

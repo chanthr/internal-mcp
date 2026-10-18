@@ -7,7 +7,12 @@
     "roots": [
       { "id": "PASTE_YOUR_DRIVE_FOLDER_ID", "name": "Docs", "source": "dev" }
     ],
-    "excludeFolders": ["Private", "HR", "Contracts"]
+    "excludeFolders": ["Private", "HR", "Contracts"],
+    "customerFolders": ["Clients"],
+    "rank": [
+      { "prefix": "Current/", "label": "current", "weight": 1.1 },
+      { "prefix": "Archive/", "label": "archive", "weight": 0.9 }
+    ]
   },
   "qdrant": { "collection": "acme_knowledge_v1" },
   "data": { "schema": "public" },

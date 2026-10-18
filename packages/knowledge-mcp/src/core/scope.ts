@@ -47,8 +47,8 @@ export function allowedDriveFolders(auth: AuthContext): string[] | null {
 
 /**
  * path 가 허용 폴더 prefix 하위인가. prefixes null = 전체 허용.
- * path 예: "개발문서/backend/..." · "01_고객사/Acme/제안서.pptx".
- * prefix 예: "01_고객사" → 그 하위 전부 허용. 정확 일치 또는 "prefix/" 로 시작.
+ * path 예: "Engineering/backend/..." · "Clients/Acme/proposal.pptx".
+ * prefix 예: "Clients" → 그 하위 전부 허용. 정확 일치 또는 "prefix/" 로 시작.
  */
 export function isPathInScope(path: string, prefixes: string[] | null): boolean {
   if (!prefixes || prefixes.length === 0) return true;

@@ -52,13 +52,13 @@ export function getSlackToken(kind: SlackTokenKind): string {
   if (kind === 'search') {
     const t = slackUserToken();
     if (!t) {
-      throw new SlackError('검색에는 User token 이 필요합니다. SLACK_USER_TOKEN (xoxp-…) 설정.');
+      throw new SlackError('Search requires a User token. Set SLACK_USER_TOKEN (xoxp-…).');
     }
     return t;
   }
   const t = slackBotToken();
   if (!t) {
-    throw new SlackError('Bot token 이 없습니다. SLACK_BOT_TOKEN (xoxb-…) 설정.');
+    throw new SlackError('Bot token is missing. Set SLACK_BOT_TOKEN (xoxb-…).');
   }
   return t;
 }
@@ -105,7 +105,7 @@ export async function slackApi<T = any>(
           await sleep(ra * 1000);
           continue;
         }
-        throw new SlackError(`${method} 실패: rate limited (429)`);
+        throw new SlackError(`${method} failed: rate limited (429)`);
       }
       const json = (await resp.json()) as any;
       if (!json.ok) {
@@ -116,7 +116,7 @@ export async function slackApi<T = any>(
         }
         const detail = json.error ?? `HTTP ${resp.status}`;
         const needed = json.needed ? ` (needed scope: ${json.needed})` : '';
-        throw new SlackError(`${method} 실패: ${detail}${needed}`);
+        throw new SlackError(`${method} failed: ${detail}${needed}`);
       }
       return json as T;
     } catch (e) {
@@ -129,7 +129,7 @@ export async function slackApi<T = any>(
         }
         throw new SlackError(`${method} timeout 15s`);
       }
-      throw new SlackError(`${method} fetch 실패: ${e instanceof Error ? e.message : String(e)}`);
+      throw new SlackError(`${method} fetch failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       clearTimeout(timeoutId);
     }
@@ -281,7 +281,7 @@ export async function downloadSlackFile(
       signal: ctrl.signal,
     });
     if (!resp.ok) {
-      throw new SlackError(`파일 다운로드 실패: HTTP ${resp.status}`);
+      throw new SlackError(`File download failed: HTTP ${resp.status}`);
     }
     const buf = Buffer.from(await resp.arrayBuffer());
     const truncated = buf.length > maxBytes;
@@ -293,9 +293,9 @@ export async function downloadSlackFile(
   } catch (e) {
     if (e instanceof SlackError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {
-      throw new SlackError('파일 다운로드 timeout 15s');
+      throw new SlackError('File download timeout 15s');
     }
-    throw new SlackError(`파일 다운로드 실패: ${e instanceof Error ? e.message : String(e)}`);
+    throw new SlackError(`File download failed: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearTimeout(timeoutId);
   }

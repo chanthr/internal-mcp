@@ -276,8 +276,11 @@ client that starts the server from elsewhere still finds them. `MCP_CONFIG_JSON`
 | Config key | Meaning |
 | --- | --- |
 | `orgId` | Organization identifier carried in the auth context |
-| `branding.name` / `branding.instructions` | Server name. `instructions` replaces the generated guide (base line plus each plugin's notes) |
-| `drive.roots[]` / `drive.excludeFolders[]` | Folders to index and search, and folder names skipped everywhere |
+| `branding.name` / `branding.instructions` | Name shown on the sign-in consent page and in OAuth metadata. `instructions` replaces the guide the client receives (base line plus each plugin's notes) |
+| `drive.roots[]` | `{ id, name, source }` folders to index and search. `source` is `dev` (Markdown with frontmatter) or `biz` (PDF, Office and Google files) |
+| `drive.excludeFolders[]` | Folder names skipped everywhere: index, search, read and list. Case and spacing are ignored |
+| `drive.customerFolders[]` | Top-level `biz` folders with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
+| `drive.rank[]` | Optional `{ prefix, label, weight }` rules for `semantic_search_drive`, e.g. prefer `Current/` (weight 1.1) over `Archive/` (0.9). Default: none |
 | `qdrant.collection` | Vector collection name (env `QDRANT_COLLECTION` overrides) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Who may sign in with Google |
 | `access.viewerTools[]` | Plugin ids open to signed-in people without a users entry. Default: none |

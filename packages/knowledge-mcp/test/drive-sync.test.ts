@@ -47,6 +47,27 @@ test('GITHUB_PAT wins over GITHUB_TOKEN', () => {
   delete process.env.GITHUB_TOKEN;
 });
 
+test('customer folders come from config (Clients, Customers, 고객사 by default), numbering ignored', async () => {
+  const { deriveBizMeta } = await import('../src/plugins/drive/indexer.js');
+  assert.equal(deriveBizMeta('Clients/Acme/proposal.pdf', 'biz').doc_customer, 'Acme');
+  assert.equal(deriveBizMeta('01_고객사/Globex/계약.docx', 'biz').doc_customer, 'Globex');
+  assert.equal(deriveBizMeta('02_Customers/Initech/a.pdf', 'biz').doc_customer, 'Initech');
+  assert.equal(deriveBizMeta('Sales/deck.pdf', 'biz').doc_customer, null);
+  assert.equal(deriveBizMeta('Clients/Acme/a.md', 'dev').doc_customer, null);
+});
+
+test('semantic_search_drive: no company-specific filters left in the schema', async () => {
+  const { semanticSearchDriveTool } = await import('../src/plugins/drive/tools/semantic_search_drive.js');
+  const { inputJsonSchema } = await import('../src/plugin/result.js');
+  const props = inputJsonSchema('semantic_search_drive', semanticSearchDriveTool.input).properties as Record<string, { type?: string; enum?: unknown }>;
+  assert.equal('fileType' in props, false);
+  assert.equal('docTier' in props, false);
+  assert.equal(props.docStatus?.type, 'string');
+  assert.equal(props.docStatus?.enum, undefined);
+  assert.equal(props.docType?.enum, undefined);
+  assert.doesNotMatch(semanticSearchDriveTool.description, /[가-힣]/);
+});
+
 test('folder change: indexed paths are rechecked', { skip: qdrantUrl ? false : 'set QDRANT_TEST_URL' }, async () => {
   const q = new QdrantClient(qdrantUrl!);
   await q.createCollection(collection, { vectors: { size: 4, distance: 'Cosine' } });

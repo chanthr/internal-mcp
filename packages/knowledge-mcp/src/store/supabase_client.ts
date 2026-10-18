@@ -20,7 +20,7 @@ export function getSupabase(): SupabaseClient {
   if (!url || !key) {
     throw new Error(
       '[supabase] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing in env. ' +
-        'MCP_STORE=supabase 는 두 키가 모두 있어야 동작.'
+        'The Supabase store needs both values.'
     );
   }
 

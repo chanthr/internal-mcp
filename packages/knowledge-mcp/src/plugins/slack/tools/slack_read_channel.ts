@@ -21,21 +21,21 @@ import {
 } from '../api.js';
 
 const DESCRIPTION =
-  'Slack 채널의 최근 대화를 읽는다. channel 은 이름(#dev) 또는 ID(C…). ' +
-  '**기본으로 각 메시지의 thread 답글까지 함께 가져온다(includeThreads=true 기본).** ' +
+  'Reads the recent conversation in a Slack channel. channel is a name (#dev) or an ID (C…). ' +
+  '**By default it also fetches the thread replies of each message (includeThreads=true by default).** ' +
   'Slack discussions and decisions often live in thread replies, so ' +
-  '윗줄(부모 메시지)만 보면 맥락이 통째로 누락된다 — 답글까지 읽어야 실제 결론이 보인다. ' +
-  '윗줄만 빠르게 훑고 싶을 때만 includeThreads=false 로 끈다. ' +
-  '봇이 해당 채널 멤버여야 조회 가능 (비공개 채널은 초대 필요).';
+  'reading only the top-level (parent) messages misses the context entirely; read the replies to see the actual conclusion. ' +
+  'Turn it off with includeThreads=false only when you want to skim the top-level messages quickly. ' +
+  'The bot must be a member of the channel to read it (private channels need an invite).';
 
 const inputSchema = z.object({
-  channel: z.string().min(1).describe('채널 이름(#dev 또는 dev) 또는 ID(C…).'),
-  limit: z.number().int().min(1).max(200).default(50).describe('메시지 수 (1-200). default 50.'),
-  oldest: z.string().optional().describe('선택. 이 시점 이후만 (YYYY-MM-DD 또는 Unix ts).'),
+  channel: z.string().min(1).describe('Channel name (#dev or dev) or ID (C…).'),
+  limit: z.number().int().min(1).max(200).default(50).describe('Number of messages (1-200). default 50.'),
+  oldest: z.string().optional().describe('Optional. Only messages after this point (YYYY-MM-DD or Unix ts).'),
   includeThreads: z
     .boolean()
     .default(true)
-    .describe('thread 답글 포함 여부. **default true** — 답글에 실제 논의가 담겨 있어 기본 포함. 부모 메시지만 빠르게 보려면 false.'),
+    .describe('Whether to include thread replies. **default true**: included by default because the replies hold the actual discussion. Set false to see only the parent messages quickly.'),
 });
 
 export const slackReadChannelTool = defineTool({
@@ -66,14 +66,14 @@ function toOldestTs(oldest: string | undefined): string | undefined {
 
 async function resolveChannelId(input: string): Promise<{ id: string; name: string | null }> {
   // 이미 ID 형태 (공개 C… / 비공개 G…). DM(D…)은 받지 않는다.
-  if (/^D[A-Z0-9]{6,}$/.test(input)) throw new SlackError('DM 은 읽을 수 없습니다.');
+  if (/^D[A-Z0-9]{6,}$/.test(input)) throw new SlackError('DMs cannot be read.');
   if (/^[CG][A-Z0-9]{6,}$/.test(input)) return { id: input, name: null };
   const cleaned = input.replace(/^#/, '');
   // 공용 채널명 캐시(TTL) 조회 — 매 호출 conversations.list 순차 순회를 warmup 후 0콜로.
   const byName = await loadChannelNameMap();
   const found = byName.get(cleaned);
   if (found) return { id: found.id, name: found.name };
-  throw new SlackError(`채널 "${input}" 을 찾을 수 없음 (봇이 멤버가 아니거나 이름 오타).`);
+  throw new SlackError(`Channel "${input}" not found (the bot is not a member, or the name has a typo).`);
 }
 
 // user-map·mapLimit 은 slack.ts 공용 버전(loadSlackUserMap·mapLimit) 사용 — 도구별 중복 구현·캐시
@@ -90,7 +90,7 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
     if (!botMemberIds.has(channelId)) {
       return {
         content: [
-          { type: 'text' as const, text: `[forbidden] 채널 '${channel}' 은 봇이 멤버가 아닙니다. 봇을 채널에 초대해야 읽을 수 있습니다.` },
+          { type: 'text' as const, text: `[forbidden] The bot is not a member of channel '${channel}'. Invite the bot to the channel to read it.` },
         ],
         isError: true,
       };
@@ -100,7 +100,7 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
     if (channelScope && !channelScope.has(channelId)) {
       return {
         content: [
-          { type: 'text' as const, text: `[forbidden] 채널 '${channel}' 은 현재 직원 권한으로 접근 불가입니다.` },
+          { type: 'text' as const, text: `[forbidden] Channel '${channel}' is not accessible with your current permissions.` },
         ],
         isError: true,
       };

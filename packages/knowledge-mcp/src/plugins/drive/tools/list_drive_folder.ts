@@ -7,7 +7,7 @@
  *
  *   - folderNames[] / folderIds[] : 서로 다른 위치의 폴더 여러 개를 병렬 list.
  *   - depth (1~3)                 : 한 폴더의 하위 트리를 N단계까지 한 번에.
- *     예) 고객사 10곳 + 각 폴더 문서 → list_drive_folder({ folderName: "01_고객사", depth: 2 }).
+ *     예) 고객사 폴더 10곳 + 각 폴더 문서 → list_drive_folder({ folderName: "Clients", depth: 2 }).
  *
  * 보안: 시작 폴더는 색인 root 하위이고 제외 폴더(PII·계약·HR 등)를 거치지 않을 때만 연다(read_drive_file 과 동일 가드).
  *   이름으로 찾을 때도 root 하위 후보만 고른다. 재귀 walk 는 제외 폴더로 확산하지 않는다
@@ -27,41 +27,41 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const MAX_FOLDER_VISITS = 120; // 재귀 폭발 방지 — 총 폴더 방문(list 호출) 상한
 
 const DESCRIPTION =
-  'Google Drive 폴더의 자식 파일·폴더 list. folderId/folderName(단일) 또는 folderIds/folderNames(여러 개 한 번에). ' +
-  '**"고객사 전부/명단", "X 폴더에 뭐 있어" 같은 전수·구조 질문은 semantic_search 가 아니라 이 도구.** ' +
-  '**여러 폴더거나 하위까지 봐야 하면 폴더마다 따로 호출하지 말고 한 번에 묶어라:** ' +
-  'folderNames=[...] 로 여러 폴더를 병렬, 또는 depth(1~3)로 하위 트리까지 한 번에 ' +
-  '(예: 고객사 10곳 + 각 폴더 문서 → folderName="01_고객사", depth=2). ' +
-  'folderName 은 이름으로 ID 를 자동 resolve. 결과의 id 로 read_drive_file 호출해 원문 read.';
+  'Lists the child files and folders of a Google Drive folder. Use folderId/folderName (one) or folderIds/folderNames (several at once). ' +
+  '**For exhaustive or structural questions such as "all clients / the client list" or "what is in folder X", use this tool, not semantic_search.** ' +
+  '**If you need several folders or their subfolders, do not call once per folder; batch them in one call:** ' +
+  'folderNames=[...] lists several folders in parallel, or depth (1~3) returns the subtree in the same call ' +
+  '(e.g. 10 client folders + the documents in each → folderName="Clients", depth=2). ' +
+  'folderName resolves the ID from the name automatically. Call read_drive_file with a result id to read the original.';
 
 const inputSchema = z
   .object({
-    folderId: z.string().min(1).optional().describe('Drive folder ID (단일). "root" = My Drive 최상위.'),
-    folderName: z.string().min(1).optional().describe('폴더 이름 (단일, 예: "01_고객사"). ID 를 몰라도 이름으로 조회.'),
+    folderId: z.string().min(1).optional().describe('Drive folder ID (one). "root" = top level of My Drive.'),
+    folderName: z.string().min(1).optional().describe('Folder name (one, e.g. "Clients"). Looks the folder up by name when you do not know the ID.'),
     folderIds: z
       .array(z.string().min(1))
       .min(1)
       .max(20)
       .optional()
-      .describe('여러 folder ID 를 한 번에 병렬 list (1~20). 순차 호출보다 훨씬 빠름.'),
+      .describe('List several folder IDs in parallel in one call (1~20). Much faster than sequential calls.'),
     folderNames: z
       .array(z.string().min(1))
       .min(1)
       .max(20)
       .optional()
-      .describe('여러 폴더 이름을 한 번에 병렬 list (1~20). 순차 호출보다 훨씬 빠름.'),
+      .describe('List several folder names in parallel in one call (1~20). Much faster than sequential calls.'),
     depth: z
       .number()
       .int()
       .min(1)
       .max(3)
       .default(1)
-      .describe('재귀 깊이 1~3. default 1(직속 자식만). 2=손자까지, 3=증손자까지 — 하위 트리를 1회 호출로 받는다.'),
-    pageSize: z.number().int().min(1).max(200).default(50).describe('폴더당 최대 자식 수 (1-200). default 50.'),
+      .describe('Recursion depth 1~3. default 1 (direct children only). 2 = down to grandchildren, 3 = down to great-grandchildren; returns the subtree in a single call.'),
+    pageSize: z.number().int().min(1).max(200).default(50).describe('Max children per folder (1-200). default 50.'),
   })
   .refine(
     (v) => v.folderId || v.folderName || v.folderIds?.length || v.folderNames?.length,
-    { message: 'folderId / folderName / folderIds / folderNames 중 하나는 필수' },
+    { message: 'One of folderId / folderName / folderIds / folderNames is required' },
   );
 
 export const listDriveFolderTool = defineTool({
@@ -204,14 +204,14 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
           // 시작 폴더 가드 — 색인 root 하위 + 제외 폴더 미경유일 때만 연다.
           const c = await classifyFolder(drive, spec.id);
           if (c.cls !== 'ok') {
-            return { folderId: spec.id, folderName: null, error: '[forbidden] 접근 범위 밖 폴더입니다 (색인 대상 root 밖 / 민감 폴더).' };
+            return { folderId: spec.id, folderName: null, error: '[forbidden] This folder is outside the allowed scope (outside the indexed roots / sensitive folder).' };
           }
           fid = spec.id;
           rootPath = c.path;
         } else {
           const resolved = await resolveFolderId(drive, spec.name!);
           if (!resolved) {
-            return { folderId: null, folderName: spec.name, error: `폴더 "${spec.name}" 을 찾지 못함 (색인 대상 root 하위만 조회)` };
+            return { folderId: null, folderName: spec.name, error: `Folder "${spec.name}" not found (only folders under the indexed roots are searched)` };
           }
           fid = resolved.id;
           rootPath = resolved.path;

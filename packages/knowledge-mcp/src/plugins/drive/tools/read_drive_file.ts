@@ -18,26 +18,26 @@ import { getQdrantClient, DRIVE_COLLECTION } from '../qdrant.js';
 import { MAX_FILE_BYTES } from '../settings.js';
 
 const DESCRIPTION =
-  'Google Drive 파일 본문 read. markdown/text 는 raw, Google Docs/Sheets/Slides 는 export, ' +
-  '**PDF·Word(docx)·PowerPoint(pptx)·Excel(xlsx)·이미지는 본문 텍스트로 추출**(스캔 PDF·이미지는 OCR). ' +
-  'search_drive / semantic_search_drive 응답의 id (File ID) 사용. ' +
-  'semantic_search_drive 로 관련 청크를 찾은 뒤 원문 전체 맥락이 필요할 때 호출하는 2단계 검색의 2단계. ' +
-  '**여러 문서를 읽어야 하면 fileId 를 하나씩 여러 번 호출하지 말고 fileIds=[...] 로 한 번에 (병렬 — 순차보다 훨씬 빠름).** ' +
-  '큰 파일은 maxChars 로 truncate.';
+  'Reads the content of a Google Drive file. markdown/text is returned raw, Google Docs/Sheets/Slides are exported, ' +
+  '**PDF, Word (docx), PowerPoint (pptx), Excel (xlsx), and images are extracted to text** (scanned PDFs and images use OCR). ' +
+  'Use the id (File ID) from search_drive / semantic_search_drive results. ' +
+  'This is step 2 of a two-step search: call it after semantic_search_drive finds relevant chunks and you need the full context of the original. ' +
+  '**To read several documents, do not call once per fileId; pass fileIds=[...] in one call (parallel, much faster than sequential).** ' +
+  'Large files are truncated to maxChars.';
 
 const inputSchema = z
   .object({
-    fileId: z.string().min(1).optional().describe('Drive file ID (단일). fileIds 와 둘 중 하나.'),
+    fileId: z.string().min(1).optional().describe('Drive file ID (one). Use either this or fileIds.'),
     fileIds: z
       .array(z.string().min(1))
       .min(1)
       .max(10)
       .optional()
-      .describe('여러 Drive file ID 를 한 번에 병렬 read (1~10개). 순차 호출보다 훨씬 빠름. fileId 와 둘 중 하나.'),
-    maxChars: z.number().int().min(1000).max(200000).default(50000).describe('파일당 최대 반환 문자 수 (1000-200000). default 50000.'),
+      .describe('Read several Drive file IDs in parallel in one call (1~10). Much faster than sequential calls. Use either this or fileId.'),
+    maxChars: z.number().int().min(1000).max(200000).default(50000).describe('Max characters returned per file (1000-200000). default 50000.'),
   })
   .refine((d) => d.fileId || (d.fileIds && d.fileIds.length > 0), {
-    message: 'fileId 또는 fileIds 중 하나는 필수',
+    message: 'One of fileId or fileIds is required',
   });
 
 export const readDriveFileTool = defineTool({
@@ -130,7 +130,7 @@ async function readOne(
     if (cls !== 'ok' || !isPathInScope(path, folderScope)) {
       return {
         fileId,
-        error: '[forbidden] 접근 범위 밖 파일입니다 (색인 대상 root 밖 / 민감 폴더 / 직원 권한 밖).',
+        error: '[forbidden] This file is outside the allowed scope (outside the indexed roots / sensitive folder / outside your permissions).',
       };
     }
 
@@ -139,7 +139,7 @@ async function readOne(
     const tooLarge = !!m.size && Number(m.size) > MAX_FILE_BYTES;
     const tooLargeError = {
       fileId,
-      error: `파일이 너무 커서 읽지 않습니다 (${m.size}B > ${MAX_FILE_BYTES}B, DRIVE_MAX_FILE_BYTES).`,
+      error: `File is too large to read (${m.size}B > ${MAX_FILE_BYTES}B, DRIVE_MAX_FILE_BYTES).`,
     };
 
     let body: string;

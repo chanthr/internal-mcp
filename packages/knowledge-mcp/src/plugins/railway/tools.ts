@@ -18,7 +18,7 @@ const RAILWAY_API = 'https://backboard.railway.app/graphql/v2';
 
 function railwayHeaders(): Record<string, string> {
   const token = process.env.RAILWAY_TOKEN || process.env.RAILWAY_MCP_TOKEN;
-  if (!token) throw new Error('[railway] RAILWAY_TOKEN (또는 RAILWAY_MCP_TOKEN) 미설정');
+  if (!token) throw new Error('[railway] RAILWAY_TOKEN (or RAILWAY_MCP_TOKEN) is not set');
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
@@ -57,8 +57,8 @@ function errOut(e: unknown) {
 export const railwayServicesTool = defineTool({
   name: 'railway_services',
   description:
-    'Railway 전체 프로젝트·서비스·환경 목록. 배포 상태/로그 조회 전 먼저 호출해 ' +
-    'projectId / serviceId / environmentId 를 파악하라. (team token 이면 전체, project token 이면 한 프로젝트)',
+    'Lists all Railway projects, services, and environments. Call this first, before checking deployment status or logs, ' +
+    'to find projectId / serviceId / environmentId. (A team token returns everything; a project token returns one project)',
   annotations: { readOnlyHint: true },
   run: () => handleRailwayServices(),
 });
@@ -94,14 +94,14 @@ const depSchema = z.object({
   projectId: z.string().min(1),
   serviceId: z.string().min(1),
   environmentId: z.string().min(1),
-  limit: z.number().int().min(1).max(20).default(5).describe('기본 5 (1~20)'),
+  limit: z.number().int().min(1).max(20).default(5).describe('Default 5 (1~20)'),
 });
 
 export const railwayDeploymentsTool = defineTool({
   name: 'railway_deployments',
   description:
-    'Railway 특정 서비스의 최근 배포 상태(SUCCESS/FAILED/BUILDING/CRASHED 등). ' +
-    'railway_services 로 얻은 projectId·serviceId·environmentId 를 넣는다.',
+    'Recent deployment status of one Railway service (SUCCESS/FAILED/BUILDING/CRASHED, etc.). ' +
+    'Pass the projectId, serviceId, and environmentId returned by railway_services.',
   input: depSchema,
   annotations: { readOnlyHint: true },
   run: (args) => handleRailwayDeployments(args),
@@ -136,16 +136,16 @@ export async function handleRailwayDeployments(args: z.infer<typeof depSchema>) 
 // ── 3. railway_logs — 배포/빌드 로그 ──
 const logSchema = z.object({
   deploymentId: z.string().min(1),
-  type: z.enum(['deploy', 'build']).default('deploy').describe('기본 deploy'),
-  limit: z.number().int().min(1).max(500).default(100).describe('기본 100 (1~500)'),
-  filter: z.string().optional().describe('로그 필터 문자열 (선택)'),
+  type: z.enum(['deploy', 'build']).default('deploy').describe('Default deploy'),
+  limit: z.number().int().min(1).max(500).default(100).describe('Default 100 (1~500)'),
+  filter: z.string().optional().describe('Log filter string (optional)'),
 });
 
 export const railwayLogsTool = defineTool({
   name: 'railway_logs',
   description:
-    'Railway 배포의 로그 (type="deploy" 런타임 로그 / "build" 빌드 로그). ' +
-    'railway_deployments 로 얻은 deploymentId 를 넣는다.',
+    'Logs of a Railway deployment (type="deploy" runtime logs / "build" build logs). ' +
+    'Pass the deploymentId returned by railway_deployments.',
   input: logSchema,
   annotations: { readOnlyHint: true },
   run: (args) => handleRailwayLogs(args),

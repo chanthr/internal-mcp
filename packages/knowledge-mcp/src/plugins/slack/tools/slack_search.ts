@@ -17,26 +17,26 @@ import {
 } from '../api.js';
 
 const DESCRIPTION =
-  'Slack 워크스페이스에서 메시지를 키워드로 검색. Slack 검색 연산자 사용 가능 ' +
-  '(예: "배포 in:#dev", "from:@alex 결정", "JSON-LD after:2026-01-01"). ' +
-  '사내 논의·결정이 Slack 에 있을 때 Drive 검색과 함께 사용. ' +
-  '**기본으로 봇이 멤버인 모든 채널을 검색한다**(공개·비공개 무관, 봇이 초대된 채널 전체). 채널을 좁히지 말고 바로 키워드로 검색하라 — 특정 채널만 한정할 때만 in:#채널. DM·봇 미초대 채널은 제외. ' +
-  '**검색은 단일 메시지만 매칭한다 — 실제 논의·결론은 그 메시지의 thread 답글에 있는 경우가 많다.** ' +
-  '기본(expandThreads=true)으로 봇이 읽을 수 있는 채널의 매칭은 주변 thread 맥락까지 함께 가져온다. ' +
-  'thread_unavailable=true 면 답글이 더 있으나 봇이 그 채널 멤버가 아니라 못 읽은 것 — slack_read_channel 로도 막힌다. ' +
-  '**"최근/근황/최신 진행상황/누가 뭐라 했나" 처럼 최신성이 중요한 질문이면 sort="timestamp"(최신순) 를 써라.** User token 필요.';
+  'Search Slack workspace messages by keyword. Slack search operators are supported ' +
+  '(e.g. "deploy in:#dev", "from:@alex decision", "release after:2026-01-01"). ' +
+  'Use it together with Drive search when internal discussions or decisions live in Slack. ' +
+  '**By default it searches every channel the bot is a member of** (public or private, every channel the bot was invited to). Do not narrow the channel first; search by keyword right away, and add in:#channel only to restrict to one channel. DMs and channels the bot was not invited to are excluded. ' +
+  '**Search matches single messages only; the actual discussion and conclusion are often in the thread replies of that message.** ' +
+  'By default (expandThreads=true), matches in channels the bot can read come with the surrounding thread context. ' +
+  'thread_unavailable=true means more replies exist but the bot is not a member of that channel and could not read them; slack_read_channel is blocked too. ' +
+  '**For questions where recency matters, such as "recent / latest status / newest progress / who said what", use sort="timestamp" (newest first).** Requires a User token.';
 
 const inputSchema = z.object({
-  query: z.string().min(1).describe('검색어. Slack 연산자(in:, from:, after:, before:) 지원.'),
-  count: z.number().int().min(1).max(50).default(20).describe('최대 결과 수 (1-50). default 20.'),
+  query: z.string().min(1).describe('Search query. Supports Slack operators (in:, from:, after:, before:).'),
+  count: z.number().int().min(1).max(50).default(20).describe('Max number of results (1-50). default 20.'),
   sort: z
     .enum(['score', 'timestamp'])
     .default('score')
-    .describe('"score"(관련도, default) 또는 "timestamp"(최신순). 최신 논의·근황 질문이면 timestamp.'),
+    .describe('"score" (relevance, default) or "timestamp" (newest first). Use timestamp for questions about the latest discussion or status.'),
   expandThreads: z
     .boolean()
     .default(true)
-    .describe('매칭 메시지가 thread 안이면 주변 답글까지 가져온다. default true(논의 맥락 보존). 평면 결과만 빠르게 보려면 false.'),
+    .describe('If a matching message is inside a thread, also fetch the surrounding replies. default true (keeps the discussion context). Set false for quick flat results only.'),
 });
 
 export const slackSearchTool = defineTool({
