@@ -73,7 +73,7 @@ export async function runIncrementalSync(): Promise<SyncResult> {
       await drive.changes.list({
         pageToken: cursor,
         fields:
-          'nextPageToken, newStartPageToken, changes(removed, fileId, file(id,name,mimeType,modifiedTime,trashed))',
+          'nextPageToken, newStartPageToken, changes(removed, fileId, file(id,name,mimeType,modifiedTime,trashed,size))',
         pageSize: 100,
         includeRemoved: true,
         includeItemsFromAllDrives: true,
@@ -101,7 +101,10 @@ export async function runIncrementalSync(): Promise<SyncResult> {
         }
         const resolved = await resolvePathAndSource(drive, f.id, f.name);
         // 제외: dev/biz 외 폴더 + 민감(PII/계약/HR/deprecated) + 개발 아티팩트(node_modules 등). SSOT: lib/exclude.ts
+        // 색인 대상 밖으로 옮겨졌거나 제외 폴더로 들어간 파일은 남아 있던 벡터를 지운다
+        // (건너뛰기만 하면 옛 청크 본문이 semantic_search_drive 에 계속 나온다).
         if (!resolved || isExcludedPath(resolved.path)) {
+          await deleteFileVectors(f.id);
           skipped++;
           continue;
         }
@@ -112,6 +115,7 @@ export async function runIncrementalSync(): Promise<SyncResult> {
           modifiedTime: f.modifiedTime ?? '',
           source: resolved.source,
           mimeType: f.mimeType,
+          size: f.size ? Number(f.size) : undefined,
         });
         changed++;
       } catch (e) {

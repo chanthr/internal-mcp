@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import { getAuth } from '../lib/context.js';
 import { allowedDriveFolders, isPathInScope } from '../lib/scope.js';
+import { isExcludedPath } from '../lib/exclude.js';
 import { embedQuery } from '../lib/embeddings.js';
 import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from '../lib/qdrant.js';
 
@@ -220,11 +221,13 @@ async function _handleSemanticSearchDrive(args: unknown) {
     })
     .sort((a, b) => b.adj - a.adj);
 
-  // 3c. 직원별 Drive 폴더 scope 필터 (admin·미설정 = 전체) 적용 후 topK 선별
+  // 3c. 제외 폴더 재확인 + 직원별 Drive 폴더 scope 필터 (admin·미설정 = 전체) 적용 후 topK 선별.
+  // 제외 재확인: excludeFolders 를 나중에 추가했거나 아직 sync 가 돌지 않아 남은 옛 청크를 응답에서 뺀다.
   const folderScope = allowedDriveFolders(auth);
-  const ranked = (
-    folderScope ? reranked.filter((x) => isPathInScope(x.p.file_path ?? '', folderScope)) : reranked
-  ).slice(0, topK);
+  const ranked = reranked
+    .filter((x) => !isExcludedPath(x.p.file_path ?? ''))
+    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope))
+    .slice(0, topK);
 
   // 4. Markdown 포맷 (사람·LLM 둘 다 읽기 좋음)
   const lines: string[] = [];

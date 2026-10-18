@@ -9,17 +9,18 @@
  *   - depth (1~3)                 : 한 폴더의 하위 트리를 N단계까지 한 번에.
  *     예) 고객사 10곳 + 각 폴더 문서 → list_drive_folder({ folderName: "01_고객사", depth: 2 }).
  *
- * 보안: 재귀 walk 는 EXCLUDED_FOLDER_NAMES(PII·계약·HR·deprecated)로 자동 확산하지 않는다
- *   (해당 폴더는 이름만 표기하고 자식 미전개 — excluded:true). 단일·명시 호출의 기존 동작은 무손상.
+ * 보안: 시작 폴더는 색인 root 하위이고 제외 폴더(PII·계약·HR 등)를 거치지 않을 때만 연다(read_drive_file 과 동일 가드).
+ *   이름으로 찾을 때도 root 하위 후보만 고른다. 재귀 walk 는 제외 폴더로 확산하지 않는다
+ *   (해당 폴더는 이름만 표기하고 자식 미전개 — excluded:true).
  *
  * 안전장치: 총 폴더 방문(=Drive list 호출) 상한 MAX_FOLDER_VISITS — 깊고 넓은 트리의 호출 폭발 방지.
  */
 import { z } from 'zod';
 import { getDriveClient, escapeDriveQuery } from '../integrations/drive.js';
 import { getAuth } from '../lib/context.js';
-import { EXCLUDED_FOLDER_NAMES } from '../lib/exclude.js';
+import { isExcludedName } from '../lib/exclude.js';
 import { allowedDriveFolders, isPathInScope } from '../lib/scope.js';
-import { classifyAndPath } from '../lib/drive_path.js';
+import { classifyFolder } from '../lib/drive_path.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const MAX_FOLDER_VISITS = 120; // 재귀 폭발 방지 — 총 폴더 방문(list 호출) 상한
@@ -99,15 +100,23 @@ type TreeNode = {
 
 type Budget = { visits: number };
 
-/** folderName → folder ID (Shared Drive 포함). 못 찾으면 null. */
-async function resolveFolderId(drive: DriveClient, name: string): Promise<string | null> {
+/**
+ * folderName → 색인 root 하위의 열 수 있는 폴더 (Shared Drive 포함). 못 찾으면 null.
+ * 같은 이름 폴더가 여럿이면 root 밖·제외 경로 후보를 건너뛰고 처음 'ok' 인 것을 고른다.
+ */
+async function resolveFolderId(drive: DriveClient, name: string): Promise<{ id: string; path: string } | null> {
   const res = await drive.files.list({
     q: `name = '${escapeDriveQuery(name)}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
     fields: 'files(id, name)',
-    pageSize: 5,
+    pageSize: 10,
     ...ALL_DRIVES,
   });
-  return res.data.files?.[0]?.id ?? null;
+  for (const f of res.data.files ?? []) {
+    if (!f.id) continue;
+    const c = await classifyFolder(drive, f.id);
+    if (c.cls === 'ok') return { id: f.id, path: c.path };
+  }
+  return null;
 }
 
 /**
@@ -145,7 +154,7 @@ async function walkFolder(
   // 자식 폴더 중 제외(PII/계약/HR/deprecated 등) 아닌 것만 재귀. 제외 폴더는 이름만 남기고 미전개.
   const toRecurse = nodes.filter((n) => {
     if (!n.isFolder) return false;
-    if (n.name && EXCLUDED_FOLDER_NAMES.has(n.name)) {
+    if (isExcludedName(n.name)) {
       n.excluded = true;
       return false;
     }
@@ -199,27 +208,28 @@ export async function handleListDriveFolder(args: unknown) {
   try {
     const roots = await Promise.all(
       rootSpecs.map(async (spec) => {
-        let fid = spec.id;
-        if (!fid && spec.name) {
-          const resolved = await resolveFolderId(drive, spec.name);
-          if (!resolved) {
-            return { folderId: null, folderName: spec.name, error: `폴더 "${spec.name}" 을 찾지 못함` };
+        let fid: string;
+        let rootPath: string;
+        if (spec.id) {
+          // 시작 폴더 가드 — 색인 root 하위 + 제외 폴더 미경유일 때만 연다.
+          const c = await classifyFolder(drive, spec.id);
+          if (c.cls !== 'ok') {
+            return { folderId: spec.id, folderName: null, error: '[forbidden] 접근 범위 밖 폴더입니다 (색인 대상 root 밖 / 민감 폴더).' };
           }
-          fid = resolved;
+          fid = spec.id;
+          rootPath = c.path;
+        } else {
+          const resolved = await resolveFolderId(drive, spec.name!);
+          if (!resolved) {
+            return { folderId: null, folderName: spec.name, error: `폴더 "${spec.name}" 을 찾지 못함 (색인 대상 root 하위만 조회)` };
+          }
+          fid = resolved.id;
+          rootPath = resolved.path;
         }
-        const rootWalk = await walkFolder(drive, fid!, depth, pageSize, budget);
+        const rootWalk = await walkFolder(drive, fid, depth, pageSize, budget);
         let items = rootWalk.children;
-        // 직원별 Drive 폴더 scope 후처리 (admin·미설정 = 전체). root path 를 구성해 트리 필터.
-        if (folderScope) {
-          const m = await drive.files
-            .get({ fileId: fid!, fields: 'name,parents', supportsAllDrives: true })
-            .catch(() => null);
-          const cp = m
-            ? await classifyAndPath(drive, m.data.parents ?? undefined)
-            : { cls: 'outside' as const, path: '' };
-          const rootPath = cp.path ? `${cp.path}/${m!.data.name ?? ''}` : m?.data.name ?? spec.name ?? '';
-          items = filterTreeByScope(items, rootPath, folderScope);
-        }
+        // 직원별 Drive 폴더 scope 후처리 (admin·미설정 = 전체). root 기준 경로로 트리 필터.
+        if (folderScope) items = filterTreeByScope(items, rootPath, folderScope);
         return {
           folderId: fid,
           folderName: spec.name ?? null,

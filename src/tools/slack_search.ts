@@ -175,7 +175,8 @@ export async function handleSlackSearch(args: unknown) {
         {
           type: 'text' as const,
           text: JSON.stringify(
-            { query, total: res.messages?.total ?? results.length, count: results.length, results },
+            // total(Slack 원본 건수)은 싣지 않는다 — DM·권한 밖 채널의 일치 건수까지 드러난다.
+            { query, count: results.length, results },
             null,
             2,
           ),

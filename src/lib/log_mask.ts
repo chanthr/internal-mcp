@@ -16,8 +16,8 @@ import { inspect } from 'util';
 
 const REDACTED = '[REDACTED]';
 
-/** 값이 시크릿일 가능성이 큰 env 키 이름 */
-const SECRET_KEY_NAME = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE|REFRESH|SIGNING)/i;
+/** 값이 시크릿일 가능성이 큰 env 키 이름. PAT 은 단어 단위로만(PATH 같은 이름 오탐 방지). */
+const SECRET_KEY_NAME = /(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE|REFRESH|SIGNING)|(^|_)PAT($|_)/i;
 /** false-positive 방지 — 키 이름이 위에 걸려도 값이 흔한 비밀-아님이면 제외 */
 const SAFE_VALUES = new Set(['true', 'false', 'production', 'development', 'http', 'https', 'none', 'null']);
 
@@ -53,7 +53,7 @@ export function maskString(input: string): string {
   );
   out = out.replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{4,}/g, REDACTED); // JWT
   out = out.replace(
-    /\b(sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{10,}|xox[bpsar]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{16,})/g,
+    /\b(sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{10,}|xox[bpsar]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})/g,
     REDACTED,
   );
   out = out.replace(/\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*/gi, `Bearer ${REDACTED}`);

@@ -16,5 +16,6 @@
   "oauth": {
     "allowedDomains": ["acme.com"],
     "allowedEmails": []
-  }
+  },
+  "access": { "viewerTools": [] }
 }

@@ -3,15 +3,17 @@
  *
  * SDK(@slack/web-api) 없이 fetch 직접 호출 — 의존성 최소화.
  *
- * 토큰 (용도별 분기):
- *   - SLACK_USER_TOKEN (xoxp-…)  → search.messages 에 필수. user 권한으로 워크스페이스 전체 검색.
- *   - SLACK_BOT_TOKEN  (xoxb-…)  → conversations.* / files.* (봇이 채널 멤버여야 history 조회 가능).
- *   - SLACK_TOKEN                → 위 두 개가 없을 때 공통 fallback.
+ * 토큰 (용도별 분기, 서로 대신 쓰지 않음):
+ *   - SLACK_USER_TOKEN (xoxp-…)  → search.messages / search.files 전용. 결과는 "봇이 멤버인 채널"로 거른다.
+ *   - SLACK_BOT_TOKEN  (xoxb-…)  → conversations.* / files.* / users.list (봇이 채널 멤버여야 history 조회 가능).
+ *   - SLACK_TOKEN                → 접두사(xoxp-/xoxb-)로 용도를 판별해, 비어 있는 쪽에만 쓴다.
+ * user token 을 bot 자리에 쓰지 않는 이유: "봇이 볼 수 있는 범위"가 토큰 주인의 DM·비공개 채널로 넓어져
+ * 모든 MCP 사용자에게 열린다.
  *
  * 필요 OAuth scope (read-only):
  *   - User token : search:read
- *   - Bot token  : channels:history, groups:history, im:history, mpim:history,
- *                  channels:read, files:read, users:read
+ *   - Bot token  : channels:history, groups:history, channels:read, groups:read, files:read, users:read
+ *                  (DM 은 읽지 않으므로 im:history, mpim:history 는 필요 없다)
  */
 
 const SLACK_API = 'https://slack.com/api';
@@ -25,24 +27,38 @@ export class SlackError extends Error {
   }
 }
 
-/** 용도에 맞는 토큰 선택. search 는 user token 우선. */
-export function getSlackToken(kind: SlackTokenKind): string {
-  const user = process.env.SLACK_USER_TOKEN;
-  const bot = process.env.SLACK_BOT_TOKEN;
-  const common = process.env.SLACK_TOKEN;
+// 토큰 회전(rotation)을 켠 앱의 access token 은 "xoxe." 접두가 붙는다.
+const USER_TOKEN_RE = /^(xoxe\.)?xoxp-/;
+const BOT_TOKEN_RE = /^(xoxe\.)?xoxb-/;
 
+function pickToken(explicit: string | undefined, re: RegExp): string | undefined {
+  if (explicit) return re.test(explicit) ? explicit : undefined; // 잘못 넣은 토큰 종류는 쓰지 않는다
+  const common = process.env.SLACK_TOKEN;
+  return common && re.test(common) ? common : undefined;
+}
+
+/** search.* 용 user token (xoxp). 없으면 undefined. */
+export function slackUserToken(): string | undefined {
+  return pickToken(process.env.SLACK_USER_TOKEN, USER_TOKEN_RE);
+}
+
+/** conversations.* / files.* 용 bot token (xoxb). 없으면 undefined. */
+export function slackBotToken(): string | undefined {
+  return pickToken(process.env.SLACK_BOT_TOKEN, BOT_TOKEN_RE);
+}
+
+/** 용도에 맞는 토큰 선택. 다른 종류 토큰으로 대신하지 않는다. */
+export function getSlackToken(kind: SlackTokenKind): string {
   if (kind === 'search') {
-    const t = user || common || bot;
+    const t = slackUserToken();
     if (!t) {
-      throw new SlackError(
-        'search.messages 에는 User token 이 필요. SLACK_USER_TOKEN (xoxp-…) 또는 SLACK_TOKEN 설정.',
-      );
+      throw new SlackError('검색에는 User token 이 필요합니다. SLACK_USER_TOKEN (xoxp-…) 설정.');
     }
     return t;
   }
-  const t = bot || common || user;
+  const t = slackBotToken();
   if (!t) {
-    throw new SlackError('Slack 토큰 없음. SLACK_BOT_TOKEN (xoxb-…) 또는 SLACK_TOKEN 설정.');
+    throw new SlackError('Bot token 이 없습니다. SLACK_BOT_TOKEN (xoxb-…) 설정.');
   }
   return t;
 }

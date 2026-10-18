@@ -133,7 +133,9 @@ export async function handleSlackFindFiles(args: unknown) {
         { channel, user, count },
         'bot',
       );
-      files = res.files ?? [];
+      // files.list 는 봇에게 온 DM 파일까지 돌려준다 — 검색 모드와 같은 경계(봇 멤버 채널에 공유된 파일)로 거른다.
+      const botMemberIds = await loadBotMemberChannelIds();
+      files = (res.files ?? []).filter((f) => fileConversationIds(f).some((id) => botMemberIds.has(id)));
     }
 
     // 직원별 Slack 채널 scope 필터 (admin·미설정 = 전체). scope 밖 대화의 파일 제거.
@@ -195,6 +197,20 @@ export async function handleSlackGetFile(args: unknown) {
     if (!f) {
       return {
         content: [{ type: 'text' as const, text: `[not found] file ${fileId}` }],
+        isError: true,
+      };
+    }
+
+    // 신뢰 경계: 봇이 멤버인 채널에 공유된 파일만 (DM 전용 파일 차단 — find_files 와 동일).
+    const botMemberIds = await loadBotMemberChannelIds();
+    if (!fileConversationIds(f).some((id) => botMemberIds.has(id))) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `[forbidden] 파일 '${fileId}' 은 봇이 멤버인 채널에 공유된 파일이 아닙니다.`,
+          },
+        ],
         isError: true,
       };
     }

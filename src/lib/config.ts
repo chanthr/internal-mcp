@@ -75,10 +75,26 @@ const ConfigSchema = z
     selfDomains: z.array(z.string()).default([]),
     oauth: z
       .object({
-        /** Allowed login domains (hd). The first entry is used as the Google hd hint. env OAUTH_ALLOWED_HD takes precedence. */
+        /**
+         * Google Workspace domains allowed to sign in (the account's `hd` claim must match).
+         * env OAUTH_ALLOWED_HD (comma-separated) takes precedence.
+         */
         allowedDomains: z.array(z.string()).default([]),
-        /** Allowed email allowlist (if set, wins over domains). env OAUTH_ALLOWED_EMAILS takes precedence. */
+        /**
+         * Individual emails allowed to sign in, in addition to the domains (any Google account type).
+         * env OAUTH_ALLOWED_EMAILS (comma-separated) takes precedence.
+         * If both lists are empty, OAuth stays off — otherwise any Google account could sign in.
+         */
         allowedEmails: z.array(z.string()).default([]),
+      })
+      .default({}),
+    access: z
+      .object({
+        /**
+         * Tool groups a signed-in user WITHOUT an app_users row may use (role "viewer").
+         * Default: none, so unregistered users only get `ping`. Groups: drive, slack, github, railway.
+         */
+        viewerTools: z.array(z.enum(['drive', 'slack', 'github', 'railway'])).default([]),
       })
       .default({}),
   })

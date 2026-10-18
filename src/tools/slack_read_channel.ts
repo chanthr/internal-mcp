@@ -2,14 +2,22 @@
  * slack_read_channel(channel, limit?, oldest?, includeThreads?) — 채널 대화 읽기.
  *
  * conversations.history 로 최근 메시지, 옵션으로 thread replies 까지.
- * channel 은 이름(#dev / dev) 또는 ID(C…) 모두 허용 — 이름이면 conversations.list 로 resolve.
- * Bot token 사용 (봇이 해당 채널 멤버여야 조회 가능).
+ * channel 은 이름(#dev / dev) 또는 ID(C…/G…) 허용 — 이름이면 conversations.list 로 resolve.
+ * Bot token 사용. 신뢰 경계 = "봇이 멤버인 채널"(slack_search 와 동일). DM(D…)·그룹 DM 은 읽지 않는다
+ * (봇에게 보낸 개인 DM 이 다른 사용자에게 열리는 것 방지).
  * Role: 모든 role 허용.
  */
 import { z } from 'zod';
 import { getAuth } from '../lib/context.js';
 import { allowedSlackChannels } from '../lib/scope.js';
-import { slackApi, SlackError, loadSlackUserMap, loadChannelNameMap, mapLimit } from '../integrations/slack.js';
+import {
+  slackApi,
+  SlackError,
+  loadSlackUserMap,
+  loadChannelNameMap,
+  loadBotMemberChannelIds,
+  mapLimit,
+} from '../integrations/slack.js';
 
 export const slackReadChannelTool = {
   name: 'slack_read_channel',
@@ -66,8 +74,9 @@ function toOldestTs(oldest: string | undefined): string | undefined {
 }
 
 async function resolveChannelId(input: string): Promise<{ id: string; name: string | null }> {
-  // 이미 ID 형태 (C/G/D + 영숫자)
-  if (/^[CGD][A-Z0-9]{6,}$/.test(input)) return { id: input, name: null };
+  // 이미 ID 형태 (공개 C… / 비공개 G…). DM(D…)은 받지 않는다.
+  if (/^D[A-Z0-9]{6,}$/.test(input)) throw new SlackError('DM 은 읽을 수 없습니다.');
+  if (/^[CG][A-Z0-9]{6,}$/.test(input)) return { id: input, name: null };
   const cleaned = input.replace(/^#/, '');
   // 공용 채널명 캐시(TTL) 조회 — 매 호출 conversations.list 순차 순회를 warmup 후 0콜로.
   const byName = await loadChannelNameMap();
@@ -85,6 +94,16 @@ export async function handleSlackReadChannel(args: unknown) {
 
   try {
     const { id: channelId, name: channelName } = await resolveChannelId(channel);
+    // 신뢰 경계: 봇이 멤버인 (공개+비공개) 채널만. 그룹 DM(G…)·DM 은 conversations.list 에 없어 여기서 걸린다.
+    const botMemberIds = await loadBotMemberChannelIds();
+    if (!botMemberIds.has(channelId)) {
+      return {
+        content: [
+          { type: 'text' as const, text: `[forbidden] 채널 '${channel}' 은 봇이 멤버가 아닙니다. 봇을 채널에 초대해야 읽을 수 있습니다.` },
+        ],
+        isError: true,
+      };
+    }
     // 직원별 Slack 채널 scope 체크 (admin·미설정 = 전체)
     const channelScope = allowedSlackChannels(auth);
     if (channelScope && !channelScope.has(channelId)) {

@@ -65,9 +65,18 @@ function ghHeaders(): Record<string, string> {
 
 const ARTIFACT_RE = /(^|\/)(node_modules|dist|build|\.next|\.nuxt|coverage|\.git|__pycache__|\.venv|venv)\//;
 
+// GitHub 이름 규칙(영숫자, '.', '_', '-'). 경로 조작('..', '/')으로 다른 API 경로를 부르지 못하게 막는다.
+const GH_NAME_RE = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
+
 export async function handleRepoTree(args: unknown) {
   getAuth();
   const { owner, repo, ref, filterExt } = inputSchema.parse(args);
+  if (!GH_NAME_RE.test(owner) || !GH_NAME_RE.test(repo)) {
+    return {
+      content: [{ type: 'text' as const, text: '[invalid_input] owner/repo 이름 형식이 올바르지 않습니다.' }],
+      isError: true,
+    };
+  }
   const headers = ghHeaders();
 
   try {
@@ -84,7 +93,10 @@ export async function handleRepoTree(args: unknown) {
       sha = ((await r.json()) as { default_branch?: string }).default_branch ?? 'main';
     }
 
-    const tr = await ghFetch(`${GITHUB_API}/repos/${owner}/${repo}/git/trees/${sha}?recursive=1`, headers);
+    const tr = await ghFetch(
+      `${GITHUB_API}/repos/${owner}/${repo}/git/trees/${encodeURIComponent(sha)}?recursive=1`,
+      headers,
+    );
     if (!tr.ok) {
       return {
         content: [{ type: 'text' as const, text: `[error] tree 조회 실패 (HTTP ${tr.status}, ref=${sha})` }],

@@ -11,6 +11,7 @@
  */
 import { z } from 'zod';
 import { getAuth } from '../lib/context.js';
+import { maskString } from '../lib/log_mask.js';
 
 const RAILWAY_API = 'https://backboard.railway.app/graphql/v2';
 
@@ -179,7 +180,8 @@ export async function handleRailwayLogs(args: unknown) {
         {
           type: 'text' as const,
           text: JSON.stringify(
-            { type, count: logs.length, logs: logs.map((l) => ({ ts: l.timestamp, sev: l.severity, msg: l.message })) },
+            // 로그 본문의 토큰·키는 응답 전에 가린다 — 로그를 읽는 사람이 그 서비스의 비밀값까지 보지 않게.
+            { type, count: logs.length, logs: logs.map((l) => ({ ts: l.timestamp, sev: l.severity, msg: maskString(l.message ?? '') })) },
             null,
             2,
           ),

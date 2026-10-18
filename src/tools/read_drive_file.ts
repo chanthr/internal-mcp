@@ -14,6 +14,7 @@ import { allowedDriveFolders, isPathInScope } from '../lib/scope.js';
 import { classifyAndPath } from '../lib/drive_path.js';
 import { extractText } from '../lib/extract_text.js';
 import { getQdrantClient, DRIVE_COLLECTION } from '../lib/qdrant.js';
+import { MAX_FILE_BYTES } from '../lib/drive_indexer.js';
 
 export const readDriveFileTool = {
   name: 'read_drive_file',
@@ -139,6 +140,14 @@ async function readOne(
       };
     }
 
+    // 크기 상한 — 파일을 통째로 메모리에 올리므로 거대한 파일(영상·대용량 PDF)이 서버를 죽이지 않게 막는다.
+    // 색인 재조립본이 있으면 그것으로 읽는다(재다운로드 없음). Google 문서는 size 가 없어 해당 없음.
+    const tooLarge = !!m.size && Number(m.size) > MAX_FILE_BYTES;
+    const tooLargeError = {
+      fileId,
+      error: `파일이 너무 커서 읽지 않습니다 (${m.size}B > ${MAX_FILE_BYTES}B, DRIVE_MAX_FILE_BYTES).`,
+    };
+
     let body: string;
     let extractMethod: string | undefined;
     if (GOOGLE_DOC_EXPORT[mimeType]) {
@@ -156,6 +165,7 @@ async function readOne(
         body = reassembled;
         extractMethod = 'index-reassembled';
       } else {
+        if (tooLarge) return tooLargeError;
         const r = await extractText(drive, fileId, mimeType);
         if (r.needsOcr || !r.text.trim()) {
           return {
@@ -167,6 +177,7 @@ async function readOne(
         extractMethod = r.method;
       }
     } else {
+      if (tooLarge) return tooLargeError;
       const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'text' });
       body = String(res.data ?? '');
     }

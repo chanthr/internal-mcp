@@ -30,6 +30,12 @@ export const SUPPORTED_MIMES = new Set<string>([
   'image/webp',
 ]);
 
+/**
+ * 색인·읽기 파일 크기 상한(바이트). 파일을 통째로 메모리에 올리므로, 거대한 파일 하나가 서버를 죽이지 않게 막는다.
+ * Google 문서·시트·슬라이드는 Drive 메타에 size 가 없어(export) 이 검사를 받지 않는다.
+ */
+export const MAX_FILE_BYTES = Number(process.env.DRIVE_MAX_FILE_BYTES ?? 50_000_000);
+
 /** 점진적 chunk ID — file_id + index 면 항상 같은 ID (idempotent upsert). 색인 전 경로 공용. */
 export function makeChunkId(fileId: string, chunkIndex: number): number {
   const hash = createHash('md5').update(`${fileId}:${chunkIndex}`).digest();
@@ -53,6 +59,8 @@ export interface IndexableFile {
   modifiedTime: string;
   source: 'dev' | 'biz';
   mimeType: string;
+  /** Drive 메타의 바이트 크기. Google 문서는 없음. */
+  size?: number;
 }
 
 /**
@@ -161,7 +169,7 @@ export function buildChunkPayload(
  */
 async function getIndexedState(
   fileId: string,
-): Promise<{ content_hash: string | null; chunk_count: number } | null> {
+): Promise<{ content_hash: string | null; chunk_count: number; file_path: string; file_name: string; source: string } | null> {
   try {
     const got = await getQdrantClient().retrieve(DRIVE_COLLECTION, {
       ids: [makeChunkId(fileId, 0)],
@@ -173,6 +181,9 @@ async function getIndexedState(
     return {
       content_hash: (p?.content_hash as string) ?? null,
       chunk_count: typeof p?.chunk_count === 'number' ? (p.chunk_count as number) : 0,
+      file_path: String(p?.file_path ?? ''),
+      file_name: String(p?.file_name ?? ''),
+      source: String(p?.source ?? ''),
     };
   } catch {
     return null; // 조회 실패 = 미확인 → 재색인 진행(안전)
@@ -187,6 +198,10 @@ async function getIndexedState(
  * - B-9: 증분 경로는 wait:true 로 색인 직후 검색 가시성 + 실패 인지.
  */
 export async function indexFile(drive: drive_v3.Drive, file: IndexableFile): Promise<number> {
+  if (file.size && file.size > MAX_FILE_BYTES) {
+    console.error(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): ${file.path}`);
+    return 0;
+  }
   const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
   // needsOcr=true 는 이제 미지원 형식만 (PDF 스캔본·이미지는 extract_text 가 Mathpix 로 처리).
   // 미지원 또는 추출 결과 빈 파일 → 색인 skip.
@@ -194,9 +209,19 @@ export async function indexFile(drive: drive_v3.Drive, file: IndexableFile): Pro
 
   const hash = contentHash(text);
 
-  // EFF-1: 본문 무변경이면 embed/upsert 생략 (rename·move·sharing 등 메타 change 비용 차단).
+  // EFF-1: 본문·경로·이름이 모두 그대로면 embed/upsert 생략 (sharing 등 메타 change 비용 차단).
+  // 옮기거나 이름만 바꾼 파일은 다시 색인한다 — payload 의 file_path 가 직원별 폴더 scope 판정 기준이라
+  // 옛 경로가 남으면 옮긴 뒤에도 옛 폴더 권한자에게 검색된다. 경로 태그(doc_tags)도 청크마다 다시 만든다.
   const prev = await getIndexedState(file.id);
-  if (prev && prev.content_hash === hash) return 0;
+  if (
+    prev &&
+    prev.content_hash === hash &&
+    prev.file_path === file.path &&
+    prev.file_name === file.name &&
+    prev.source === file.source
+  ) {
+    return 0;
+  }
 
   const chunks = chunkMarkdown(text);
   if (chunks.length === 0) return 0;

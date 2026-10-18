@@ -14,7 +14,7 @@ export const searchDriveTool = {
   description:
     'Google Drive 에서 파일 검색. mode="title" 은 파일명, "fullText" 는 본문까지. ' +
     'Unified search across your indexed Drive assets. ' +
-    '검색 범위는 색인 대상(개발 기록·경영) root 하위로 한정되며, 민감 폴더(PII·계약·HR·deprecated)는 결과에서 제외된다. ' +
+    '검색 범위는 설정한 Drive root 하위로 한정되며, 설정의 제외 폴더(excludeFolders)를 거치는 파일은 결과에서 빠진다. ' +
     'search → read_drive_file 순서로 사용.',
   inputSchema: {
     type: 'object' as const,
