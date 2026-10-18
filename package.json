@@ -1,6 +1,6 @@
 {
   "name": "knowledge-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hostable MCP server that exposes your Google Drive, Slack, GitHub and Railway data to any MCP client (Claude, etc.) with OAuth and semantic search.",
   "type": "module",
   "license": "MIT",
