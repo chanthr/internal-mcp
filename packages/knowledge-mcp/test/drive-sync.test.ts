@@ -10,8 +10,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const qdrantUrl = process.env.QDRANT_TEST_URL; // read before the cleanup below, which removes QDRANT_*
 for (const k of Object.keys(process.env)) if (/^(GOOGLE_|MATHPIX_|QDRANT_|OPENAI_)/.test(k)) delete process.env[k];
-const qdrantUrl = process.env.QDRANT_TEST_URL;
 const collection = `kmcp_sync_${Date.now()}`;
 Object.assign(process.env, {
   MCP_STORE: 'sqlite',
