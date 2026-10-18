@@ -1,0 +1,86 @@
+{
+  "name": "@chanthr/knowledge-mcp",
+  "version": "0.3.0",
+  "description": "Build your own MCP server from plugins. Auth (API keys, OAuth), per-user permissions, audit log, SQLite or Supabase state, and built-in Google Drive, Slack, GitHub and Railway connectors.",
+  "type": "module",
+  "license": "MIT",
+  "author": "chanthr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chanthr/internal-mcp.git",
+    "directory": "packages/knowledge-mcp"
+  },
+  "homepage": "https://github.com/chanthr/internal-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/chanthr/internal-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "mcp-gateway",
+    "claude",
+    "plugins",
+    "google-drive",
+    "slack",
+    "rag"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "knowledge-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "sql",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/cli.ts serve",
+    "start": "node dist/cli.js serve",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-reporter=spec test/*.test.ts",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "@types/express": "^5.0.6",
+    "dotenv": "^16.6.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "googleapis": "^144.0.0",
+    "gpt-tokenizer": "^3.4.0",
+    "jose": "^5.10.0",
+    "mammoth": "^1.12.0",
+    "officeparser": "^7.1.0",
+    "pdf-parse": "^2.4.5",
+    "ws": "^8.21.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
+    "yaml": "^2.9.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
