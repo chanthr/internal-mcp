@@ -2,7 +2,7 @@
  * Drive 파일 1개 → Qdrant 색인/삭제 공통 로직.
  * 전체 reindex (reindex.ts) 와 증분 sync (sync.ts) 가 공유.
  */
-import type { drive_v3 } from 'googleapis';
+import type { DriveClient } from './client.js';
 import { createHash } from 'crypto';
 import { chunkMarkdown, type RawChunk } from './chunker.js';
 import { embedTexts } from './embeddings.js';
@@ -192,7 +192,7 @@ async function getIndexedState(
  * - B-1: 재색인 시 청크 수가 줄면 옛 청크(chunk_index >= 새 수)를 삭제해 유령 청크(폐기된 사실) 잔류 방지.
  * - B-9: 증분 경로는 wait:true 로 색인 직후 검색 가시성 + 실패 인지.
  */
-export async function indexFile(drive: drive_v3.Drive, file: IndexableFile): Promise<number> {
+export async function indexFile(drive: DriveClient, file: IndexableFile): Promise<number> {
   if (file.size && file.size > MAX_FILE_BYTES) {
     console.error(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): ${file.path}`);
     return 0;

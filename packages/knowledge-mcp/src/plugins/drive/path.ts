@@ -7,7 +7,7 @@
  *
  * 성능: 폴더 메타(id→name,parent)는 거의 변하지 않으므로 프로세스 캐시 → 부모 walk 가 warmup 후 캐시 hit.
  */
-import { type drive_v3 } from 'googleapis';
+import type { DriveClient, DriveFile } from './client.js';
 import { DRIVE_ROOTS } from './settings.js';
 import { isExcludedName } from './exclude.js';
 
@@ -20,7 +20,7 @@ const FOLDER_META_TTL_MS = Number(process.env.FOLDER_META_TTL_MS ?? 600_000);
 const _folderMeta = new Map<string, { name: string; parent: string | undefined; expiresAt: number }>();
 
 export async function getFolderMeta(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   id: string,
 ): Promise<{ name: string; parent: string | undefined }> {
   const now = Date.now();
@@ -47,7 +47,7 @@ export type SearchClass = 'ok' | 'excluded' | 'outside';
  * resolvePathAndSource(drive_sync) 와 동일하게 parents[0] 만 따라간다(최대 12 hop).
  */
 export async function classifyForSearch(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   parents: string[] | undefined,
 ): Promise<SearchClass> {
   let chain = parents;
@@ -66,7 +66,7 @@ export async function classifyForSearch(
  * path 는 폴더만(파일명 제외), root 바로 아래부터, 예: "01_고객사/Acme". cls!=='ok' 면 path 무의미.
  */
 export async function classifyAndPath(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   parents: string[] | undefined,
 ): Promise<{ cls: SearchClass; path: string }> {
   const names: string[] = [];
@@ -88,11 +88,11 @@ export async function classifyAndPath(
  * path 는 root 바로 아래부터 이 폴더까지(자기 이름 포함). 예: root/01_고객사/Acme → "01_고객사/Acme".
  */
 export async function classifyFolder(
-  drive: drive_v3.Drive,
+  drive: DriveClient,
   folderId: string,
 ): Promise<{ cls: SearchClass; path: string }> {
   if (ROOT_IDS.has(folderId)) return { cls: 'ok', path: '' };
-  let d: drive_v3.Schema$File;
+  let d: DriveFile;
   try {
     d = (await drive.files.get({ fileId: folderId, fields: 'name,parents', supportsAllDrives: true })).data;
   } catch {

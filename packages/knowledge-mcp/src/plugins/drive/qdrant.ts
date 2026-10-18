@@ -1,13 +1,131 @@
 /**
- * Qdrant client singleton + collection 관리.
+ * Qdrant REST client + collection 관리.
  *
  * Collection: config.qdrant.collection (default knowledge_v1), or env QDRANT_COLLECTION.
  * Vector size: 1536 (text-embedding-3-small)
  * Distance: Cosine
+ *
+ * @qdrant/js-client-rest 대신 Node 내장 fetch 로 REST API 를 부른다. 그 라이브러리는 최신판(1.19)도 취약한
+ * undici 7.29 를 고정 의존성으로 끌어와, 이 패키지를 설치하는 모든 사람에게 npm audit 경고를 남겼다.
+ * 쓰는 엔드포인트가 9개뿐이라 직접 부르는 편이 가볍다. 메서드 이름과 반환 모양은 그 라이브러리와 같게 뒀다.
  */
-import type { QdrantClient } from '@qdrant/js-client-rest';
 import { EMBEDDING_DIM } from './embeddings.js';
 import { getConfig } from '../../core/config.js';
+
+export type PointId = string | number;
+export type QdrantFilter = { must?: unknown[]; should?: unknown[]; must_not?: unknown[] };
+export interface QdrantPoint {
+  id: PointId;
+  vector?: number[];
+  payload?: Record<string, unknown> | null;
+}
+export interface ScoredPoint extends QdrantPoint {
+  score: number;
+  version?: number;
+}
+
+const QDRANT_TIMEOUT_MS = 10_000; // 짧은 timeout 으로 cold-start hang 회피
+
+export class QdrantError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = 'QdrantError';
+  }
+}
+
+export class QdrantClient {
+  private readonly base: string;
+
+  constructor(
+    url: string,
+    private readonly apiKey?: string,
+  ) {
+    this.base = url.replace(/\/+$/, '');
+  }
+
+  private async call<T>(method: 'GET' | 'PUT' | 'POST' | 'DELETE', path: string, body?: unknown): Promise<T> {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (this.apiKey) headers['api-key'] = this.apiKey;
+    let res: Response;
+    try {
+      res = await fetch(`${this.base}${path}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(QDRANT_TIMEOUT_MS),
+      });
+    } catch (e) {
+      const reason = e instanceof Error && e.name === 'TimeoutError' ? `timeout ${QDRANT_TIMEOUT_MS}ms` : String(e);
+      throw new QdrantError(`[qdrant] ${method} ${path} failed: ${reason}`, 0);
+    }
+    const text = await res.text();
+    let json: { result?: T; status?: unknown } | null = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      /* non-JSON error page */
+    }
+    if (!res.ok) {
+      const detail = (json?.status as { error?: string } | undefined)?.error ?? text.slice(0, 200);
+      throw new QdrantError(`[qdrant] ${method} ${path} ${res.status}: ${detail}`, res.status);
+    }
+    return json?.result as T;
+  }
+
+  private col(name: string): string {
+    return `/collections/${encodeURIComponent(name)}`;
+  }
+
+  getCollections(): Promise<{ collections: Array<{ name: string }> }> {
+    return this.call('GET', '/collections');
+  }
+
+  createCollection(name: string, body: Record<string, unknown>): Promise<boolean> {
+    return this.call('PUT', this.col(name), body);
+  }
+
+  deleteCollection(name: string): Promise<boolean> {
+    return this.call('DELETE', this.col(name));
+  }
+
+  createPayloadIndex(name: string, body: { field_name: string; field_schema: string; wait?: boolean }): Promise<unknown> {
+    const { wait = true, ...rest } = body;
+    return this.call('PUT', `${this.col(name)}/index?wait=${wait}`, rest);
+  }
+
+  upsert(name: string, body: { points: QdrantPoint[]; wait?: boolean }): Promise<unknown> {
+    const { wait = true, ...rest } = body;
+    return this.call('PUT', `${this.col(name)}/points?wait=${wait}`, rest);
+  }
+
+  /** Delete by point ids or by filter. Waits by default, like the official client. */
+  delete(name: string, body: { points?: PointId[]; filter?: QdrantFilter; wait?: boolean }): Promise<unknown> {
+    const { wait = true, ...rest } = body;
+    return this.call('POST', `${this.col(name)}/points/delete?wait=${wait}`, rest);
+  }
+
+  retrieve(name: string, body: { ids: PointId[]; with_payload?: boolean | string[]; with_vector?: boolean }): Promise<QdrantPoint[]> {
+    return this.call('POST', `${this.col(name)}/points`, body);
+  }
+
+  scroll(
+    name: string,
+    body: { filter?: QdrantFilter; limit?: number; offset?: PointId; with_payload?: boolean | string[]; with_vector?: boolean },
+  ): Promise<{ points: QdrantPoint[]; next_page_offset?: PointId | null }> {
+    return this.call('POST', `${this.col(name)}/points/scroll`, body);
+  }
+
+  search(
+    name: string,
+    body: { vector: number[]; limit: number; filter?: QdrantFilter; with_payload?: boolean | string[]; score_threshold?: number },
+  ): Promise<ScoredPoint[]> {
+    return this.call('POST', `${this.col(name)}/points/search`, body);
+  }
+}
 
 let _client: QdrantClient | null = null;
 
@@ -17,25 +135,12 @@ export const DRIVE_COLLECTION = process.env.QDRANT_COLLECTION || getConfig().qdr
 // 차원 SSOT = embeddings.ts (모델 출력 차원). collection size 가 임베딩 차원과 항상 일치하도록 재노출.
 export { EMBEDDING_DIM };
 
-/** Qdrant 클라이언트. 라이브러리는 처음 쓸 때 불러온다(서버와 CLI 시작 시간 단축 — client.ts 와 같은 이유). */
+/** Qdrant 클라이언트(프로세스당 하나). */
 export async function getQdrantClient(): Promise<QdrantClient> {
   if (_client) return _client;
-  const { QdrantClient } = await import('@qdrant/js-client-rest');
-
   const url = process.env.QDRANT_URL;
-  const apiKey = process.env.QDRANT_API_KEY;
-
-  if (!url) {
-    throw new Error('[qdrant] QDRANT_URL env missing');
-  }
-
-  _client = new QdrantClient({
-    url,
-    apiKey: apiKey || undefined,
-    // production: 짧은 timeout 으로 cold-start hang 회피
-    timeout: 10_000,
-  });
-
+  if (!url) throw new Error('[qdrant] QDRANT_URL env missing');
+  _client = new QdrantClient(url, process.env.QDRANT_API_KEY || undefined);
   return _client;
 }
 

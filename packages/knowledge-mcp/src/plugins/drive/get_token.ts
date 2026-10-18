@@ -11,7 +11,6 @@
  *   5. callback 받으면 콘솔에 refresh token 출력
  *   6. .env 에 GOOGLE_OAUTH_REFRESH_TOKEN= 라인 추가
  */
-import { google } from 'googleapis';
 import http from 'http';
 import { URL } from 'url';
 import { execFile } from 'child_process';
@@ -33,13 +32,16 @@ export async function runGetToken(): Promise<void> {
     process.exit(1);
   }
 
-  const oauth = new google.auth.OAuth2(clientId, clientSecret, REDIRECT_URI);
-
-  const authUrl = oauth.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent', // refresh_token 강제 발급
-    scope: [SCOPE],
-  });
+  const authUrl =
+    'https://accounts.google.com/o/oauth2/v2/auth?' +
+    new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: REDIRECT_URI,
+      response_type: 'code',
+      scope: SCOPE,
+      access_type: 'offline',
+      prompt: 'consent', // refresh_token 강제 발급
+    }).toString();
 
   console.log('\n========================================');
   console.log('  OAuth Refresh Token 발급');
@@ -75,7 +77,19 @@ export async function runGetToken(): Promise<void> {
     }
 
     try {
-      const { tokens } = await oauth.getToken(code);
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code,
+          client_id: clientId,
+          client_secret: clientSecret,
+          redirect_uri: REDIRECT_URI,
+        }),
+      });
+      const tokens = (await tokenRes.json()) as { refresh_token?: string; error?: string; error_description?: string };
+      if (!tokenRes.ok) throw new Error(`${tokens.error ?? tokenRes.status} ${tokens.error_description ?? ''}`.trim());
       const refreshToken = tokens.refresh_token;
 
       if (!refreshToken) {
