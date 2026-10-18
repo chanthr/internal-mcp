@@ -1,13 +1,29 @@
 {
   "out_dir": "ko",
-  "eyebrow": "SELF-HOSTED MCP SERVER",
+  "eyebrow": "MCP SERVER FRAMEWORK",
   "title": "Knowledge MCP",
-  "subtitle": "Drive, Slack, GitHub, Railway를 MCP 주소 하나로 연결합니다",
+  "subtitle": "플러그인으로 우리 팀 MCP 서버를 만듭니다. 인증과 권한은 이미 들어 있습니다",
   "steps": [
-    {"who": "클라이언트", "title": "연결하기", "desc": "Claude나 IDE가 API 키나 OAuth 토큰으로 /mcp를 호출합니다"},
-    {"who": "서버", "title": "권한 확인", "desc": "자격 증명을 검증하고 사용자 역할과 범위를 불러옵니다"},
-    {"who": "서버", "title": "도구 제공", "desc": "설정돼 있고 사용자에게 허용된 도구 묶음만 올립니다"},
-    {"who": "데이터 원본", "title": "읽기", "desc": "Drive, Slack, GitHub, Railway를 읽어 결과를 돌려줍니다"}
+    {
+      "who": "나",
+      "title": "만들기",
+      "desc": "create-knowledge-mcp 명령으로 서버 뼈대를 만듭니다. Docker 이미지 한 줄로도 됩니다"
+    },
+    {
+      "who": "나",
+      "title": "도구 추가",
+      "desc": "src/plugins에 파일 하나를 넣습니다. 이름, 입력, 실행 함수만 씁니다"
+    },
+    {
+      "who": "서버",
+      "title": "권한 확인",
+      "desc": "API 키나 OAuth 토큰을 확인하고 그 사람의 역할을 불러옵니다"
+    },
+    {
+      "who": "클라이언트",
+      "title": "사용",
+      "desc": "Claude에는 그 사람이 쓸 수 있는 도구만 보이고, 그 도구를 부릅니다"
+    }
   ],
   "badges": []
 }

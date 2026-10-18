@@ -2,13 +2,14 @@
 
 Knowledge MCP can act as its own OAuth 2.1 Authorization Server. It bridges sign-in to **Google** and
 issues its own short-lived tokens. This is what lets Claude's custom **web connectors** sign users in.
-If you don't need that, skip this file. The server works with Bearer API keys alone (`mcp_keys` and
-`validate_mcp_key`).
+If you don't need that, skip this file. The server works with Bearer API keys alone
+(`knowledge-mcp keys create`).
 
 ## What it does
 
-1. A client registers itself through Dynamic Client Registration (DCR). Registrations are stored in
-   `mcp_oauth_clients`, so connectors survive redeploys.
+1. A client registers itself through Dynamic Client Registration (DCR). Registrations are kept in the
+   store (SQLite file or Supabase `mcp_oauth_clients`), so connectors survive redeploys as long as the
+   store does (keep `/data` on a volume).
 2. `/authorize` shows a **consent page** first. It names the app and the address the token will be sent
    to. Nothing happens until the user presses "Continue with Google". The button is bound to a cookie,
    so another site cannot press it on the user's behalf, and the page cannot be framed.
@@ -16,7 +17,7 @@ If you don't need that, skip this file. The server works with Bearer API keys al
 4. The server issues its own **HS256** access token (1 hour) and refresh token (30 days). The access
    token's `aud` is your canonical `/mcp` URL.
 5. Refresh tokens rotate on every use and stay bound to the client that received them. Reusing an old
-   refresh token revokes every refresh token of that account (`mcp_refresh_tokens`).
+   refresh token revokes every refresh token of that account.
 6. The allowlist is checked again on every request and every refresh. Removing a person cuts them off
    immediately, even with an unexpired token.
 
@@ -42,21 +43,26 @@ If you don't need that, skip this file. The server works with Bearer API keys al
      type.
    - A user passes if either list matches. You can also set both lists in `mcp.config.json` under
      `oauth.allowedDomains` and `oauth.allowedEmails`. Env values take precedence.
-4. **Run `sql/setup.sql`.** It creates `mcp_oauth_clients` and `mcp_refresh_tokens` and locks them to
-   the service-role key.
+4. **Supabase store only:** run [`sql/supabase.sql`](packages/knowledge-mcp/sql/supabase.sql). It creates
+   `mcp_oauth_clients` and `mcp_refresh_tokens` and locks them to the service-role key. The default SQLite
+   store needs nothing.
 5. **Deploy.** On boot you will see `OAuth enabled · issuer=… · resource=…` in the logs. If a required
    value is missing, the log says `OAuth off — missing: …` with the names of the missing values, and
    the server falls back to Bearer keys.
 
 ## Roles
 
-A user's role comes from `app_users`, looked up by their Google email.
+A user's role comes from their users entry, looked up by their Google email.
 
-| `app_users` row | Role | What they can use |
+| Users entry | Role | What they can use |
 | --- | --- | --- |
-| `role = 'admin'` | admin | Every tool |
-| Any other `role` value | engineer | Tool groups in `allowed_tools`, Drive folders in `allowed_drive_folders`, Slack channels in `allowed_slack_channels`. An empty column means no limit on that dimension |
-| No row | viewer | Only `ping`, unless `access.viewerTools` in `mcp.config.json` opens tool groups |
+| `--role admin` | admin | Every tool |
+| `--role member` | member | Every plugin, or only the plugins in `--tools`. Drive folders (`--drive-folders`) and Slack channels (`--slack-channels`) can be limited too. Empty means no limit |
+| No entry | viewer | Only `ping`, unless `access.viewerTools` in `mcp.config.json` opens plugins |
 
-Signing in proves who someone is. It does not grant access to data. Add a row to `app_users` for each
-person who should use the tools.
+Signing in proves who someone is. It does not grant access to data. Register each person who should use
+the tools:
+
+```bash
+knowledge-mcp users add lee@example.com --role member
+```
