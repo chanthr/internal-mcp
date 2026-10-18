@@ -1,7 +1,7 @@
 {
   "name": "knowledge-mcp-monorepo",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Knowledge MCP: the @chnxthr/knowledge-mcp framework and the create-knowledge-mcp generator.",
   "license": "MIT",
   "type": "module",
