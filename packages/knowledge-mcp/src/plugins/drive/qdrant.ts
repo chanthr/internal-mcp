@@ -170,7 +170,7 @@ export async function ensureCollection(): Promise<void> {
   for (const fieldName of [
     'file_type', 'cluster', 'file_id', 'source',
     // 이미지 유무 / frontmatter 메타 filter
-    'has_image', 'doc_status', 'doc_tier',
+    'has_image', 'doc_status',
     // 신규 — 태그·모드·경로 파생 filter (배열 doc_tags 는 원소 단위 keyword 매칭)
     'doc_tags', 'doc_type', 'doc_category', 'doc_customer',
   ] as const) {
@@ -205,8 +205,7 @@ export type ChunkPayload = {
   has_code_block: boolean; // ``` fence 존재 여부
 
   // ── frontmatter 승격 (검색 filter·연결) ──
-  doc_status: string | null; // living | implemented | accepted | exploring | parked | superseded
-  doc_tier: string | null; // (레거시 S|M|L — 신규 문서 미사용)
+  doc_status: string | null; // frontmatter status (any value; superseded and parked are demoted in search)
   doc_date: string | null; // ISO date
   doc_authors: string[]; // ["alice", "claude"]
   doc_related: string[]; // 문서↔문서 연결 (related)
@@ -218,6 +217,6 @@ export type ChunkPayload = {
   doc_confidence: string | null; // HIGH | MEDIUM
 
   // ── 경로 파생 (biz 소스 — frontmatter 없는 PDF/docx) ──
-  doc_category: string | null; // 최상위 폴더(NN_ 제거): 고객사·IR_피칭덱·세일즈 …
-  doc_customer: string | null; // 01_고객사/{name} → 고객사명
+  doc_category: string | null; // 최상위 폴더(NN_ 제거): 예) Clients, Sales, Finance
+  doc_customer: string | null; // {customerFolders}/{name} → 고객사명(config drive.customerFolders)
 }

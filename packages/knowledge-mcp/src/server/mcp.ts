@@ -34,7 +34,7 @@ export function createMcpServer(registry: Registry): Server {
     const result = await (async () => {
       // Checked again on call, not only on list (defense in depth). No auth = deny.
       if (!auth || !auth.ok || !isToolAllowed(auth, name, registry.groupOf(name))) {
-        return textResult(`[forbidden] 도구 '${name}' 은 현재 직원 권한으로 접근 불가입니다.`, true);
+        return textResult(`[forbidden] tool '${name}' is not available to your role.`, true);
       }
       if (name === PING) {
         try {

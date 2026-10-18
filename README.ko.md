@@ -275,8 +275,11 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 설정 키 | 뜻 |
 | --- | --- |
 | `orgId` | 인증 정보에 실리는 조직 식별자 |
-| `branding.name` / `branding.instructions` | 서버 이름. `instructions`를 적으면 자동 안내(기본 문장과 플러그인별 안내)를 대신합니다 |
-| `drive.roots[]` / `drive.excludeFolders[]` | 색인하고 검색할 폴더, 어디서든 건너뛸 폴더 이름 |
+| `branding.name` / `branding.instructions` | 로그인 동의 화면과 OAuth 메타데이터에 보이는 이름. `instructions`를 적으면 클라이언트가 받는 안내(기본 문장과 플러그인별 안내)를 대신합니다 |
+| `drive.roots[]` | 색인하고 검색할 폴더 `{ id, name, source }`. `source`는 `dev`(머리말이 있는 Markdown) 또는 `biz`(PDF, Office, Google 파일) |
+| `drive.excludeFolders[]` | 색인, 검색, 읽기, 목록 어디서든 건너뛸 폴더 이름. 대소문자와 공백은 무시합니다 |
+| `drive.customerFolders[]` | 고객사마다 하위 폴더를 둔 `biz` 최상위 폴더(`Clients/Acme/…` → 고객사 `Acme`). 검색의 `customer` 필터에 씁니다. 기본 `Clients`, `Customers`, `고객사` |
+| `drive.rank[]` | `semantic_search_drive`의 선택 규칙 `{ prefix, label, weight }`. 예: `Current/`(가중치 1.1)를 `Archive/`(0.9)보다 앞에. 기본은 없음 |
 | `qdrant.collection` | 벡터 컬렉션 이름(환경변수 `QDRANT_COLLECTION`이 먼저) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Google 로그인을 허용할 대상 |
 | `access.viewerTools[]` | 등록되지 않은 로그인 사용자에게 열 플러그인 id. 기본은 없음 |

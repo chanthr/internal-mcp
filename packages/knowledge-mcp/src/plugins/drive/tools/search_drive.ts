@@ -11,16 +11,16 @@ import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
 import { classifyAndPath } from '../path.js';
 
 const DESCRIPTION =
-  'Google Drive 에서 파일 검색. mode="title" 은 파일명, "fullText" 는 본문까지. ' +
+  'Searches files in Google Drive. mode="title" matches file names; "fullText" also matches the content. ' +
   'Unified search across your indexed Drive assets. ' +
-  '검색 범위는 설정한 Drive root 하위로 한정되며, 설정의 제외 폴더(excludeFolders)를 거치는 파일은 결과에서 빠진다. ' +
-  'search → read_drive_file 순서로 사용.';
+  'Search is limited to the configured Drive roots, and files under the configured excluded folders (excludeFolders) are left out of the results. ' +
+  'Use search first, then read_drive_file.';
 
 const inputSchema = z.object({
-  query: z.string().min(1).describe('검색어'),
-  mode: z.enum(['title', 'fullText']).default('title').describe('"title" 또는 "fullText". default "title" (신뢰성 ↑).'),
-  mimeType: z.string().optional().describe('선택. 예: "text/markdown" 또는 "application/vnd.google-apps.folder"'),
-  pageSize: z.number().int().min(1).max(50).default(10).describe('최대 결과 수 (1-50). default 10.'),
+  query: z.string().min(1).describe('Search query'),
+  mode: z.enum(['title', 'fullText']).default('title').describe('"title" or "fullText". default "title" (more reliable).'),
+  mimeType: z.string().optional().describe('Optional. e.g. "text/markdown" or "application/vnd.google-apps.folder"'),
+  pageSize: z.number().int().min(1).max(50).default(10).describe('Max number of results (1-50). default 10.'),
 });
 
 export const searchDriveTool = defineTool({

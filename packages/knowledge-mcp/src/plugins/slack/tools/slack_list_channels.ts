@@ -27,16 +27,16 @@ const inputSchema = z.object({
   enabledOnly: z
     .boolean()
     .default(true)
-    .describe('true(default) 면 활성 채널만. false 면 비활성(미분류 신규 포함) 포함.'),
+    .describe('true (default) returns active channels only. false also includes inactive ones (including new, uncategorized channels).'),
 });
 
 export const slackListChannelsTool = defineTool({
   name: 'slack_list_channels',
   description:
     'Returns the Slack channel landscape — each channel purpose and whether the bot can read it (bot_can_read). ' +
-    'Slack 관련 질문에서 가장 먼저 호출해 "어느 채널을 검색/읽을지" 판단하라. ' +
-    'bot_can_read=true 면 slack_read_channel·slack_search 로 읽기 가능, false 면 봇을 그 채널에 초대해야 읽거나 검색할 수 있다. ' +
-    '호출 시 Slack 실제 채널과 자동 동기화된다(이름 변경·신규 채널 반영). 용도 매핑은 서버 저장소의 slack_channels 에서 관리.',
+    'Call this first for any Slack question to decide which channel to search or read. ' +
+    'bot_can_read=true means slack_read_channel and slack_search can read it; false means the bot must be invited to that channel before it can be read or searched. ' +
+    'Each call syncs with the actual Slack channels (renames and new channels are picked up). The purpose mapping is managed in slack_channels in the server store.',
   input: inputSchema,
   run: (args) => handleSlackListChannels(args),
 });
@@ -119,7 +119,7 @@ export async function handleSlackListChannels(args: z.infer<typeof inputSchema>)
     return await _handleSlackListChannels(args);
   } catch (e: unknown) {
     return {
-      content: [{ type: 'text' as const, text: `[error] 채널 목록 조회 일시 오류 (${e instanceof Error ? e.message : String(e)}).` }],
+      content: [{ type: 'text' as const, text: `[error] Temporary error while listing channels (${e instanceof Error ? e.message : String(e)}).` }],
       isError: true,
     };
   }
@@ -147,7 +147,7 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
     rows = await store.listSlackChannels();
   } catch (e) {
     return {
-      content: [{ type: 'text' as const, text: `[error] slack_channels 조회 실패: ${e instanceof Error ? e.message : String(e)}` }],
+      content: [{ type: 'text' as const, text: `[error] slack_channels lookup failed: ${e instanceof Error ? e.message : String(e)}` }],
       isError: true,
     };
   }
@@ -209,13 +209,13 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
 
   const syncNote =
     synced.inserted || synced.renamed || synced.linked
-      ? ` (동기화: 신규 ${synced.inserted}·이름갱신 ${synced.renamed}·id연결 ${synced.linked})`
+      ? ` (synced: ${synced.inserted} new, ${synced.renamed} renamed, ${synced.linked} id-linked)`
       : '';
 
   const text = JSON.stringify(
     {
       count: channels.length,
-      note: 'bot_can_read=true → slack_read_channel·slack_search 가능. false → 봇 초대 필요.' + syncNote,
+      note: 'bot_can_read=true → slack_read_channel / slack_search work. false → invite the bot first.' + syncNote,
       channels,
     },
     null,

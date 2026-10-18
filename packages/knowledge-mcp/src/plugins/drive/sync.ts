@@ -202,7 +202,7 @@ export async function runIncrementalSync(): Promise<SyncResult> {
       } catch (e) {
         errored++;
         console.error(
-          `[drive-sync] 파일 색인 실패 (skip, 토큰은 전진): fileId=${ch.fileId ?? '?'} — ${e instanceof Error ? e.message : e}`,
+          `[drive-sync] file indexing failed (skipped, page token still advances): fileId=${ch.fileId ?? '?'} — ${e instanceof Error ? e.message : e}`,
         );
       }
     }
@@ -242,7 +242,7 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
 
   const run = async () => {
     if (_running) {
-      console.error('[drive-sync] 이전 주기 진행 중 — 이번 tick 건너뜀');
+      console.error('[drive-sync] previous cycle still running — skipping this tick');
       return;
     }
     _running = true;
@@ -263,5 +263,5 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
   };
 
   void run().finally(scheduleNext); // startup 1회 후 주기 시작
-  console.error(`[drive-sync] scheduler 시작 — ${intervalMin}분 주기 (자기재귀 setTimeout · 재진입 가드)`);
+  console.error(`[drive-sync] scheduler started — every ${intervalMin} min (self-rescheduling setTimeout + reentry guard)`);
 }

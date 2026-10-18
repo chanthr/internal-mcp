@@ -28,7 +28,7 @@ export async function runGetToken(): Promise<void> {
   const clientSecret = process.env.GOOGLE_OAUTH_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    console.error('❌ GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET 가 .env 에 없습니다.');
+    console.error('❌ GOOGLE_OAUTH_CLIENT_ID / CLIENT_SECRET not found in .env.');
     process.exit(1);
   }
 
@@ -44,13 +44,13 @@ export async function runGetToken(): Promise<void> {
     }).toString();
 
   console.log('\n========================================');
-  console.log('  OAuth Refresh Token 발급');
+  console.log('  Issue an OAuth Refresh Token');
   console.log('========================================\n');
   console.log('1. Local callback server: http://localhost:' + PORT);
-  console.log('2. 브라우저 자동 열림 (또는 아래 URL 수동 접속):');
+  console.log('2. A browser opens automatically (or open the URL below manually):');
   console.log('\n' + authUrl + '\n');
   console.log('3. Sign in with your Google account and allow access');
-  console.log('4. 자동 redirect 후 콘솔에 refresh token 출력\n');
+  console.log('4. After the automatic redirect, the refresh token is printed to the console\n');
 
   const server = http.createServer(async (req, res) => {
     if (!req.url?.startsWith('/callback')) {
@@ -93,25 +93,25 @@ export async function runGetToken(): Promise<void> {
       const refreshToken = tokens.refresh_token;
 
       if (!refreshToken) {
-        console.error('\n❌ refresh_token 미발급. 이미 권한 부여한 경우 일 수 있음.');
-        console.error('   해결: https://myaccount.google.com/connections 에서');
-        console.error('         client 제거 후 다시 시도.\n');
+        console.error('\n❌ No refresh_token was issued. This can happen if access was already granted.');
+        console.error('   Fix: go to https://myaccount.google.com/connections,');
+        console.error('        remove the client, then try again.\n');
         res.writeHead(400);
         res.end('No refresh_token in response');
         process.exit(1);
       }
 
       console.log('\n========================================');
-      console.log('  ✅ 발급 성공');
+      console.log('  ✅ Token issued');
       console.log('========================================\n');
-      console.log('.env 에 다음 라인 추가:\n');
+      console.log('Add this line to .env:\n');
       process.stdout.write(`GOOGLE_OAUTH_REFRESH_TOKEN=${refreshToken}\n\n`);
 
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><body style="font-family:sans-serif;padding:40px;">
-        <h2>✅ Refresh Token 발급 완료</h2>
-        <p>터미널에서 token 을 확인하고 <code>.env</code> 에 추가하세요.</p>
-        <p>이 창은 닫으셔도 됩니다.</p>
+        <h2>✅ Refresh Token issued</h2>
+        <p>Copy the token from the terminal and add it to <code>.env</code>.</p>
+        <p>You can close this window.</p>
       </body></html>`);
 
       setTimeout(() => {
@@ -133,7 +133,7 @@ export async function runGetToken(): Promise<void> {
     const opener = process.platform === 'darwin' ? ['open', [authUrl]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', authUrl]] : ['xdg-open', [authUrl]];
     execFile(opener[0] as string, opener[1] as string[], (err) => {
       if (err) {
-        console.log('(브라우저 자동 열기 실패. 위 URL 을 수동 복사하세요)');
+        console.log('(Could not open the browser automatically. Copy the URL above manually)');
       }
     });
   });

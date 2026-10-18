@@ -207,10 +207,10 @@ export class Registry {
     const e = this.entries.get(name);
     if (e) {
       const enabled = this.toolEnabled(e);
-      if (enabled !== true) return textResult(`[error] 도구 '${name}' 이 설정되지 않았습니다 (${enabled}).`, true);
+      if (enabled !== true) return textResult(`[error] tool '${name}' is not configured (${enabled}).`, true);
       const parsed = e.tool.input ? safeParse(e.tool.input, args ?? {}) : { success: true as const, data: args ?? {} };
       if (!parsed.success) {
-        return textResult(`[invalid_input] 도구 '${name}' 입력이 스키마에 맞지 않습니다 — ${formatValidationError(parsed.error)}`, true);
+        return textResult(`[invalid_input] tool '${name}': ${formatValidationError(parsed.error)}`, true);
       }
       const ctx: ToolContext = {
         user: { email: auth.email, role: auth.role ?? 'viewer', keyId: auth.key_id },
@@ -236,7 +236,7 @@ export class Registry {
     const blockedBy = this.upstreams.prefixOwner(name);
     if (blockedBy) {
       console.error(`[upstream] blocked (not exposed by the read-only gateway): ${name}`);
-      return textResult(`[forbidden] write/미허용 도구는 비활성화됨(read-only gateway): ${name}`, true);
+      return textResult(`[forbidden] ${name} is not exposed by the gateway (only read tools are, unless the upstream sets expose).`, true);
     }
     return textResult(`Unknown tool: ${name}`, true);
   }

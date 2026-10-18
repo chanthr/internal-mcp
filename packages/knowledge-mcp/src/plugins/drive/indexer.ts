@@ -10,6 +10,8 @@ import { extractText } from './extract_text.js';
 import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES } from './settings.js';
+import { normalizeFolderName } from './exclude.js';
+import { getConfig } from '../../core/config.js';
 
 export { DRIVE_ROOTS, MAX_FILE_BYTES };
 
@@ -62,7 +64,7 @@ export interface IndexableFile {
  * 청크의 임베딩 입력 텍스트 — heading breadcrumb(상위>하위 섹션 맥락)를 본문 앞에 붙인다.
  * (contextual chunk header) 부모 heading 은 청크 본문에 없어(다른 섹션) 벡터가 섹션 맥락을 잃는데,
  * 이를 임베딩에 포함하면 recall 이 오른다. 저장·표시용 content(payload)는 그대로 두고 임베딩 입력에만 적용.
- * '문서 시작'(첫 heading 이전 placeholder)은 의미 없어 skip. ★증분(indexFile)·전체(reindex.ts) 공용 SSOT —
+ * heading 이 없으면(첫 heading 이전 본문) 본문만. 옛 자리표시 '문서 시작' 도 건너뛴다. ★증분(indexFile)·전체(reindex.ts) 공용 SSOT —
  * 두 경로가 반드시 같은 입력을 임베딩해야 같은 청크가 같은 벡터를 가진다(벡터 공간 정합).
  */
 export function embedInputForChunk(chunk: RawChunk): string {
@@ -84,12 +86,14 @@ export interface BizMeta {
 
 // 폴더/파일명 앞 번호 prefix("01_", "06_", "0316_") 제거용.
 const NN_PREFIX = /^\d{1,4}[_-]/;
+// 고객사별 하위 폴더를 둔 최상위 폴더 이름(config drive.customerFolders). 번호 접두를 떼고 대소문자 무시로 비교.
+const CUSTOMER_FOLDERS = getConfig().drive.customerFolders.map((n) => normalizeFolderName(n.replace(NN_PREFIX, '')));
 
 /**
  * biz 소스(PDF/docx — frontmatter 없음)의 경로/파일명에서 메타 파생.
  * EXTRACTED — 사람이 폴더로 분류한 사실(LLM 추론 아님). dev 소스는 frontmatter 가 SSOT 라 빈 값.
- *   doc_category : 최상위 폴더(NN_ 제거)  예) "01_고객사/…" → "고객사"
- *   doc_customer : 01_고객사/{name}      예) "01_고객사/Acme/…" → "Acme"
+ *   doc_category : 최상위 폴더(NN_ 제거)  예) "01_Clients/…" → "Clients"
+ *   doc_customer : {customerFolders}/{name}  예) "01_Clients/Acme/…" → "Acme"
  *   path_tags    : 폴더 세그먼트(NN_ 제거) + 파일명 토큰 (검색 태그)
  */
 export function deriveBizMeta(path: string, source: 'dev' | 'biz'): BizMeta {
@@ -99,7 +103,8 @@ export function deriveBizMeta(path: string, source: 'dev' | 'biz'): BizMeta {
   const fileName = segs[segs.length - 1] ?? '';
   const strip = (s: string) => s.replace(NN_PREFIX, '');
   const category = folders[0] ? strip(folders[0]) : null;
-  const customer = folders[0] && folders[0].includes('고객사') && folders[1] ? folders[1] : null;
+  const top = folders[0] ? normalizeFolderName(strip(folders[0])) : '';
+  const customer = top && folders[1] && CUSTOMER_FOLDERS.some((c) => c && top.includes(c)) ? folders[1] : null;
   const folderTags = folders.map(strip);
   const nameTokens = fileName
     .replace(/\.[a-z0-9]+$/i, '') // 확장자 제거
@@ -143,7 +148,6 @@ export function buildChunkPayload(
     table_count: chunk.table_count,
     has_code_block: chunk.has_code_block,
     doc_status: chunk.doc_status,
-    doc_tier: chunk.doc_tier,
     doc_date: chunk.doc_date,
     doc_authors: chunk.doc_authors,
     doc_related: chunk.doc_related,

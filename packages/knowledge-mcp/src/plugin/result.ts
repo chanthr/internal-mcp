@@ -42,7 +42,7 @@ export function isValidationError(err: unknown): boolean {
 /** Map a thrown error to a result the model can read. */
 export function errorResult(toolName: string, err: unknown): ToolResult {
   if (isValidationError(err)) {
-    return textResult(`[invalid_input] 도구 '${toolName}' 입력이 스키마에 맞지 않습니다 — ${formatValidationError(err)}`, true);
+    return textResult(`[invalid_input] tool '${toolName}': ${formatValidationError(err)}`, true);
   }
   if (err instanceof ToolError) return textResult(`[error] ${err.message}`, true);
   const msg = err instanceof Error ? err.message : String(err);

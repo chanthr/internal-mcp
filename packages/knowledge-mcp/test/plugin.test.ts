@@ -78,7 +78,7 @@ test('input is validated, results and errors are normalized', async () => {
   assert.equal(text(await r.call('n_mcp', {}, admin)), 'raw');
   assert.equal(text(await r.call('n_toolerr', {}, admin)), '[error] nope');
   assert.equal(text(await r.call('n_crash', {}, admin)), '[fatal] boom');
-  assert.match(text(await r.call('n_off', {}, admin)), /설정되지 않았습니다 \(needs FOO\)/);
+  assert.match(text(await r.call('n_off', {}, admin)), /is not configured \(needs FOO\)/);
   assert.equal(text(await r.call('nope', {}, admin)), 'Unknown tool: nope');
 });
 

@@ -29,7 +29,6 @@ export interface RawChunk {
   has_code_block: boolean;
   // ── frontmatter 승격 (문서 단위 — 모든 청크 동일) ──
   doc_status: string | null;
-  doc_tier: string | null;
   doc_date: string | null;
   doc_authors: string[];
   doc_related: string[];
@@ -70,7 +69,6 @@ export function parseFrontmatter(markdown: string): ParsedDoc {
 
 interface DocMeta {
   doc_status: string | null;
-  doc_tier: string | null;
   doc_date: string | null;
   doc_authors: string[];
   doc_related: string[];
@@ -110,7 +108,6 @@ function asArray(v: unknown): string[] {
 function parseDocMeta(fm: Record<string, unknown>): DocMeta {
   return {
     doc_status: asString(fm.status),
-    doc_tier: asString(fm.tier),
     doc_date: asString(fm.date),
     doc_authors: asArray(fm.authors),
     doc_related: asArray(fm.related),
@@ -318,7 +315,7 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
   const sections = body.split(/\n(?=#+ )/);
   const chunks: PreChunk[] = [];
   const headingStack: string[] = []; // index = (heading level - 1) → breadcrumb 상위>하위 맥락 보존
-  let currentHeading = '문서 시작';
+  let currentHeading = ''; // 첫 heading 이전 본문은 heading 없음(예전엔 한국어 자리표시 '문서 시작')
 
   for (const section of sections) {
     if (section.trim().length === 0) continue;

@@ -96,7 +96,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   // 어떤 플러그인이 켜졌는지(자격증명 갖춰진 것만), 어느 저장소를 쓰는지 부팅 시 1줄 로그 — ops 가시성.
   const store = await getStore();
   console.error(`[knowledge-mcp] config=${configSource()} · store=${store.kind} (${store.location}) · plugins · ${registry.summary()}`);
-  console.error(`[log-mask] env 시크릿 ${maskedSecretCount()}개 + 일반 패턴 마스킹 중`);
+  console.error(`[log-mask] masking ${maskedSecretCount()} secret env values and common token patterns`);
   if (configSource() === 'defaults') {
     console.error(
       '[knowledge-mcp] ⚠️ no config found, running on defaults (no Drive roots, no excluded folders, no login allowlist). ' +
@@ -185,7 +185,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     // 반쯤 설정된 상태는 조용히 끄지 않고 빠진 값을 이름으로 알린다(값은 노출 안 함).
     console.error(`[knowledge-mcp] ⚠️ OAuth off — missing: ${oauthConfigProblems().join(', ')}`);
   } else {
-    console.error('[knowledge-mcp] OAuth 미설정 (Bearer 전용)');
+    console.error('[knowledge-mcp] OAuth off (API keys only)');
   }
 
   // CORS preflight — Claude.ai 웹 커넥터 브라우저 요청용.
