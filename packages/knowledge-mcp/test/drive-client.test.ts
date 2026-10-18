@@ -1,6 +1,6 @@
 /**
  * Drive REST client against a fake Google: service-account JWT grant (signature, iss, aud, scope),
- * refresh-token grant, query parameters, media download, export, changes, retry on 429, token refresh on 401.
+ * refresh-token grant, query parameters, media download, export, changes, retry on 429 and 403 rate limits, token refresh on 401.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +18,7 @@ const calls: Array<{ path: string; query: URLSearchParams; auth?: string }> = []
 let tokensIssued = 0;
 let fail429Once = true;
 let reject401Once = true;
+let rateLimit403Once = true;
 
 const body = (req: IncomingMessage) =>
   new Promise<string>((resolve) => {
@@ -61,6 +62,16 @@ const server = createServer(async (req, res) => {
   }
   if (url.pathname === '/drive/v3/files/doc1/export') return res.writeHead(200).end('# exported');
   if (url.pathname === '/drive/v3/files/gone') return json(404, { error: { code: 404, message: 'File not found: gone.' } });
+  if (url.pathname === '/drive/v3/files/busy') {
+    if (rateLimit403Once) {
+      rateLimit403Once = false;
+      return json(403, { error: { code: 403, message: 'Rate Limit Exceeded', errors: [{ reason: 'userRateLimitExceeded' }] } });
+    }
+    return json(200, { name: 'busy' });
+  }
+  if (url.pathname === '/drive/v3/files/denied') {
+    return json(403, { error: { code: 403, message: 'The user does not have sufficient permissions.', errors: [{ reason: 'insufficientFilePermissions' }] } });
+  }
   if (url.pathname === '/drive/v3/changes/startPageToken') {
     if (reject401Once) {
       reject401Once = false;
@@ -116,6 +127,14 @@ test('errors carry the HTTP status and Google message', async () => {
     assert.match(e.message, /File not found: gone\./);
     return true;
   });
+});
+
+test('403 rate limit is retried, 403 permission denied is not', async () => {
+  const drive = createDriveClient(saCreds, `${base}/drive/v3`);
+  assert.deepEqual((await drive.files.get({ fileId: 'busy' })).data, { name: 'busy' });
+  assert.equal(calls.filter((c) => c.path === '/drive/v3/files/busy').length, 2);
+  await assert.rejects(drive.files.get({ fileId: 'denied' }), (e: unknown) => e instanceof DriveApiError && e.code === 403);
+  assert.equal(calls.filter((c) => c.path === '/drive/v3/files/denied').length, 1);
 });
 
 test('refresh token: 401 triggers one new token, changes endpoints work', async () => {

@@ -28,7 +28,8 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 
 // Drive API 전역 timeout — 명시 timeout 이 없으면 매달린 호출 하나가 도구 호출 전체를 멈춘다.
 const DRIVE_TIMEOUT_MS = Number(process.env.DRIVE_TIMEOUT_MS ?? 15_000);
-const RETRIES = 3; // 429·5xx·네트워크 오류. GET 만 쓰므로 다시 보내도 안전하다
+const DRIVE_DOWNLOAD_TIMEOUT_MS = Number(process.env.DRIVE_DOWNLOAD_TIMEOUT_MS ?? 120_000);
+const RETRIES = 3; // 429, 403 속도 제한, 5xx, 네트워크 오류. GET 만 쓰므로 다시 보내도 안전하다
 
 // ── 응답 타입 (이 서버가 읽는 필드만) ──
 export interface DriveFile {
@@ -200,45 +201,51 @@ export function createDriveClient(creds: Credentials, apiBase = DRIVE_API): Driv
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     const url = `${apiBase}${path}${qs.size ? `?${qs}` : ''}`;
+    // 본문 다운로드(media, export)는 큰 PDF 나 PPTX 를 받으므로 메타 조회보다 길게 기다린다.
+    const timeoutMs = responseType === 'json' ? DRIVE_TIMEOUT_MS : DRIVE_DOWNLOAD_TIMEOUT_MS;
+    const backoff = (attempt: number, retryAfter?: number) =>
+      new Promise((r) => setTimeout(r, retryAfter && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt));
     for (let attempt = 0; ; attempt++) {
-      let res: Response;
+      const retriesLeft = attempt + 1 < RETRIES;
       try {
-        res = await fetch(url, {
+        const res = await fetch(url, {
           headers: { Authorization: `Bearer ${await accessToken()}`, Accept: responseType === 'json' ? 'application/json' : '*/*' },
-          signal: AbortSignal.timeout(DRIVE_TIMEOUT_MS),
+          signal: AbortSignal.timeout(timeoutMs),
         });
-      } catch (e) {
-        if (e instanceof DriveApiError) throw e; // token request failed
-        if (attempt + 1 < RETRIES) {
-          await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+        if (res.status === 401 && attempt === 0) {
+          cached = null; // revoked or expired early: get a new token once
+          await res.arrayBuffer().catch(() => undefined);
           continue;
         }
-        const reason = e instanceof Error && e.name === 'TimeoutError' ? `timeout ${DRIVE_TIMEOUT_MS}ms` : String(e);
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          // Drive 는 속도 제한을 429 말고 403 rateLimitExceeded / userRateLimitExceeded 로도 준다.
+          const rateLimited = res.status === 429 || (res.status === 403 && /rateLimitExceeded|userRateLimitExceeded/.test(text));
+          if ((rateLimited || res.status >= 500) && retriesLeft) {
+            await backoff(attempt, Number(res.headers.get('retry-after')));
+            continue;
+          }
+          let msg = text.slice(0, 300);
+          try {
+            msg = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? msg;
+          } catch {
+            /* not JSON */
+          }
+          throw new DriveApiError(`[drive] ${res.status} ${path}: ${msg}`, res.status);
+        }
+        // 본문 읽기도 재시도 범위 안 — 느린 회선에서 큰 파일이 도중에 끊겨도 한 번 더 받는다.
+        if (responseType === 'arraybuffer') return { data: await res.arrayBuffer() };
+        if (responseType === 'text') return { data: await res.text() };
+        return { data: await res.json() };
+      } catch (e) {
+        if (e instanceof DriveApiError) throw e; // HTTP error above, or the token request failed
+        if (retriesLeft) {
+          await backoff(attempt);
+          continue;
+        }
+        const reason = e instanceof Error && e.name === 'TimeoutError' ? `timeout ${timeoutMs}ms` : String(e);
         throw new DriveApiError(`[drive] GET ${path} failed: ${reason}`, 0);
       }
-      if (res.status === 401 && attempt === 0) {
-        cached = null; // revoked or expired early: get a new token once
-        continue;
-      }
-      if ((res.status === 429 || res.status >= 500) && attempt + 1 < RETRIES) {
-        const after = Number(res.headers.get('retry-after'));
-        await res.arrayBuffer().catch(() => undefined);
-        await new Promise((r) => setTimeout(r, Number.isFinite(after) && after > 0 ? after * 1000 : 500 * 2 ** attempt));
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        let msg = text.slice(0, 300);
-        try {
-          msg = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? msg;
-        } catch {
-          /* not JSON */
-        }
-        throw new DriveApiError(`[drive] ${res.status} ${path}: ${msg}`, res.status);
-      }
-      if (responseType === 'arraybuffer') return { data: await res.arrayBuffer() };
-      if (responseType === 'text') return { data: await res.text() };
-      return { data: await res.json() };
     }
   };
 

@@ -48,8 +48,9 @@ export const drivePlugin = definePlugin({
     '"list all" / folder contents → list_drive_folder(folderName). When a chunk lacks context, read_drive_file with the File ID ' +
     '(fileIds=[...] reads several at once).',
   async start({ log }) {
-    // Incremental Drive → Qdrant sync. Needs both halves and is skipped with DRIVE_SYNC_ENABLED=false.
-    if (!process.env.QDRANT_URL || process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured()) return;
+    // Incremental Drive → Qdrant sync. Needs Drive credentials, Qdrant and an embedding key; DRIVE_SYNC_ENABLED=false turns it off.
+    // (Without OPENAI_API_KEY every changed file would fail and be dropped.)
+    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !semanticConfigured()) return;
     const { ensureCollection } = await import('./qdrant.js');
     const { startDriveSyncScheduler } = await import('./sync.js');
     try {

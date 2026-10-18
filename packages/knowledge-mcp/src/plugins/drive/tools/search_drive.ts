@@ -8,7 +8,10 @@ import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
-import { classifyAndPath } from '../path.js';
+import { classifyAndPath, type SearchClass } from '../path.js';
+import { isExcludedName } from '../exclude.js';
+
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 const DESCRIPTION =
   'Searches files in Google Drive. mode="title" matches file names; "fullText" also matches the content. ' +
@@ -68,19 +71,28 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
     }));
 
     // 보안: 민감/제외 폴더(PII·계약·HR·deprecated)·색인 대상 밖 제거 + 직원별 Drive 폴더 scope.
+    // 폴더 결과는 그 폴더 자신도 본다. 부모만 보면 제외 폴더(예: HR)가 이름으로 결과에 나오고,
+    // 허용 폴더 자체는 부모 경로가 범위 밖이라 빠진다.
     const folderScope = allowedDriveFolders(auth);
-    const cps = await Promise.all(raw.map((f) => classifyAndPath(drive, f.parents)));
+    const cps = await Promise.all(
+      raw.map(async (f): Promise<{ cls: SearchClass; path: string }> => {
+        const parent = await classifyAndPath(drive, f.parents);
+        if (f.mimeType !== FOLDER_MIME || parent.cls !== 'ok') return parent;
+        if (isExcludedName(f.name)) return { cls: 'excluded', path: '' };
+        return { cls: 'ok', path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
+      }),
+    );
     const files = raw.filter(
       (_, i) => cps[i].cls === 'ok' && (!folderScope || isPathInScope(cps[i].path, folderScope)),
     );
-    const filtered = raw.length - files.length;
 
     return {
       content: [
         {
           type: 'text' as const,
           text: JSON.stringify(
-            { count: files.length, mode, query, filteredOut: filtered, files },
+            // 걸러진 건수는 돌려주지 않는다 — 범위 밖 사람이 단어를 넣어 "못 보는 파일에 그 단어가 몇 개 있는지" 알 수 있다.
+            { count: files.length, mode, query, files },
             null,
             2,
           ),

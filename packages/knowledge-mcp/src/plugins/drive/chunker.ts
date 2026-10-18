@@ -3,7 +3,7 @@
  *
  * 전략:
  * 1. Front-matter (---...---) 분리 → metadata 추출 (검색 payload 승격)
- * 2. heading (^#+ ) 위치마다 split → section
+ * 2. heading (^#{1,6} ) 위치마다 split → section. 코드블록 안의 "# 주석" 줄은 heading 이 아니다
  * 3. 각 section 이 MAX_TOKENS 넘으면 paragraph (\n\n) 단위로 sub-split
  *    - 표(|...|)·코드블록(```) 은 fence-aware (행/블록 중간에서 안 잘림)
  * 4. MIN_TOKENS 미만은 다음 청크와 merge
@@ -48,7 +48,13 @@ export interface ParsedDoc {
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n+/;
 
-export function parseFrontmatter(markdown: string): ParsedDoc {
+/** CRLF·CR → LF. Windows 에서 만든 파일은 frontmatter 와 heading 정규식에 걸리지 않았다. */
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+export function parseFrontmatter(input: string): ParsedDoc {
+  const markdown = normalizeNewlines(input);
   const m = markdown.match(FRONTMATTER_RE);
   if (!m) return { frontmatter: {}, body: markdown };
 
@@ -292,9 +298,36 @@ function splitLongText(text: string, maxTokens: number): string[] {
   return out;
 }
 
-/** heading line 의 레벨(#개수)+텍스트 추출 — breadcrumb(상위 > 하위) 구성용. */
-function extractHeading(text: string): { level: number; text: string } | null {
-  const m = text.match(/^(#+)\s+(.+)$/m);
+const HEADING_RE = /^(#{1,6})\s+(.+)$/;
+const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})/;
+
+/**
+ * body 를 heading 줄마다 section 으로 자른다. 코드블록(``` 또는 ~~~) 안의 줄은 heading 으로 보지 않는다 —
+ * 셸·파이썬 주석("# install")에서 잘리면 코드가 반으로 나뉘고 주석이 breadcrumb 에 들어갔다.
+ */
+function splitSections(body: string): string[] {
+  const sections: string[] = [];
+  let buf: string[] = [];
+  let fence: string | null = null; // 열린 fence 의 표식 문자열(``` 또는 ~~~)
+  for (const line of body.split('\n')) {
+    const f = line.match(FENCE_RE);
+    if (f) {
+      if (fence === null) fence = f[1];
+      // 닫는 fence = 같은 문자, 같거나 긴 길이, 뒤에 info 문자열 없음(CommonMark)
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
+    } else if (fence === null && HEADING_RE.test(line) && buf.length > 0) {
+      sections.push(buf.join('\n'));
+      buf = [];
+    }
+    buf.push(line);
+  }
+  if (buf.length > 0) sections.push(buf.join('\n'));
+  return sections;
+}
+
+/** section 첫 줄의 heading 레벨(#개수)+텍스트 — breadcrumb(상위 > 하위) 구성용. 첫 줄이 heading 이 아니면 null. */
+function extractHeading(section: string): { level: number; text: string } | null {
+  const m = section.split('\n', 1)[0].match(HEADING_RE);
   return m ? { level: m[1].length, text: m[2].trim() } : null;
 }
 
@@ -312,7 +345,7 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
   const docMeta = parseDocMeta(frontmatter);
   if (body.trim().length === 0) return [];
 
-  const sections = body.split(/\n(?=#+ )/);
+  const sections = splitSections(body);
   const chunks: PreChunk[] = [];
   const headingStack: string[] = []; // index = (heading level - 1) → breadcrumb 상위>하위 맥락 보존
   let currentHeading = ''; // 첫 heading 이전 본문은 heading 없음(예전엔 한국어 자리표시 '문서 시작')

@@ -1,6 +1,7 @@
 /**
  * End to end over Streamable HTTP with the real MCP client: keys from the SQLite store, role filtering,
- * custom plugin tools, plugin state, the read-only gateway to a remote MCP server, and 401s.
+ * custom plugin tools, plugin state, the read-only gateway to a remote MCP server, 401s, 503 on a store outage,
+ * and the per-person session cap.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,6 +17,7 @@ process.env.MCP_DATA_DIR = mkdtempSync(join(tmpdir(), 'kmcp-http-'));
 process.env.MCP_STORE = 'sqlite';
 process.env.PORT = '0';
 process.env.TRUST_PROXY = 'false';
+process.env.MCP_SESSION_MAX_PER_USER = '2';
 
 // A remote MCP server for the gateway: one read tool, one write tool, one name that collides with a local tool.
 const { McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js');
@@ -24,7 +26,14 @@ const express = (await import('express')).default;
 const { z } = await import('zod');
 const remoteApp = express();
 remoteApp.use(express.json());
+let flakyCalls = 0;
 remoteApp.post('/mcp', async (req, res) => {
+  // A tool that answers with a JSON-RPC error: the gateway must pass it on once, not reconnect and replay it.
+  if (req.body?.method === 'tools/call' && req.body.params?.name === 'get_flaky') {
+    flakyCalls++;
+    res.json({ jsonrpc: '2.0', id: req.body.id, error: { code: -32603, message: 'remote failed' } });
+    return;
+  }
   const s = new McpServer({ name: 'remote', version: '1.0.0' });
   s.tool('get_weather', 'Weather', { city: z.string() }, async ({ city }) => ({ content: [{ type: 'text', text: `sunny in ${city}` }] }));
   s.tool('delete_everything', 'Danger', {}, async () => ({ content: [{ type: 'text', text: 'deleted' }] }));
@@ -129,6 +138,15 @@ test('the gateway forwards read tools and blocks write tools', async () => {
   await c.close();
 });
 
+test('a remote JSON-RPC error comes back once and is not replayed', async () => {
+  const c = await connect(adminKey);
+  const before = flakyCalls;
+  const r = await c.callTool({ name: 'weather_get_flaky', arguments: {} }).catch((e: unknown) => ({ isError: true, thrown: e }));
+  assert.equal((r as { isError?: boolean }).isError, true);
+  assert.equal(flakyCalls - before, 1);
+  await c.close();
+});
+
 test('member with allowed_tools=[weather] sees only that group', async () => {
   const c = await connect(memberKey);
   assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ['ping', 'weather_get_weather']);
@@ -156,6 +174,37 @@ test('act-as: a proxy acting for an admin is capped at member', async () => {
   const anon = await connect(proxy.key); // no header → viewer
   assert.equal(JSON.parse(textOf(await anon.callTool({ name: 'ping', arguments: {} }))).role, 'viewer');
   await anon.close();
+});
+
+test('a store outage answers 503 with Retry-After, without the internal error', async () => {
+  const orig = store.validateKey;
+  store.validateKey = async () => {
+    throw new Error('connect ECONNREFUSED 10.0.0.5:5432');
+  };
+  try {
+    const r = await fetch(`${base}/mcp`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer kmcp_outage_probe', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    assert.equal(r.status, 503);
+    assert.equal(r.headers.get('retry-after'), '5');
+    assert.doesNotMatch(await r.text(), /ECONNREFUSED|10\.0\.0\.5/);
+  } finally {
+    store.validateKey = orig;
+  }
+});
+
+test('one person keeps at most MCP_SESSION_MAX_PER_USER sessions: the oldest is dropped', async () => {
+  const first = await connect(memberKey);
+  const second = await connect(memberKey);
+  const third = await connect(memberKey);
+  await assert.rejects(first.listTools(), /404|session not found/);
+  assert.ok((await second.listTools()).tools.length > 0);
+  assert.ok((await third.listTools()).tools.length > 0);
+  const other = await connect(adminKey); // another person is not affected
+  assert.ok((await other.listTools()).tools.length > 0);
+  await Promise.all([first, second, third, other].map((c) => c.close().catch(() => undefined)));
 });
 
 test('every call is in the audit log', async () => {

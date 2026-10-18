@@ -49,13 +49,25 @@ export function allowedDriveFolders(auth: AuthContext): string[] | null {
  * path 가 허용 폴더 prefix 하위인가. prefixes null = 전체 허용.
  * path 예: "Engineering/backend/..." · "Clients/Acme/proposal.pptx".
  * prefix 예: "Clients" → 그 하위 전부 허용. 정확 일치 또는 "prefix/" 로 시작.
+ * 양쪽 모두 NFC 로 맞춘다 — macOS 에서 올린 한글 이름은 NFD(자모 분리)로 와서, 같은 글자인데 비교가 어긋난다.
  */
 export function isPathInScope(path: string, prefixes: string[] | null): boolean {
   if (!prefixes || prefixes.length === 0) return true;
-  const norm = String(path).replace(/^\/+/, '');
+  const norm = String(path).normalize('NFC').replace(/^\/+/, '');
   return prefixes.some((p) => {
-    const pp = String(p).replace(/^\/+|\/+$/g, '');
+    const pp = String(p).normalize('NFC').replace(/^\/+|\/+$/g, '');
     if (!pp) return false;
     return norm === pp || norm.startsWith(pp + '/');
   });
+}
+
+/**
+ * path 가 허용 폴더의 상위 폴더인가 — "Clients" 는 prefix "Clients/Acme" 의 상위.
+ * 폴더 목록에서 허용 폴더까지 내려가는 길을 남기는 데 쓴다(상위 폴더 이름만 보이고 다른 내용은 걸러진다).
+ */
+export function isScopeAncestor(path: string, prefixes: string[] | null): boolean {
+  if (!prefixes || prefixes.length === 0) return false;
+  const norm = String(path).normalize('NFC').replace(/^\/+|\/+$/g, '');
+  if (!norm) return true;
+  return prefixes.some((p) => String(p).normalize('NFC').replace(/^\/+|\/+$/g, '').startsWith(norm + '/'));
 }

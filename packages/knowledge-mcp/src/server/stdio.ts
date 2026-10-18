@@ -11,6 +11,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { authenticateApiKey, type AuthContext } from '../core/auth.js';
 import { setProcessAuth } from '../core/context.js';
 import { getConfig, configSource } from '../core/config.js';
+import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
 import { resolveUser } from './identity.js';
 import { createMcpServer } from './mcp.js';
@@ -33,6 +34,7 @@ export async function runStdio(registry: Registry): Promise<void> {
   }
   // Set before the transport exists — see context.ts for why AsyncLocalStorage.enterWith is not enough.
   setProcessAuth(auth);
+  scheduleToolLogPrune(await getStore());
   void registry.start({ jobs: false }); // remotes only — background jobs belong to the long-running HTTP server
   const server = createMcpServer(registry);
   await server.connect(new StdioServerTransport());

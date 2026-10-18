@@ -1,4 +1,4 @@
-/** SQLite store: keys, users, OAuth refresh rotation, plugin state, Slack map, file permissions. */
+/** SQLite store: keys, users, OAuth refresh rotation, plugin state, Slack map, file permissions, log retention. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, statSync } from 'node:fs';
@@ -100,4 +100,27 @@ test('slack map: insert ignores duplicates, update only touches known columns', 
 
 test('tool-call log never throws', async () => {
   await store.logToolCall({ tool: 't', email: null, role: null, ok: false, error: 'x'.repeat(5000), durationMs: 1 });
+});
+
+test('tool-call log: prune removes rows older than the cutoff only', async () => {
+  await store.logToolCall({ tool: 'fresh', email: null, role: null, ok: true, error: null, durationMs: 1 });
+  assert.equal(await store.pruneToolCalls(1), 0); // everything here is from just now
+  assert.ok((await store.pruneToolCalls(-1)) >= 2); // a cutoff in the future removes all of it
+});
+
+test('tool-call log retention: 90 days on SQLite, none on Supabase unless MCP_TOOL_LOG_DAYS is set', async () => {
+  const { toolLogRetentionDays } = await import('../src/store/index.js');
+  const saved = process.env.MCP_TOOL_LOG_DAYS;
+  try {
+    delete process.env.MCP_TOOL_LOG_DAYS;
+    assert.equal(toolLogRetentionDays('sqlite'), 90);
+    assert.equal(toolLogRetentionDays('supabase'), null);
+    process.env.MCP_TOOL_LOG_DAYS = '30';
+    assert.equal(toolLogRetentionDays('supabase'), 30);
+    process.env.MCP_TOOL_LOG_DAYS = '0';
+    assert.equal(toolLogRetentionDays('sqlite'), null); // 0 = keep everything
+  } finally {
+    if (saved === undefined) delete process.env.MCP_TOOL_LOG_DAYS;
+    else process.env.MCP_TOOL_LOG_DAYS = saved;
+  }
 });
