@@ -1,0 +1,13 @@
+{
+  "out_dir": "ko",
+  "eyebrow": "SELF-HOSTED MCP SERVER",
+  "title": "Knowledge MCP",
+  "subtitle": "Drive, Slack, GitHub, Railway를 MCP 주소 하나로 연결합니다",
+  "steps": [
+    {"who": "클라이언트", "title": "연결하기", "desc": "Claude나 IDE가 API 키나 OAuth 토큰으로 /mcp를 호출합니다"},
+    {"who": "서버", "title": "권한 확인", "desc": "자격 증명을 검증하고 사용자 역할과 범위를 불러옵니다"},
+    {"who": "서버", "title": "도구 제공", "desc": "설정돼 있고 사용자에게 허용된 도구 묶음만 올립니다"},
+    {"who": "데이터 원본", "title": "읽기", "desc": "Drive, Slack, GitHub, Railway를 읽어 결과를 돌려줍니다"}
+  ],
+  "badges": []
+}

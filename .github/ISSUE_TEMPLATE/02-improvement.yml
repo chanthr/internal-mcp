@@ -1,0 +1,32 @@
+name: Improvement
+description: A better way to do something, or a doc that no longer matches the code.
+title: "[Improvement] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **This repository is public.** Remove API keys, tokens, passwords, internal URLs and private documents before you post.
+  - type: textarea
+    id: now
+    attributes:
+      label: Current behavior
+      description: What the code or the docs do today.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: A real case you ran into helps most.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Check
+      options:
+        - label: I removed secrets and private data from this issue
+          required: true
