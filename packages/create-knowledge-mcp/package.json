@@ -1,0 +1,31 @@
+{
+  "name": "create-knowledge-mcp",
+  "version": "0.3.0",
+  "description": "Create your own Knowledge MCP server: npx create-knowledge-mcp my-mcp",
+  "type": "module",
+  "license": "MIT",
+  "author": "chanthr",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chanthr/internal-mcp.git",
+    "directory": "packages/create-knowledge-mcp"
+  },
+  "homepage": "https://github.com/chanthr/internal-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/chanthr/internal-mcp/issues"
+  },
+  "keywords": ["mcp", "model-context-protocol", "create", "scaffold", "mcp-server"],
+  "bin": {
+    "create-knowledge-mcp": "index.js"
+  },
+  "files": ["index.js", "template", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

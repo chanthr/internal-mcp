@@ -1,0 +1,9 @@
+node_modules
+dist
+data
+.env
+.env.*
+.git
+*.log
+mcp.config.json
+*-service-account.json
