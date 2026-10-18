@@ -17,7 +17,7 @@ COPY packages/create-knowledge-mcp/package.json packages/create-knowledge-mcp/
 RUN npm ci
 COPY packages/knowledge-mcp/tsconfig.json packages/knowledge-mcp/tsconfig.build.json packages/knowledge-mcp/
 COPY packages/knowledge-mcp/src packages/knowledge-mcp/src
-RUN npm run build -w @chanthr/knowledge-mcp
+RUN npm run build -w @chnxthr/knowledge-mcp
 
 # === Production deps — only what the core package needs ===
 FROM node:22-alpine AS deps
@@ -25,7 +25,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/knowledge-mcp/package.json packages/knowledge-mcp/
 COPY packages/create-knowledge-mcp/package.json packages/create-knowledge-mcp/
-RUN npm ci --omit=dev -w @chanthr/knowledge-mcp && npm cache clean --force
+RUN npm ci --omit=dev -w @chnxthr/knowledge-mcp && npm cache clean --force
 
 # === Runtime ===
 FROM node:22-alpine AS runtime

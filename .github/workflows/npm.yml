@@ -1,4 +1,4 @@
-# Publishes @chanthr/knowledge-mcp and create-knowledge-mcp to npm on version tags (v*.*.*).
+# Publishes @chnxthr/knowledge-mcp and create-knowledge-mcp to npm on version tags (v*.*.*).
 # Needs the NPM_TOKEN repository secret (an npm automation token); without it the job skips with a warning.
 name: npm
 
@@ -34,5 +34,5 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then echo "::warning::NPM_TOKEN is not set — skipping publish"; exit 0; fi
-          npm publish -w @chanthr/knowledge-mcp --provenance --access public
+          npm publish -w @chnxthr/knowledge-mcp --provenance --access public
           npm publish -w create-knowledge-mcp --provenance --access public

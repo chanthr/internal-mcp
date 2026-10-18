@@ -7,7 +7,7 @@
  *
  * No dependencies: copies ./template, fills in the project name and the framework version, installs
  * packages with the package manager that ran it (npm, pnpm, yarn or bun), and prints the next steps.
- * KMCP_CORE_SPEC overrides the @chanthr/knowledge-mcp dependency (tests use a local tarball).
+ * KMCP_CORE_SPEC overrides the @chnxthr/knowledge-mcp dependency (tests use a local tarball).
  */
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const TEMPLATE = join(HERE, 'template');
 const VERSION = JSON.parse(readFileSync(join(HERE, 'package.json'), 'utf8')).version;
-const CORE = '@chanthr/knowledge-mcp';
+const CORE = '@chnxthr/knowledge-mcp';
 // npm drops .gitignore from published packages, so the template keeps it as _gitignore.
 const RENAMES = { _gitignore: '.gitignore', _dockerignore: '.dockerignore' };
 

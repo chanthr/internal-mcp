@@ -4,7 +4,7 @@
  * The plugin id ("notes") is also its permission group: admins see it, members see it unless their
  * allowed tools exclude it, and viewers see it only if config access.viewerTools lists it.
  */
-import { definePlugin, defineTool, ToolError, z } from '@chanthr/knowledge-mcp';
+import { definePlugin, defineTool, ToolError, z } from '@chnxthr/knowledge-mcp';
 
 type Note = { text: string; by: string; at: string };
 

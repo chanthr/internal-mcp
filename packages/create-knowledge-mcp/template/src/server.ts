@@ -4,7 +4,7 @@
  *
  * The same file is the command line: serve, serve --stdio, keys, users, doctor, <plugin> <command>.
  */
-import { run, builtinPlugins, loadPlugins } from '@chanthr/knowledge-mcp';
+import { run, builtinPlugins, loadPlugins } from '@chnxthr/knowledge-mcp';
 
 const mine = await loadPlugins(new URL('./plugins/', import.meta.url));
 

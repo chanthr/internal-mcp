@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@chanthr/knowledge-mcp": "__CORE_SPEC__"
+    "@chnxthr/knowledge-mcp": "__CORE_SPEC__"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

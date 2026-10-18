@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end check of the "install and build your own" path, with nothing from the npm registry for our packages:
-#   pack @chanthr/knowledge-mcp → scaffold with create-knowledge-mcp → npm install → build →
+#   pack @chnxthr/knowledge-mcp → scaffold with create-knowledge-mcp → npm install → build →
 #   doctor → serve over HTTP → create a key → call the example plugin with the MCP client.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,9 +10,9 @@ SERVER_PID=""
 trap 'if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi; rm -rf "$WORK"' EXIT
 
 echo "== pack"
-npm run build -w @chanthr/knowledge-mcp
+npm run build -w @chnxthr/knowledge-mcp
 (cd "$ROOT/packages/knowledge-mcp" && npm pack --silent --ignore-scripts --pack-destination "$WORK" >/dev/null)
-TGZ="$(ls "$WORK"/chanthr-knowledge-mcp-*.tgz)"
+TGZ="$(ls "$WORK"/chnxthr-knowledge-mcp-*.tgz)"
 # List to a file first: `tar | grep -q` fails under pipefail when grep exits early (SIGPIPE to tar).
 tar -tzf "$TGZ" > "$WORK/tarball.txt"
 grep -q 'package/dist/cli.js' "$WORK/tarball.txt"
