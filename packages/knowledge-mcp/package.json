@@ -1,6 +1,6 @@
 {
   "name": "@chnxthr/knowledge-mcp",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Build your own MCP server from plugins. Auth (API keys, OAuth), per-user permissions, audit log, SQLite or Supabase state, and built-in Google Drive, Slack, GitHub and Railway connectors.",
   "type": "module",
   "license": "MIT",
