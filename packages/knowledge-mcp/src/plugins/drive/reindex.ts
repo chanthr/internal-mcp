@@ -19,16 +19,11 @@
  */
 import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
-import { chunkMarkdown, parseFrontmatter } from './chunker.js';
+import { chunkMarkdown } from './chunker.js';
 import { embedTexts } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
-import {
-  ensureCollection,
-  getQdrantClient,
-  DRIVE_COLLECTION,
-  type ChunkPayload,
-} from './qdrant.js';
+import { ensureCollection, getQdrantClient, DRIVE_COLLECTION } from './qdrant.js';
 // 색인 코어 로직 SSOT — drive_sync(증분)와 공유해 drift 방지(특히 makeChunkId 일치 = orphan 로직 정합).
 import {
   makeChunkId,
@@ -185,14 +180,6 @@ async function listAllMarkdown(
   for (const child of childResults) out.push(...child);
 
   return out;
-}
-
-async function downloadMarkdown(drive: DriveClient, fileId: string): Promise<string> {
-  const resp = await drive.files.get(
-    { fileId, alt: 'media', supportsAllDrives: true },
-    { responseType: 'text' },
-  );
-  return resp.data as unknown as string;
 }
 
 /**

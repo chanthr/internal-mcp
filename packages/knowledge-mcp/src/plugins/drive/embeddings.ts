@@ -45,14 +45,6 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([p, timer]).finally(() => clearTimeout(t)) as Promise<T>;
 }
 
-// taskType: OpenAI 3-small 은 query/doc 비대칭 미지원 → 시그니처만 유지(호출부 호환), 동작 영향 없음.
-export type EmbedTaskType =
-  | 'RETRIEVAL_DOCUMENT'
-  | 'RETRIEVAL_QUERY'
-  | 'SEMANTIC_SIMILARITY'
-  | 'CLASSIFICATION'
-  | 'CLUSTERING';
-
 function getApiKey(): string {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('[embeddings] OPENAI_API_KEY env missing');
@@ -135,7 +127,6 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
  */
 export async function embedTexts(
   texts: string[],
-  _taskType: EmbedTaskType = 'RETRIEVAL_DOCUMENT',
   policy: EmbedPolicy = INDEX_POLICY,
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
@@ -150,6 +141,6 @@ export async function embedTexts(
 
 /** 단일 query → 벡터. 인터랙티브 검색 경로라 fail-fast 정책(QUERY_POLICY) 사용. */
 export async function embedQuery(query: string): Promise<number[]> {
-  const [vec] = await embedTexts([query], 'RETRIEVAL_QUERY', QUERY_POLICY);
+  const [vec] = await embedTexts([query], QUERY_POLICY);
   return vec;
 }

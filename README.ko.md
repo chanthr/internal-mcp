@@ -56,13 +56,17 @@ npm run keys -- create --email you@example.com --role admin   # API 키를 한 �
 **기본 연결만 쓰기**
 
 ```bash
+cp .env.example .env                         # 쓸 연결의 값을 채움
+cp mcp.config.example.json mcp.config.json   # Drive 폴더, 제외 폴더, 로그인 허용 목록
 docker run -d --name kmcp -p 8080:8080 -v kmcp-data:/data --env-file .env \
-  ghcr.io/chanthr/knowledge-mcp:latest
+  -v "$PWD/mcp.config.json:/app/mcp.config.json:ro" ghcr.io/chanthr/knowledge-mcp:latest
 docker exec kmcp knowledge-mcp keys create --email you@example.com --role admin
 docker exec kmcp knowledge-mcp doctor        # 어떤 연결이 켜졌는지, 꺼진 연결은 무엇이 빠졌는지
 ```
 
 환경변수는 [`.env.example`](.env.example)에 모두 있습니다. 각 연결은 자기 환경변수가 채워지면 켜집니다.
+이미지에는 설정이 들어 있지 않습니다. 위처럼 `mcp.config.json`을 연결하거나 `-e MCP_CONFIG_JSON='{…}'`로 넘깁니다.
+[`compose.yaml`](compose.yaml)은 같은 일을 Docker Compose로 합니다.
 
 ## 동작 방식
 
@@ -123,13 +127,14 @@ export default definePlugin({
 });
 ```
 
-파일을 저장하면 개발 서버가 다시 뜹니다. 라우터, 도구 목록, 권한 표는 건드리지 않습니다.
+파일을 저장하면 개발 서버가 다시 뜹니다. `src/plugins/`에 새로 만든 파일도 잡습니다. 라우터, 도구 목록,
+권한 표는 건드리지 않습니다.
 
 | 코어가 대신 하는 일 | 방법 |
 | --- | --- |
 | 도구 목록에 올리기 | `name`, `description`, zod `input`(zod 3, 4 모두)을 JSON Schema로 바꿉니다 |
 | 설정 전에는 숨기기 | `env`에 적은 값이 모두 채워질 때까지 숨깁니다. `enabled()`를 쓰면 그 조건도 봅니다 |
-| 입력 검증 | 잘못된 입력에는 `[invalid_input] 항목: 이유`를 돌려주고 `run`은 부르지 않습니다 |
+| 입력 검증 | 잘못된 입력에는 `[invalid_input] tool '<이름>': 항목: 이유`를 돌려주고 `run`은 부르지 않습니다 |
 | 권한 확인 | 플러그인 `id`가 권한 그룹입니다([접근 권한](#접근-권한) 참고) |
 | 결과 모양 맞추기 | 문자열은 글로, 그 밖의 값은 JSON 글로 보냅니다. MCP 결과 형식은 그대로 보냅니다 |
 | 오류 처리 | `throw new ToolError('...')`는 `[error] ...`, 그 밖의 오류는 `[fatal] ...`로 돌려줍니다 |
@@ -224,7 +229,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `drive` | `semantic_search_drive` | `QDRANT_URL`, `OPENAI_API_KEY`, 색인(`knowledge-mcp drive reindex`) |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
-| `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_TOKEN` |
+| `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
 | `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | `RAILWAY_TOKEN` |
 | 코어 | `ping` | 없음. 내가 누구로 접속했는지, 어떤 플러그인이 켜졌는지 보여 줍니다 |
 
@@ -237,7 +242,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 처음 전체 색인 | `knowledge-mcp drive reindex` (`docker compose run --rm knowledge-mcp drive reindex`) |
 | 최신 상태 유지 | HTTP 서버가 30분마다 Drive 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`). 전체 색인을 먼저 합니다 |
 | 정리 | 전체 실행은 목록에서 빠진 파일의 벡터를 지웁니다. 제외 폴더로 옮긴 파일이 여기에 해당합니다 |
-| 처음부터 다시 | `--recreate`는 컬렉션을 비우고 시작합니다. `--dry-run`은 청크 수만 셉니다 |
+| 처음부터 다시 | `--recreate`는 컬렉션을 비우고 시작합니다. `--dry-run`은 청크 수만 셉니다. OCR을 건너뛰어 Mathpix 요금이 나가지 않습니다 |
 
 | 형식 | 글을 뽑는 방법 |
 | --- | --- |
@@ -256,9 +261,15 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 <summary>Slack 채널 용도표</summary>
 <br>
 
-`slack_list_channels`는 채널마다 무슨 용도인지 모델에게 알려 줍니다. 새 채널은 꺼진 채로 추가됩니다.
-`knowledge-mcp slack channel '#dev' --purpose "배포와 장애" --on`으로 용도를 적고 켭니다.
-목록은 `knowledge-mcp slack channels`로 봅니다.
+`slack_list_channels`는 채널마다 무슨 용도인지 모델에게 알려 줍니다.
+
+1. 읽을 채널에 봇을 초대하고, 클라이언트에서 `slack_list_channels`를 한 번 부릅니다. 이때 Slack 채널 목록이
+   용도표로 복사됩니다. 새 채널은 꺼진 채로 들어옵니다.
+2. `knowledge-mcp slack channel '#dev' --purpose "배포와 장애" --on`으로 용도를 적고 켭니다.
+   용도표는 `knowledge-mcp slack channels`로 봅니다.
+
+켜고 끄기는 `slack_list_channels`가 기본으로 보여 줄 채널만 정합니다. 읽기 권한은 바꾸지 않습니다.
+읽을 수 있는지는 봇이 들어간 채널과 사람마다 허용한 채널로 정해집니다.
 
 </details>
 
@@ -271,6 +282,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 `.env`와 `mcp.config.json`은 현재 폴더를 먼저 보고, 없으면 프로젝트 폴더를 봅니다. 클라이언트가 다른 폴더에서
 서버를 띄워도 찾습니다. `MCP_CONFIG_JSON`(내용 직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
+설정은 시작할 때 한 번 읽습니다. 로그인 허용 목록을 포함해 설정을 바꾸면 서버를 다시 시작합니다.
 
 | 설정 키 | 뜻 |
 | --- | --- |
@@ -379,7 +391,7 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 
 | 클라이언트 | 방법 |
 | --- | --- |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠원⁠격 | `claude mcp add --transport http my-mcp https://<호스트>/mcp --header "Authorization: Bearer <키>"` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
 | 다⁠른⁠ ⁠M⁠C⁠P⁠ ⁠클⁠라⁠이⁠언⁠트 | 주소 `https://<호스트>/mcp`, 헤더 `Authorization: Bearer <키>` |

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts serve",
+    "dev": "tsx watch --include src/plugins src/server.ts serve",
     "build": "tsc",
     "start": "node dist/server.js serve",
     "keys": "tsx src/server.ts keys",

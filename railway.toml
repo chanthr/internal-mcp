@@ -1,5 +1,6 @@
 # Railway deployment. Uses the Dockerfile (ENTRYPOINT knowledge-mcp, CMD serve), /health for health checks.
-# The SQLite store needs a volume mounted at /data; otherwise set MCP_STORE=supabase (state lost on redeploy).
+# The SQLite store needs a volume mounted at /data. Without one, keys and users are lost on every redeploy.
+# No volume? Set MCP_STORE=supabase to keep state in Supabase instead. Pass the config as MCP_CONFIG_JSON.
 
 [build]
 builder = "DOCKERFILE"

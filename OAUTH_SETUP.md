@@ -18,8 +18,8 @@ If you don't need that, skip this file. The server works with Bearer API keys al
    token's `aud` is your canonical `/mcp` URL.
 5. Refresh tokens rotate on every use and stay bound to the client that received them. Reusing an old
    refresh token revokes every refresh token of that account.
-6. The allowlist is checked again on every request and every refresh. Removing a person cuts them off
-   immediately, even with an unexpired token.
+6. The allowlist is checked again on every request and every refresh. It is read at startup, so after you
+   remove a person, restart the server: from then on their tokens stop working, even unexpired ones.
 
 ## Steps
 

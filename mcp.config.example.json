@@ -16,7 +16,6 @@
   },
   "qdrant": { "collection": "acme_knowledge_v1" },
   "data": { "schema": "public" },
-  "selfDomains": ["acme.com"],
   "oauth": {
     "allowedDomains": ["acme.com"],
     "allowedEmails": []

@@ -68,8 +68,14 @@ a users entry are viewers: they get `ping` and the plugins listed in `access.vie
 
 ```bash
 docker build -t __NAME__ .
-docker run -d -p 8080:8080 -v __NAME__-data:/data --env-file .env __NAME__
+docker run -d -p 8080:8080 -v __NAME__-data:/data --env-file .env \
+  -v "$PWD/mcp.config.json:/app/mcp.config.json:ro" __NAME__
 docker exec <container> node dist/server.js keys create --email you@example.com --role admin
 ```
 
-Keep `/data` on a volume, or set `MCP_STORE=supabase` to keep state in Supabase.
+| Check | Why |
+| --- | --- |
+| Keep `/data` on a volume | Keys, users and plugin state live there. Or set `MCP_STORE=supabase` |
+| Mount `mcp.config.json` or set `MCP_CONFIG_JSON` | The image holds no config, so without it Drive roots and the sign-in allowlist are empty |
+| Set `TRUST_PROXY` | Behind one reverse proxy keep `1` (default). Exposed directly, set `false` so clients cannot fake their IP to dodge the auth rate limit |
+| Put it behind HTTPS | Remote clients and OAuth need it |

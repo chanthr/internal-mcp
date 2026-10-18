@@ -94,8 +94,8 @@ const ConfigSchema = z
         schema: z.string().default('public'),
       })
       .default({}),
-    /** Your own domains (used e.g. to distinguish first-party from external sources). */
-    selfDomains: z.array(z.string()).default([]),
+    /** Unused. Still accepted so config files written for 0.3.0 and 0.3.1 keep loading (the schema is strict). */
+    selfDomains: z.array(z.string()).optional(),
     oauth: z
       .object({
         /**
