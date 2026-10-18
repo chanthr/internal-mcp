@@ -5,14 +5,18 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"
-trap 'kill ${SERVER_PID:-0} 2>/dev/null || true; rm -rf "$WORK"' EXIT
+SERVER_PID=""
+# Kill only our server. `kill 0` would signal the whole process group (the CI job itself).
+trap 'if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi; rm -rf "$WORK"' EXIT
 
 echo "== pack"
-npm run build -w @chanthr/knowledge-mcp >/dev/null
+npm run build -w @chanthr/knowledge-mcp
 (cd "$ROOT/packages/knowledge-mcp" && npm pack --silent --ignore-scripts --pack-destination "$WORK" >/dev/null)
 TGZ="$(ls "$WORK"/chanthr-knowledge-mcp-*.tgz)"
-tar -tzf "$TGZ" | grep -q 'package/dist/cli.js'
-if tar -tzf "$TGZ" | grep -E 'package/(src|test)/' >/dev/null; then echo "tarball contains src or test" >&2; exit 1; fi
+# List to a file first: `tar | grep -q` fails under pipefail when grep exits early (SIGPIPE to tar).
+tar -tzf "$TGZ" > "$WORK/tarball.txt"
+grep -q 'package/dist/cli.js' "$WORK/tarball.txt"
+if grep -E 'package/(src|test)/' "$WORK/tarball.txt" >/dev/null; then echo "tarball contains src or test" >&2; exit 1; fi
 
 echo "== scaffold"
 (cd "$WORK" && KMCP_CORE_SPEC="file:$TGZ" node "$ROOT/packages/create-knowledge-mcp/index.js" my-mcp --no-git >/dev/null)
