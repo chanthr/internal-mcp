@@ -45,16 +45,7 @@ process.env.MCP_CONFIG_JSON = JSON.stringify({
 
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
 const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
-const { Registry } = await import('../src/plugin/registry.js');
-const { loadPlugins } = await import('../src/plugin/load.js');
-const { builtinPlugins } = await import('../src/plugins/index.js');
-const { runHttp } = await import('../src/server/http.js');
 const { getStore } = await import('../src/store/index.js');
-
-const registry = new Registry([...builtinPlugins, ...(await loadPlugins(new URL('./fixtures/plugins/', import.meta.url)))]);
-const server = await runHttp(registry);
-await registry.upstreams.connectAll(); // runHttp starts it in the background; wait for it here
-const base = `http://127.0.0.1:${server.port}`;
 
 const store = await getStore();
 await store.upsertUser({ email: 'admin@acme.com', role: 'admin' });
@@ -62,10 +53,25 @@ await store.upsertUser({ email: 'member@acme.com', role: 'member', allowedTools:
 const adminKey = (await store.createKey({ email: 'admin@acme.com', orgId: 'acme' })).key;
 const memberKey = (await store.createKey({ email: 'member@acme.com', orgId: 'acme' })).key;
 const viewerKey = (await store.createKey({ email: 'stranger@acme.com', orgId: 'acme' })).key;
+// A trusted proxy (e.g. a chat bot) that acts for signed-in people. http.ts reads this list when it loads.
+const proxy = await store.createKey({ orgId: 'acme', role: 'member', label: 'bot' });
+process.env.ACT_AS_ALLOWED_KEY_IDS = proxy.id;
 
-async function connect(key: string) {
+const { Registry } = await import('../src/plugin/registry.js');
+const { loadPlugins } = await import('../src/plugin/load.js');
+const { builtinPlugins } = await import('../src/plugins/index.js');
+const { runHttp } = await import('../src/server/http.js');
+
+const registry = new Registry([...builtinPlugins, ...(await loadPlugins(new URL('./fixtures/plugins/', import.meta.url)))]);
+const server = await runHttp(registry);
+await registry.upstreams.connectAll(); // runHttp starts it in the background; wait for it here
+const base = `http://127.0.0.1:${server.port}`;
+
+async function connect(key: string, extra: Record<string, string> = {}) {
   const client = new Client({ name: 'test', version: '1.0.0' });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${key}` } } }));
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${key}`, ...extra } } }),
+  );
   return client;
 }
 const textOf = (r: unknown) => String((r as { content: Array<{ text?: string }> }).content[0]?.text ?? '');
@@ -139,6 +145,17 @@ test('unregistered email is a viewer: ping plus config access.viewerTools', asyn
   assert.equal(ping.role, 'viewer');
   assert.equal(ping.upstreams, undefined); // admin-only detail
   await c.close();
+});
+
+test('act-as: a proxy acting for an admin is capped at member', async () => {
+  const c = await connect(proxy.key, { 'X-MCP-Act-As-Email': 'admin@acme.com' });
+  const ping = JSON.parse(textOf(await c.callTool({ name: 'ping', arguments: {} })));
+  assert.equal(ping.authenticated_as, 'admin@acme.com');
+  assert.equal(ping.role, 'member');
+  await c.close();
+  const anon = await connect(proxy.key); // no header → viewer
+  assert.equal(JSON.parse(textOf(await anon.callTool({ name: 'ping', arguments: {} }))).role, 'viewer');
+  await anon.close();
 });
 
 test('every call is in the audit log', async () => {

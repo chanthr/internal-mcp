@@ -26,44 +26,29 @@ export async function getFolderMeta(
   const now = Date.now();
   const cached = _folderMeta.get(id);
   if (cached && cached.expiresAt > now) return { name: cached.name, parent: cached.parent };
-  try {
-    const d = (await drive.files.get({ fileId: id, fields: 'name,parents', supportsAllDrives: true }))
-      .data;
-    const meta = { name: d.name ?? '', parent: d.parents?.[0], expiresAt: now + FOLDER_META_TTL_MS };
-    _folderMeta.set(id, meta);
-    return { name: meta.name, parent: meta.parent };
-  } catch {
-    return { name: '', parent: undefined };
-  }
+  // 조회 실패는 throw 한다(캐시하지 않음). 예전엔 빈 값을 돌려줘 동기화가 "root 밖"으로 보고 멀쩡한 벡터를 지웠다.
+  const d = (await drive.files.get({ fileId: id, fields: 'name,parents', supportsAllDrives: true })).data;
+  const meta = { name: d.name ?? '', parent: d.parents?.[0], expiresAt: now + FOLDER_META_TTL_MS };
+  _folderMeta.set(id, meta);
+  return { name: meta.name, parent: meta.parent };
 }
 
+/** 폴더 이름이나 위치가 바뀌었을 때(동기화가 폴더 변경을 봤을 때) 캐시를 비운다. */
+export function clearFolderMetaCache(): void {
+  _folderMeta.clear();
+}
+
+/**
+ * 'ok'       : root 하위 + 제외 폴더 미경유 → 노출
+ * 'excluded' : 제외 폴더(PII/계약/HR/deprecated/node_modules 등)를 경유 → 응답에서 제거
+ * 'outside'  : root 에 닿지 못함(색인 대상 밖), 또는 폴더 조회 실패 → 보수적으로 제거
+ */
 export type SearchClass = 'ok' | 'excluded' | 'outside';
 
 /**
- * 파일의 immediate parents 에서 root 까지 올라가며 분류:
- *   - 'excluded' : 제외 폴더(PII/계약/HR/deprecated/node_modules 등)를 경유 → 응답에서 제거
- *   - 'ok'       : dev/biz root 하위 + 제외 미경유 → 노출
- *   - 'outside'  : root 에 닿지 못함(색인 대상 밖) → 보수적으로 제거
- * resolvePathAndSource(drive_sync) 와 동일하게 parents[0] 만 따라간다(최대 12 hop).
- */
-export async function classifyForSearch(
-  drive: DriveClient,
-  parents: string[] | undefined,
-): Promise<SearchClass> {
-  let chain = parents;
-  for (let hop = 0; hop < 12 && chain && chain.length > 0; hop++) {
-    const pid = chain[0];
-    if (ROOT_IDS.has(pid)) return 'ok';
-    const meta = await getFolderMeta(drive, pid);
-    if (isExcludedName(meta.name)) return 'excluded';
-    chain = meta.parent ? [meta.parent] : undefined;
-  }
-  return 'outside';
-}
-
-/**
- * classifyForSearch + 폴더 경로(root 하위) 반환 — 직원별 Drive 폴더 scope 필터용.
- * path 는 폴더만(파일명 제외), root 바로 아래부터, 예: "01_고객사/Acme". cls!=='ok' 면 path 무의미.
+ * 파일의 parents 에서 root 까지 올라가며 분류하고 폴더 경로(root 하위)를 돌려준다 — 도구 결과와 직원별 폴더 scope 필터용.
+ * parents[0] 만 따라간다(최대 12 hop). path 는 폴더만(파일명 제외), root 바로 아래부터, 예: "Clients/Acme".
+ * cls!=='ok' 면 path 무의미. 폴더 조회가 실패하면 'outside'(숨김) — 도구는 모를 때 보여 주지 않는다.
  */
 export async function classifyAndPath(
   drive: DriveClient,
@@ -74,7 +59,12 @@ export async function classifyAndPath(
   for (let hop = 0; hop < 12 && chain && chain.length > 0; hop++) {
     const pid = chain[0];
     if (ROOT_IDS.has(pid)) return { cls: 'ok', path: names.reverse().join('/') };
-    const meta = await getFolderMeta(drive, pid);
+    let meta: { name: string; parent: string | undefined };
+    try {
+      meta = await getFolderMeta(drive, pid);
+    } catch {
+      return { cls: 'outside', path: '' };
+    }
     if (isExcludedName(meta.name)) return { cls: 'excluded', path: '' };
     if (meta.name) names.push(meta.name);
     chain = meta.parent ? [meta.parent] : undefined;

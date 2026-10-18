@@ -57,6 +57,22 @@ test('stdio with a wrong MCP_API_KEY exits with a clear message', () => {
   assert.match(r.stderr, /stdio auth failed: key not found/);
 });
 
+test('cli: keys create never changes or downgrades a registered role', () => {
+  const env = cleanEnv();
+  const cli = (...args: string[]) => spawnSync(process.execPath, ['--import', TSX, server, ...args], { cwd: elsewhere, env, encoding: 'utf8', timeout: 60_000 });
+  assert.equal(cli('keys', 'create', '--email', 'v@x.com', '--role', 'viewer').status, 2);
+  assert.equal(cli('users', 'add', 'a@x.com', '--role', 'admin').status, 0);
+  const demote = cli('keys', 'create', '--email', 'a@x.com', '--role', 'member');
+  assert.equal(demote.status, 2);
+  assert.match(demote.stderr, /already registered as admin/);
+  assert.equal(cli('keys', 'create', '--email', 'a@x.com').status, 0); // a key for an admin, role untouched
+  assert.equal(cli('keys', 'create', '--email', 'n@x.com', '--role', 'member').status, 0); // registers a new member
+  const users = cli('users', 'list').stdout;
+  assert.match(users, /a@x\.com\s+admin/);
+  assert.match(users, /n@x\.com\s+member/);
+  assert.doesNotMatch(users, /v@x\.com/);
+});
+
 test('cli: unknown command exits 2, help exits 0', () => {
   const bad = spawnSync(process.execPath, ['--import', TSX, server, 'frobnicate'], { cwd: elsewhere, env: cleanEnv(), encoding: 'utf8', timeout: 60_000 });
   assert.equal(bad.status, 2);

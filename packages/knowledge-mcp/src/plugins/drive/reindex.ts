@@ -45,20 +45,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from '
 import { join } from 'path';
 import { dataDir } from '../../core/paths.js';
 
-// 체크포인트 — 처리 완료 file_id 기록 → 재시작 시 skip (429 중단 후 재개·재실행 비용 절감).
+// 체크포인트 — 처리 완료 파일을 기록 → 재시작 시 skip (429 중단 후 재개·재실행 비용 절감).
+// 파일마다 modifiedTime 을, 전체에 컬렉션 이름을 함께 둔다. 그래서 그사이 바뀐 파일과 다른 컬렉션(QDRANT_COLLECTION
+// 교체 재색인)으로 도는 실행은 체크포인트를 믿지 않는다. 예전 형식(file_id 배열)은 버리고 처음부터 한다.
 // 데이터 폴더에 둔다(패키지 폴더는 npm 설치본이라 쓰기 불가일 수 있다).
 const CHECKPOINT_PATH = join(dataDir(), 'drive-reindex-checkpoint.json');
-function loadCheckpoint(): Set<string> {
-  if (!existsSync(CHECKPOINT_PATH)) return new Set();
+type Checkpoint = Map<string, string>; // file_id → modifiedTime
+function loadCheckpoint(): Checkpoint {
+  if (!existsSync(CHECKPOINT_PATH)) return new Map();
   try {
-    return new Set(JSON.parse(readFileSync(CHECKPOINT_PATH, 'utf8')) as string[]);
+    const raw = JSON.parse(readFileSync(CHECKPOINT_PATH, 'utf8')) as { collection?: string; files?: Record<string, string> };
+    if (raw.collection !== DRIVE_COLLECTION || !raw.files) return new Map();
+    return new Map(Object.entries(raw.files));
   } catch {
-    return new Set();
+    return new Map();
   }
 }
-function saveCheckpoint(done: Set<string>): void {
+function saveCheckpoint(done: Checkpoint): void {
   mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  writeFileSync(CHECKPOINT_PATH, JSON.stringify([...done]));
+  writeFileSync(CHECKPOINT_PATH, JSON.stringify({ collection: DRIVE_COLLECTION, files: Object.fromEntries(done) }));
 }
 function clearCheckpoint(): void {
   if (existsSync(CHECKPOINT_PATH)) unlinkSync(CHECKPOINT_PATH);
@@ -80,13 +85,24 @@ interface CliArgs {
 
 function parseArgs(args: string[]): CliArgs {
   let roots: DriveRoot[] = DRIVE_ROOTS;
+  if (DRIVE_ROOTS.length === 0) {
+    // 빈 목록으로 전체 실행을 하면 "목록에 없는 파일" 정리가 컬렉션을 통째로 지운다.
+    throw new Error(
+      'drive.roots is empty, so there is nothing to index. Set drive.roots in mcp.config.json or MCP_CONFIG_JSON ' +
+        '(the Docker image reads /app/mcp.config.json).',
+    );
+  }
   let dryRun = false;
   let recreate = false;
   let partial = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--root' && args[i + 1]) {
-      // override default with single root (source=dev 가정)
-      roots = [{ id: args[++i], name: 'custom', source: 'dev' }];
+      // 설정한 root 하나만. 아무 폴더나 받으면 그 폴더 기준의 짧은 경로로 색인돼 폴더 권한을 비켜 가거나,
+      // root 밖 내용이 의미 검색에 들어간다.
+      const id = args[++i];
+      const root = DRIVE_ROOTS.find((r) => r.id === id);
+      if (!root) throw new Error(`--root ${id} is not one of drive.roots (${DRIVE_ROOTS.map((r) => r.id).join(', ')})`);
+      roots = [root];
       partial = true;
     } else if (args[i] === '--biz-only') {
       roots = DRIVE_ROOTS.filter((r) => r.source === 'biz');
@@ -240,7 +256,7 @@ export async function runReindex(argv: string[]): Promise<void> {
   // 3. 파일별 download + chunk + embed + upsert
   //    체크포인트 — recreate 면 초기화, 아니면 이전 진행분 skip (429 중단 후 재개)
   if (recreate) clearCheckpoint();
-  const done = dryRun ? new Set<string>() : loadCheckpoint();
+  const done: Checkpoint = dryRun ? new Map() : loadCheckpoint();
   if (done.size > 0) console.log(`[index] 체크포인트 — 이미 처리 ${done.size}개 skip`);
 
   let totalChunks = 0;
@@ -249,18 +265,19 @@ export async function runReindex(argv: string[]): Promise<void> {
 
   for (const file of allFiles) {
     processed++;
-    if (done.has(file.id)) continue; // 체크포인트 — 이미 처리됨
+    if (done.get(file.id) === file.modifiedTime) continue; // 체크포인트 — 이미 처리됨(그 뒤 바뀌지 않음)
     if (file.size && file.size > MAX_FILE_BYTES) {
       console.log(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): [${file.source}] ${file.path}`);
-      done.add(file.id);
+      done.set(file.id, file.modifiedTime);
       if (!dryRun) saveCheckpoint(done);
       continue;
     }
     try {
-      const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
+      // dry-run 은 OCR 을 부르지 않는다(Mathpix 는 쪽마다 과금).
+      const { text, needsOcr } = await extractText(drive, file.id, file.mimeType, { ocr: !dryRun });
       if (needsOcr || text.trim().length === 0) {
         console.log(`[index] skip (ocr/empty): [${file.source}] ${file.path}`);
-        done.add(file.id);
+        done.set(file.id, file.modifiedTime);
         if (!dryRun) saveCheckpoint(done);
         continue;
       }
@@ -268,7 +285,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       if (chunks.length === 0) {
         console.log(`[index] skip empty: [${file.source}] ${file.path}`);
         // 처리 완료로 기록 — 빠뜨리면 체크포인트가 영구히 남아 다음 재색인이 바뀐 파일을 건너뛴다.
-        done.add(file.id);
+        done.set(file.id, file.modifiedTime);
         if (!dryRun) saveCheckpoint(done);
         continue;
       }
@@ -310,7 +327,7 @@ export async function runReindex(argv: string[]): Promise<void> {
         points,
       });
 
-      done.add(file.id); // 체크포인트 기록 (upsert 성공)
+      done.set(file.id, file.modifiedTime); // 체크포인트 기록 (upsert 성공)
       saveCheckpoint(done);
 
       console.log(
@@ -327,8 +344,13 @@ export async function runReindex(argv: string[]): Promise<void> {
 
   // 4. 이번 목록에 없는 파일의 벡터 정리 (전체 root 실행일 때만)
   if (!dryRun && !partial) {
-    const pruned = await pruneStaleVectors(new Set(allFiles.map((f) => f.id)));
-    console.log(`[index] 정리 — 목록에 없는 파일 ${pruned}개의 벡터 삭제`);
+    if (allFiles.length === 0) {
+      // 목록이 비면(권한 문제, 잘못된 root id) 정리가 컬렉션 전체를 지운다. 이때는 건너뛴다.
+      console.error('[index] listed 0 files — skipping cleanup so the existing index is not wiped. Check drive.roots and sharing.');
+    } else {
+      const pruned = await pruneStaleVectors(new Set(allFiles.map((f) => f.id)));
+      console.log(`[index] 정리 — 목록에 없는 파일 ${pruned}개의 벡터 삭제`);
+    }
   }
 
   const elapsedSec = ((Date.now() - startTs) / 1000).toFixed(1);

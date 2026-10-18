@@ -10,6 +10,11 @@
  */
 const MATHPIX_API = 'https://api.mathpix.com/v3';
 
+/** OCR 은 두 키가 모두 있을 때만 쓴다(README: 스캔 PDF·이미지는 키가 있을 때만 OCR). */
+export function mathpixConfigured(): boolean {
+  return !!process.env.MATHPIX_APP_ID && !!process.env.MATHPIX_APP_KEY;
+}
+
 function mathpixHeaders(): Record<string, string> {
   const appId = process.env.MATHPIX_APP_ID;
   const appKey = process.env.MATHPIX_APP_KEY;

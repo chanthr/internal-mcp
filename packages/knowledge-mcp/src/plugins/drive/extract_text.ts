@@ -54,12 +54,18 @@ async function exportGoogle(
 }
 
 /** 추출 + 정제 (노이즈 cleanup). 색인·검색 진입점. */
+/**
+ * opts.ocr=false 면 OCR 이 필요한 파일(스캔 PDF, 이미지)을 Mathpix 로 보내지 않고 needsOcr 로 돌려준다.
+ * Mathpix 키가 없을 때도 같다 — 예전엔 throw 해서 재색인 실패로 셌고, 체크포인트가 지워지지 않았다.
+ */
 export async function extractText(
   drive: DriveClient,
   fileId: string,
   mimeType: string,
+  opts: { ocr?: boolean } = {},
 ): Promise<ExtractResult> {
-  const raw = await extractRaw(drive, fileId, mimeType);
+  const { mathpixConfigured } = await import('./mathpix.js');
+  const raw = await extractRaw(drive, fileId, mimeType, opts.ocr !== false && mathpixConfigured());
   return { ...raw, text: cleanExtractedText(raw.text) };
 }
 
@@ -68,6 +74,7 @@ async function extractRaw(
   drive: DriveClient,
   fileId: string,
   mimeType: string,
+  ocr: boolean,
 ): Promise<ExtractResult> {
   // 1. Native text
   if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
@@ -110,7 +117,8 @@ async function extractRaw(
     if (charsPerPage >= MIN_CHARS_PER_PAGE) {
       return { text, method: 'pdf-parse', meta: { pages, charsPerPage: Math.round(charsPerPage) } };
     }
-    // 스캔본 → Mathpix OCR
+    // 스캔본 → Mathpix OCR (키가 있고 OCR 을 허용한 경우만)
+    if (!ocr) return { text, method: 'pdf-parse (scanned, OCR off)', needsOcr: true, meta: { pages, charsPerPage: Math.round(charsPerPage) } };
     const { mathpixPdfToMarkdown } = await import('./mathpix.js');
     const md = await mathpixPdfToMarkdown(buffer);
     return {
@@ -140,6 +148,7 @@ async function extractRaw(
 
   // 7. 이미지 → Mathpix OCR (v3/text, 즉시)
   if (mimeType.startsWith('image/')) {
+    if (!ocr) return { text: '', method: 'image (OCR off)', needsOcr: true };
     const buffer = await downloadBuffer(drive, fileId);
     const { mathpixImageToMarkdown } = await import('./mathpix.js');
     const md = await mathpixImageToMarkdown(buffer, mimeType);

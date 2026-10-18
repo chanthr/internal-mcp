@@ -114,6 +114,7 @@ async function readOne(
     const meta = await drive.files.get({
       fileId,
       fields: 'id, name, mimeType, parents, size, modifiedTime, webViewLink',
+      supportsAllDrives: true, // 공유 드라이브 파일은 이 플래그가 없으면 404
     });
     const m = meta.data;
     const mimeType = m.mimeType || '';
@@ -163,7 +164,9 @@ async function readOne(
         if (r.needsOcr || !r.text.trim()) {
           return {
             fileId,
-            error: `본문 추출 불가/미지원입니다 (mimeType=${mimeType}). 스캔 품질이 낮거나 지원하지 않는 형식일 수 있습니다.`,
+            error: r.method.includes('OCR off')
+              ? `No text layer (mimeType=${mimeType}). Scanned PDFs and images need OCR: set MATHPIX_APP_ID and MATHPIX_APP_KEY.`
+              : `Could not extract text (mimeType=${mimeType}). The format may be unsupported or the scan unreadable.`,
           };
         }
         body = r.text;
@@ -171,7 +174,7 @@ async function readOne(
       }
     } else {
       if (tooLarge) return tooLargeError;
-      const res = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'text' });
+      const res = await drive.files.get({ fileId, alt: 'media', supportsAllDrives: true }, { responseType: 'text' });
       body = String(res.data ?? '');
     }
 

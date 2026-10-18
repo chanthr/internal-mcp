@@ -40,7 +40,7 @@ export type AuthContext = {
   email?: string;
   key_id?: string;
   scopes?: ResourceScopes;
-  /** act-as(내부 프록시 위임) 경로로 들어온 요청인가. 프록시 키 유출에 대비해 고권한 도구를 막을 때 쓴다. */
+  /** act-as(신뢰하는 프록시가 X-MCP-Act-As-Email 로 사람을 대신) 요청인가. 이 경로의 역할은 member 를 넘지 않는다(http.ts). */
   actAs?: boolean;
 };
 

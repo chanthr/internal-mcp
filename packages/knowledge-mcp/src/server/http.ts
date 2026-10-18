@@ -17,7 +17,7 @@ import { authenticateApiKey, type AuthContext, type Role, type ResourceScopes } 
 import { authStore } from '../core/context.js';
 import {
   oauthProvider, isOAuthConfigured, oauthConfigProblems, oauthAttempted,
-  OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES, CONSENT_COOKIE, CONSENT_PATH,
+  OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES, CONSENT_COOKIE, CONSENT_PATH, LOGIN_COOKIE, GOOGLE_CALLBACK_PATH,
 } from '../core/oauth.js';
 import { maskedSecretCount } from '../core/log_mask.js';
 import { getConfig, configSource } from '../core/config.js';
@@ -33,9 +33,9 @@ const MCP_CORS_ORIGINS = (process.env.MCP_CORS_ORIGINS || 'https://claude.ai,htt
   .map((s) => s.trim())
   .filter(Boolean);
 
-// act-as 위임 — 이 key_id(내부 프록시 키)들에서만 X-MCP-Act-As-Email 을 신뢰해
-// "로그인 직원 권한"으로 강등/적용한다. 일반 키엔 영향 0. 헤더 role 은 신뢰하지 않고
-// app_users 에서 서버 재검증(위조 차단). 헤더 없으면 viewer 강등(fail-safe).
+// act-as 위임 — 이 key_id(신뢰하는 프록시 키)들에서만 X-MCP-Act-As-Email 을 믿고, 그 사람의 권한으로
+// 낮춰 적용한다(최대 member). 일반 키엔 영향 0. 헤더 role 은 믿지 않고 users 에서 서버가 다시 계산한다(위조 차단).
+// 헤더가 없으면 viewer 로 낮춘다(fail-safe).
 const ACT_AS_ALLOWED_KEY_IDS = new Set(
   (process.env.ACT_AS_ALLOWED_KEY_IDS || '')
     .split(',')
@@ -72,6 +72,15 @@ function logSecretFingerprints(): void {
   const fp = (v: string) => createHash('sha256').update(v).digest('hex').slice(0, 8);
   const parts = KEYS.filter((k) => process.env[k]).map((k) => `${k}=${fp(process.env[k]!)}`);
   if (parts.length) console.error(`[secrets] fingerprints(sha256/8): ${parts.join(' ')}`);
+}
+
+/** 요청의 쿠키 하나를 읽는다(없으면 ''). */
+function readCookie(req: ExpressRequest, name: string): string {
+  const hit = String(req.headers.cookie ?? '')
+    .split(';')
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(`${name}=`));
+  return hit ? hit.slice(name.length + 1) : '';
 }
 
 /** TRUST_PROXY env → express 'trust proxy' 값. 숫자=홉 수, true/false, 그 밖=서브넷 목록 문자열. */
@@ -112,19 +121,28 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   let resourceMetadataUrl: string | undefined;
   if (oauthEnabled) {
     resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(OAUTH_RESOURCE));
-    // Google 로그인 콜백 — 우리 AS 가 Google(OIDC)로 브리지 후 client 로 우리 code 발급
-    app.get('/oauth/google/callback', async (req, res) => {
-      const code = typeof req.query.code === 'string' ? req.query.code : '';
-      const state = typeof req.query.state === 'string' ? req.query.state : '';
-      if (!code || !state) {
-        res.status(400).send('missing code/state');
+    const secureCookie = OAUTH_ISSUER_URL.startsWith('https://') ? '; Secure' : '';
+    // Google 로그인 콜백 — 우리 AS 가 Google(OIDC)로 브리지 후 client 로 우리 code 발급.
+    // 동의를 승인한 브라우저의 로그인 쿠키가 있어야 한다(oauth.ts consumeConsent 설명).
+    app.get(GOOGLE_CALLBACK_PATH, async (req, res) => {
+      const q = (k: string) => (typeof req.query[k] === 'string' ? (req.query[k] as string) : '');
+      const state = q('state');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Set-Cookie', `${LOGIN_COOKIE}=; Path=${GOOGLE_CALLBACK_PATH}; Max-Age=0; HttpOnly; SameSite=Lax${secureCookie}`);
+      if (!state) {
+        res.status(400).type('text').send('missing state');
         return;
       }
       try {
-        const url = await oauthProvider.completeGoogleLogin(code, state);
+        const url = await oauthProvider.completeGoogleLogin({
+          code: q('code') || undefined,
+          error: q('error') || undefined,
+          state,
+          binding: readCookie(req, LOGIN_COOKIE),
+        });
         res.redirect(url);
       } catch (e) {
-        res.status(400).send(`OAuth login error: ${e instanceof Error ? e.message : String(e)}`);
+        res.status(400).type('text').send(`OAuth sign-in error: ${e instanceof Error ? e.message : String(e)}`);
       }
     });
     // AS 엔드포인트 + .well-known(authorize·token·register·AS메타·PRM). 루트에 장착.
@@ -140,22 +158,23 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     // 동의 화면의 승인/취소 — oauth.ts consumeConsent. 쿠키(SameSite=Lax)와 폼 csrf 가 모두 맞아야 진행.
     app.post(CONSENT_PATH, express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const cookie = String(req.headers.cookie ?? '')
-        .split(';')
-        .map((c) => c.trim())
-        .find((c) => c.startsWith(`${CONSENT_COOKIE}=`));
-      const cookieCsrf = cookie ? cookie.slice(CONSENT_COOKIE.length + 1) : '';
+      const cookies = [`${CONSENT_COOKIE}=; Path=${CONSENT_PATH}; Max-Age=0; HttpOnly; SameSite=Lax${secureCookie}`];
       res.setHeader('Cache-Control', 'no-store');
-      res.setHeader('Set-Cookie', `${CONSENT_COOKIE}=; Path=${CONSENT_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`);
       try {
-        const url = oauthProvider.consumeConsent(
+        const { redirect, loginBinding } = oauthProvider.consumeConsent(
           String(body.id ?? ''),
           String(body.csrf ?? ''),
-          cookieCsrf,
+          readCookie(req, CONSENT_COOKIE),
           body.action === 'approve',
         );
-        res.redirect(url);
+        // Google 다녀오는 동안 이 브라우저임을 증명할 쿠키. SameSite=Lax 라 Google 에서 돌아오는 최상위 이동에 실린다.
+        if (loginBinding) {
+          cookies.push(`${LOGIN_COOKIE}=${loginBinding}; Path=${GOOGLE_CALLBACK_PATH}; Max-Age=600; HttpOnly; SameSite=Lax${secureCookie}`);
+        }
+        res.setHeader('Set-Cookie', cookies);
+        res.redirect(redirect);
       } catch (e) {
+        res.setHeader('Set-Cookie', cookies);
         res.status(400).type('text').send(e instanceof Error ? e.message : String(e));
       }
     });
@@ -259,9 +278,11 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
       if (!actAsEmail) {
         auth = { ...auth, role: 'viewer', email: undefined, actAs: true };
       } else {
-        const { role, scopes } = await resolveUser(auth.key_id, actAsEmail);
-        auth = { ...auth, role, email: actAsEmail, scopes, actAs: true };
-        console.error(`[act-as] key_id=${auth.key_id} email=${actAsEmail} role=${role}`);
+        const resolved = await resolveUser(auth.key_id, actAsEmail);
+        // 프록시는 member 까지만 대신할 수 있다. 프록시 키가 새도 admin 이메일을 대 관리자 권한을 얻지 못한다.
+        const role: Role = resolved.role === 'admin' ? 'member' : resolved.role;
+        auth = { ...auth, role, email: actAsEmail, scopes: resolved.scopes, actAs: true };
+        console.error(`[act-as] key_id=${auth.key_id} email=${actAsEmail} role=${role}${resolved.role === 'admin' ? ' (capped from admin)' : ''}`);
       }
     }
     return auth;

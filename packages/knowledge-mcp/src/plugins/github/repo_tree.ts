@@ -5,11 +5,12 @@
  * "이 트리로 구조 파악 → 필요 파일만 github_get_file_contents 로 조회" 패턴을 쓴다.
  * git/trees?recursive=1 로 한 번에 전체 경로를 받고, node_modules·dist 등 아티팩트는 제외.
  *
- * 토큰: GITHUB_TOKEN (upstream github 과 동일 키). Contents read 권한이면 private 도 트리 조회 가능.
+ * 토큰: GITHUB_PAT, 없으면 GITHUB_TOKEN (원격 GitHub MCP 와 같은 키, index.ts githubToken). Contents read 권한이면 private 도 트리 조회 가능.
  * 이름에 github_ prefix 를 안 쓰는 이유: github_ 는 원격 GitHub MCP 도구의 prefix 라 이름이 겹칠 수 있다(겹치면 로컬이 이기고 원격 도구가 가려진다).
  */
 import { z } from 'zod';
 import { defineTool } from '../../plugin/define.js';
+import { githubToken } from './token.js';
 import { getAuth } from '../../core/context.js';
 
 const GITHUB_API = 'https://api.github.com';
@@ -52,8 +53,8 @@ export const repoTreeTool = defineTool({
 });
 
 function ghHeaders(): Record<string, string> {
-  const token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
-  if (!token) throw new Error('[repo_tree] GITHUB_TOKEN / GITHUB_PAT 미설정');
+  const token = githubToken();
+  if (!token) throw new Error('[repo_tree] GITHUB_PAT / GITHUB_TOKEN is not set');
   return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
 }
 
