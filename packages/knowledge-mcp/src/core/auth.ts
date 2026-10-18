@@ -42,6 +42,8 @@ export type AuthContext = {
   scopes?: ResourceScopes;
   /** act-as(신뢰하는 프록시가 X-MCP-Act-As-Email 로 사람을 대신) 요청인가. 이 경로의 역할은 member 를 넘지 않는다(http.ts). */
   actAs?: boolean;
+  /** 저장소 장애로 키를 확인하지 못했다(잘못된 키가 아님). HTTP 는 401 대신 503 을 준다. */
+  unavailable?: boolean;
 };
 
 // ── 인증 결과 TTL 캐시 ──
@@ -106,8 +108,9 @@ export async function authenticateApiKey(
     setAuthCache(key, auth);
     return auth;
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { ok: false, reason: `auth error: ${msg}` };
+    // 저장소 장애. 내부 오류 문구는 서버 로그에만 남기고 클라이언트에는 보내지 않는다.
+    console.error('[auth] key check failed (store unavailable):', e instanceof Error ? e.message : e);
+    return { ok: false, reason: 'authentication backend unavailable', unavailable: true };
   }
 }
 

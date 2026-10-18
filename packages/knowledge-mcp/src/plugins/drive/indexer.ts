@@ -168,7 +168,14 @@ export function buildChunkPayload(
  */
 async function getIndexedState(
   fileId: string,
-): Promise<{ content_hash: string | null; chunk_count: number; file_path: string; file_name: string; source: string } | null> {
+): Promise<{
+  content_hash: string | null;
+  chunk_count: number;
+  file_path: string;
+  file_name: string;
+  source: string;
+  modified_time: string;
+} | null> {
   try {
     const got = await (await getQdrantClient()).retrieve(DRIVE_COLLECTION, {
       ids: [makeChunkId(fileId, 0)],
@@ -183,6 +190,7 @@ async function getIndexedState(
       file_path: String(p?.file_path ?? ''),
       file_name: String(p?.file_name ?? ''),
       source: String(p?.source ?? ''),
+      modified_time: String(p?.modified_time ?? ''),
     };
   } catch {
     return null; // 조회 실패 = 미확인 → 재색인 진행(안전)
@@ -201,26 +209,22 @@ export async function indexFile(drive: DriveClient, file: IndexableFile): Promis
     console.error(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): ${file.path}`);
     return 0;
   }
+  // 수정 시각, 경로, 이름, 출처가 모두 그대로면 내려받지도 않는다. 공유 설정이나 별표만 바뀐 변경에도
+  // 파일 전체(최대 50MB)를 다시 받고 유료 OCR 을 다시 돌리던 것을 막는다.
+  const prev = await getIndexedState(file.id);
+  const sameLocation = !!prev && prev.file_path === file.path && prev.file_name === file.name && prev.source === file.source;
+  if (sameLocation && prev!.modified_time && prev!.modified_time === file.modifiedTime) return 0;
+
   const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
-  // needsOcr=true 는 이제 미지원 형식만 (PDF 스캔본·이미지는 extract_text 가 Mathpix 로 처리).
-  // 미지원 또는 추출 결과 빈 파일 → 색인 skip.
+  // 미지원, OCR 이 꺼진 스캔본과 이미지, 추출 결과 빈 파일 → 색인 skip.
   if (needsOcr || text.trim().length === 0) return 0;
 
   const hash = contentHash(text);
 
-  // EFF-1: 본문·경로·이름이 모두 그대로면 embed/upsert 생략 (sharing 등 메타 change 비용 차단).
+  // EFF-1: 본문·경로·이름이 모두 그대로면 embed/upsert 생략(수정 시각만 바뀐 저장 등).
   // 옮기거나 이름만 바꾼 파일은 다시 색인한다 — payload 의 file_path 가 직원별 폴더 scope 판정 기준이라
   // 옛 경로가 남으면 옮긴 뒤에도 옛 폴더 권한자에게 검색된다. 경로 태그(doc_tags)도 청크마다 다시 만든다.
-  const prev = await getIndexedState(file.id);
-  if (
-    prev &&
-    prev.content_hash === hash &&
-    prev.file_path === file.path &&
-    prev.file_name === file.name &&
-    prev.source === file.source
-  ) {
-    return 0;
-  }
+  if (sameLocation && prev!.content_hash === hash) return 0;
 
   const chunks = chunkMarkdown(text);
   if (chunks.length === 0) return 0;

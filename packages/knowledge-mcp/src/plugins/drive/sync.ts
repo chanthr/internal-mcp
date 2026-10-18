@@ -12,7 +12,7 @@
 import type { DriveChangeList, DriveClient } from './client.js';
 import { DriveApiError, getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
-import { getSyncToken, setSyncToken } from './sync_state.js';
+import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS } from './sync_state.js';
 import { isExcludedPath } from './exclude.js';
 import { clearFolderMetaCache, getFolderMeta } from './path.js';
 import { DRIVE_COLLECTION, getQdrantClient, type PointId } from './qdrant.js';
@@ -115,6 +115,36 @@ export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked
   return r;
 }
 
+/** 한 파일을 지금 상태로 맞춘다(다시 시도 목록용): 없거나 휴지통, root 밖, 제외 폴더 → 벡터 삭제, 그 밖 → 색인. */
+async function syncOneFile(drive: DriveClient, fileId: string): Promise<'indexed' | 'deleted' | 'skipped'> {
+  let f;
+  try {
+    f = (await drive.files.get({ fileId, fields: 'id,name,mimeType,modifiedTime,size,trashed,parents', supportsAllDrives: true })).data;
+  } catch (e) {
+    if (e instanceof DriveApiError && e.code === 404) {
+      await deleteFileVectors(fileId);
+      return 'deleted';
+    }
+    throw e;
+  }
+  if (!f.name || !f.mimeType || !SUPPORTED_MIMES.has(f.mimeType)) return 'skipped';
+  const resolved = f.trashed ? null : await resolveFromParents(drive, f.parents, f.name);
+  if (!resolved || isExcludedPath(resolved.path)) {
+    await deleteFileVectors(fileId);
+    return 'deleted';
+  }
+  await indexFile(drive, {
+    id: fileId,
+    name: f.name,
+    path: resolved.path,
+    modifiedTime: f.modifiedTime ?? '',
+    source: resolved.source,
+    mimeType: f.mimeType,
+    size: f.size ? Number(f.size) : undefined,
+  });
+  return 'indexed';
+}
+
 export interface SyncResult {
   status: string;
   changed: number;
@@ -141,6 +171,8 @@ export async function runIncrementalSync(): Promise<SyncResult> {
   let skipped = 0;
   let errored = 0;
   let foldersChanged = false;
+  const failedNow = new Set<string>();
+  const retry = await getRetryList();
   let cursor: string | undefined = token;
 
   while (cursor) {
@@ -201,8 +233,9 @@ export async function runIncrementalSync(): Promise<SyncResult> {
         changed++;
       } catch (e) {
         errored++;
+        if (ch.fileId) failedNow.add(ch.fileId);
         console.error(
-          `[drive-sync] file indexing failed (skipped, page token still advances): fileId=${ch.fileId ?? '?'} — ${e instanceof Error ? e.message : e}`,
+          `[drive-sync] file indexing failed (will retry next cycle; page token still advances): fileId=${ch.fileId ?? '?'} — ${e instanceof Error ? e.message : e}`,
         );
       }
     }
@@ -213,6 +246,25 @@ export async function runIncrementalSync(): Promise<SyncResult> {
     }
     cursor = data.nextPageToken ?? undefined;
   }
+
+  // 지난 주기에 실패한 파일을 다시 시도한다. 이번 주기에 변경으로 이미 다룬 파일은 그 결과를 따른다.
+  for (const id of Object.keys(retry)) {
+    if (failedNow.has(id)) continue;
+    try {
+      await syncOneFile(drive, id);
+      delete retry[id];
+    } catch (e) {
+      retry[id] = (retry[id] ?? 0) + 1;
+      if (retry[id]! >= MAX_RETRY_ATTEMPTS) {
+        console.error(`[drive-sync] giving up on fileId=${id} after ${MAX_RETRY_ATTEMPTS} tries — the next full reindex picks it up`);
+        delete retry[id];
+      } else {
+        console.error(`[drive-sync] retry ${retry[id]} failed: fileId=${id} — ${e instanceof Error ? e.message : e}`);
+      }
+    }
+  }
+  for (const id of failedNow) retry[id] = (retry[id] ?? 0) + 1;
+  await setRetryList(retry);
 
   if (foldersChanged) {
     clearFolderMetaCache();

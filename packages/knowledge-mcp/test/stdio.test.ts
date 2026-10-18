@@ -21,7 +21,7 @@ const cleanEnv = (): Record<string, string> => {
     env[k] = v;
   }
   env.MCP_DATA_DIR = mkdtempSync(join(tmpdir(), 'kmcp-stdio-'));
-  env.MCP_ENV_FILE = join(elsewhere, 'missing.env'); // ignore any .env next to the repo
+  env.MCP_ENV_FILE = 'none'; // ignore any .env next to the repo
   return env;
 };
 
@@ -71,6 +71,18 @@ test('cli: keys create never changes or downgrades a registered role', () => {
   assert.match(users, /a@x\.com\s+admin/);
   assert.match(users, /n@x\.com\s+member/);
   assert.doesNotMatch(users, /v@x\.com/);
+});
+
+test('MCP_ENV_FILE naming a missing file stops the process', () => {
+  const missing = join(elsewhere, 'nope.env');
+  const r = spawnSync(process.execPath, ['--import', TSX, server, 'help'], {
+    cwd: elsewhere,
+    env: { ...cleanEnv(), MCP_ENV_FILE: missing },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /MCP_ENV_FILE points to a file that does not exist/);
 });
 
 test('cli: unknown command exits 2, help exits 0', () => {

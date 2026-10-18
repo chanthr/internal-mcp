@@ -13,7 +13,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { ErrorCode, McpError, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { UpstreamSpec } from '../plugin/define.js';
 import { VERSION } from '../version.js';
 
@@ -122,6 +122,9 @@ class Upstream {
     try {
       return await this.client.callTool({ name: remoteName, arguments: args });
     } catch (e) {
+      // The remote answered (JSON-RPC error) or timed out: the call may have run. Do not replay it, and do not
+      // tear down the shared connection under other users' calls. Only a broken link is reconnected and retried.
+      if (e instanceof McpError && e.code !== ErrorCode.ConnectionClosed) throw e;
       this.connected = false;
       await this.connect();
       if (!this.client || !this.connected) throw e;

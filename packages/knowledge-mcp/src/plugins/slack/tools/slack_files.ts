@@ -135,14 +135,14 @@ export async function handleSlackFindFiles(args: z.infer<typeof findInput>) {
 
     // 직원별 Slack 채널 scope 필터 (admin·미설정 = 전체). scope 밖 대화의 파일 제거.
     const visible = files.filter((f) => fileInScope(f, channelScope));
-    const filteredOut = files.length - visible.length;
 
     return {
       content: [
         {
           type: 'text' as const,
           text: JSON.stringify(
-            { mode, count: visible.length, filteredOut, files: visible.map(mapFile) },
+            // 걸러진 건수는 돌려주지 않는다(slack_search 가 total 을 뺀 것과 같은 이유).
+            { mode, count: visible.length, files: visible.map(mapFile) },
             null,
             2,
           ),

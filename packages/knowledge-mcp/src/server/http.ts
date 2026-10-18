@@ -21,7 +21,7 @@ import {
 } from '../core/oauth.js';
 import { maskedSecretCount } from '../core/log_mask.js';
 import { getConfig, configSource } from '../core/config.js';
-import { getStore } from '../store/index.js';
+import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import { VERSION } from '../version.js';
 import type { Registry } from '../plugin/registry.js';
 import { resolveUser } from './identity.js';
@@ -104,6 +104,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     );
   }
   logSecretFingerprints(); // 고권한 키 fingerprint(값 비노출) — 회전 검증용 (S1)
+  const stopLogPrune = scheduleToolLogPrune(store);
 
   const app = express();
   // 프록시 뒤라면 X-Forwarded-For 를 몇 홉까지 믿을지. 기본 1(Railway·Fly·Cloud Run 같은 앞단 프록시 1개).
@@ -293,6 +294,12 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     if (oauthEnabled && resourceMetadataUrl && (!key || looksJwt)) {
       res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${resourceMetadataUrl}"`);
     }
+    if (auth.unavailable) {
+      // 저장소 장애 — 클라이언트 잘못이 아니다. 503 은 401 실패 한도에 세지 않는다(정상 사용자가 429 로 잠기지 않게).
+      res.status(503).setHeader('Retry-After', '5');
+      res.json({ jsonrpc: '2.0', error: { code: -32603, message: 'authentication backend unavailable, retry shortly' }, id: null });
+      return;
+    }
     res.status(401).json({
       jsonrpc: '2.0',
       error: { code: -32001, message: `auth failed: ${auth.reason ?? 'unauthorized'}` },
@@ -306,10 +313,19 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   // 끊긴다"로 보인다. → initialize 는 세션 생성(Mcp-Session-Id 발급), 이후 요청·GET 을 그 세션 transport
   // 로 라우팅. 세션ID 없는 비-initialize 는 기존 one-shot 클라이언트(IDE·프록시) 보존 위해 stateless 폴백.
   // ⚠️ 인메모리라 단일 replica 전제 — 멀티 replica 는 sticky routing·공유 세션 스토어 필요.
-  interface McpSession { transport: StreamableHTTPServerTransport; lastActive: number }
+  interface McpSession { transport: StreamableHTTPServerTransport; lastActive: number; owner: string }
   const sessions = new Map<string, McpSession>();
   const SESSION_IDLE_MS = Number(process.env.MCP_SESSION_IDLE_MS ?? 30 * 60_000);
   const SESSION_MAX = Number(process.env.MCP_SESSION_MAX ?? 1000);
+  // 한 사람(또는 키)이 가질 수 있는 세션 수. 없으면 한 사용자가 initialize 를 몰아 보내 전체 상한을 채우고
+  // 다른 사람들의 세션을 밀어낼 수 있다.
+  const SESSION_MAX_PER_OWNER = Number(process.env.MCP_SESSION_MAX_PER_USER ?? 20);
+  const oldestSession = (match: (s: McpSession) => boolean): string | undefined => {
+    let oldestSid: string | undefined;
+    let oldest = Infinity;
+    for (const [k, v] of sessions) if (match(v) && v.lastActive < oldest) { oldest = v.lastActive; oldestSid = k; }
+    return oldestSid;
+  };
   const dropSession = (sid: string): void => {
     const s = sessions.get(sid);
     if (s) {
@@ -382,17 +398,21 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
 
       // 2) initialize (세션ID 없음) → 새 stateful 세션 생성 (Mcp-Session-Id 발급)
       if (isInitializeRequest(req.body)) {
+        const owner = auth.email ?? auth.key_id ?? 'anonymous';
+        // 같은 사람의 가장 오래된 세션부터 정리하고, 전체 상한은 백스톱으로 둔다.
+        const mine = [...sessions.values()].filter((v) => v.owner === owner).length;
+        if (mine >= SESSION_MAX_PER_OWNER) {
+          const sid = oldestSession((v) => v.owner === owner);
+          if (sid) dropSession(sid);
+        }
         if (sessions.size >= SESSION_MAX) {
-          // 백스톱 — 가장 오래된 세션 정리 (무한 증가 방지)
-          let oldestSid: string | undefined;
-          let oldest = Infinity;
-          for (const [k, v] of sessions) if (v.lastActive < oldest) { oldest = v.lastActive; oldestSid = k; }
-          if (oldestSid) dropSession(oldestSid);
+          const sid = oldestSession(() => true);
+          if (sid) dropSession(sid);
         }
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSid) => {
-            sessions.set(newSid, { transport, lastActive: Date.now() });
+            sessions.set(newSid, { transport, lastActive: Date.now(), owner });
           },
         });
         transport.onclose = () => {
@@ -445,6 +465,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     close: () =>
       new Promise<void>((done) => {
         clearInterval(sweeper);
+        stopLogPrune();
         for (const sid of [...sessions.keys()]) dropSession(sid);
         httpServer.close(() => done());
         httpServer.closeAllConnections?.();

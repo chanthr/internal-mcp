@@ -139,17 +139,12 @@ export class SqliteStore implements Store {
     }
     db.exec('pragma journal_mode = wal; pragma busy_timeout = 5000; pragma foreign_keys = on;');
     db.exec(SCHEMA_SQL);
-    const store = new SqliteStore(db, path);
-    store.pruneToolCalls();
-    return store;
+    return new SqliteStore(db, path);
   }
 
-  /** Keep the audit log bounded: MCP_TOOL_LOG_DAYS (default 90) days. */
-  private pruneToolCalls(): void {
-    const days = Number(process.env.MCP_TOOL_LOG_DAYS ?? 90);
-    if (!Number.isFinite(days) || days <= 0) return;
+  async pruneToolCalls(days: number): Promise<number> {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-    this.db.prepare('delete from mcp_tool_calls where created_at < ?').run(cutoff);
+    return Number(this.db.prepare('delete from mcp_tool_calls where created_at < ?').run(cutoff).changes);
   }
 
   close(): void {

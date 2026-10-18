@@ -136,23 +136,7 @@ export async function slackApi<T = any>(
   }
 }
 
-/** 동시성 제한 병렬 map — Slack rate limit 을 보호하며 순차 N+1 을 제거. */
-export async function mapLimit<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>,
-): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let i = 0;
-  const worker = async () => {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await fn(items[idx], idx);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) || 0 }, worker));
-  return out;
-}
+export { mapLimit } from '../../core/concurrency.js'; // 공용 위치(core/concurrency.ts)로 옮김. 도구들은 여기서 가져간다
 
 // 사용자 ID → 표시명 캐시 (분 단위로 거의 안 변함) — 여러 도구가 공유.
 let _userMapCache: { map: Record<string, string>; expiresAt: number } | null = null;
@@ -283,13 +267,29 @@ export async function downloadSlackFile(
     if (!resp.ok) {
       throw new SlackError(`File download failed: HTTP ${resp.status}`);
     }
-    const buf = Buffer.from(await resp.arrayBuffer());
-    const truncated = buf.length > maxBytes;
-    if (opts.asText) {
-      const slice = truncated ? buf.subarray(0, maxBytes) : buf;
-      return { text: slice.toString('utf-8'), bytes: buf.length, truncated };
+    // maxBytes 까지만 읽고 끊는다. 예전엔 파일 전체를 메모리에 올린 뒤 잘라, 큰 .log 하나가 서버 메모리를 채울 수 있었다.
+    const declared = Number(resp.headers.get('content-length') ?? NaN);
+    if (!opts.asText) {
+      await resp.body?.cancel().catch(() => undefined);
+      return { bytes: Number.isFinite(declared) ? declared : 0, truncated: false };
     }
-    return { bytes: buf.length, truncated: false };
+    const chunks: Buffer[] = [];
+    let read = 0;
+    let truncated = false;
+    const reader = resp.body?.getReader();
+    while (reader) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value));
+      read += value.byteLength;
+      if (read > maxBytes) {
+        truncated = true;
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+    const buf = Buffer.concat(chunks).subarray(0, maxBytes);
+    return { text: buf.toString('utf-8'), bytes: Number.isFinite(declared) ? declared : read, truncated };
   } catch (e) {
     if (e instanceof SlackError) throw e;
     if (e instanceof Error && e.name === 'AbortError') {

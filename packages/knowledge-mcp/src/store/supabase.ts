@@ -50,7 +50,8 @@ export class SupabaseStore implements Store {
   // ── API keys ──
   async validateKey(rawKey: string): Promise<KeyCheck> {
     const { data, error } = await this.sb.rpc('validate_mcp_key', { p_key: rawKey });
-    if (error) return { ok: false, reason: `validate_mcp_key RPC failed: ${error.message}` };
+    // A failed lookup is an outage, not a bad key: throw so auth answers 503 instead of 401.
+    if (error) throw new Error(`validate_mcp_key RPC failed: ${error.message}`);
     const row = Array.isArray(data) ? data[0] : data;
     if (!row) return { ok: false, reason: 'validate_mcp_key returned no row' };
     if (!row.ok) return { ok: false, reason: row.reason ?? 'auth failed' };
@@ -184,6 +185,13 @@ export class SupabaseStore implements Store {
     } catch (e) {
       console.error('[tool-log] insert failed:', e instanceof Error ? e.message : e);
     }
+  }
+
+  async pruneToolCalls(days: number): Promise<number> {
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
+    const { data, error } = await this.t('mcp_tool_calls').delete().lt('created_at', cutoff).select('id');
+    if (error) fail('prune tool calls', error);
+    return (data ?? []).length;
   }
 
   // ── OAuth ──

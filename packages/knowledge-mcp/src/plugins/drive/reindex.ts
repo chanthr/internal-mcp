@@ -44,6 +44,10 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { dataDir } from '../../core/paths.js';
+import { createLimiter } from '../../core/concurrency.js';
+
+// 폴더 목록 호출의 동시 개수 상한. 하위 폴더를 제한 없이 동시에 열면 폴더가 수천 개일 때 Drive 속도 제한(403)이 난다.
+const listGate = createLimiter(Number(process.env.DRIVE_LIST_CONCURRENCY ?? 8));
 
 // 체크포인트 — 처리 완료 파일을 기록 → 재시작 시 skip (429 중단 후 재개·재실행 비용 절감).
 // 파일마다 modifiedTime 을, 전체에 컬렉션 이름을 함께 둔다. 그래서 그사이 바뀐 파일과 다른 컬렉션(QDRANT_COLLECTION
@@ -142,14 +146,16 @@ async function listAllMarkdown(
   let pageToken: string | undefined;
 
   do {
-    const resp = await drive.files.list({
-      q: `'${folderId}' in parents and trashed=false`,
-      fields: 'nextPageToken, files(id,name,mimeType,modifiedTime,size)',
-      pageSize: 100,
-      pageToken,
-      includeItemsFromAllDrives: true,
-      supportsAllDrives: true,
-    });
+    const resp = await listGate(() =>
+      drive.files.list({
+        q: `'${folderId}' in parents and trashed=false`,
+        fields: 'nextPageToken, files(id,name,mimeType,modifiedTime,size)',
+        pageSize: 100,
+        pageToken,
+        includeItemsFromAllDrives: true,
+        supportsAllDrives: true,
+      }),
+    );
 
     for (const f of resp.data.files ?? []) {
       if (!f.id || !f.name) continue;

@@ -20,7 +20,7 @@ import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { isExcludedName } from '../exclude.js';
-import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
+import { allowedDriveFolders, isPathInScope, isScopeAncestor } from '../../../core/scope.js';
 import { classifyFolder } from '../path.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -36,7 +36,7 @@ const DESCRIPTION =
 
 const inputSchema = z
   .object({
-    folderId: z.string().min(1).optional().describe('Drive folder ID (one). "root" = top level of My Drive.'),
+    folderId: z.string().min(1).optional().describe('Drive folder ID (one). Only folders under the indexed roots open.'),
     folderName: z.string().min(1).optional().describe('Folder name (one, e.g. "Clients"). Looks the folder up by name when you do not know the ID.'),
     folderIds: z
       .array(z.string().min(1))
@@ -168,13 +168,16 @@ async function walkFolder(
   return { children: nodes, hasMore };
 }
 
-/** 재귀 트리를 직원별 Drive 폴더 scope 로 후처리 필터. 폴더는 자식이 scope 에 걸리면 유지(하위 도달 보장). */
+/**
+ * 재귀 트리를 직원별 Drive 폴더 scope 로 후처리 필터. 폴더는 자식이 scope 에 걸리거나, 허용 폴더의 상위면 유지한다.
+ * 상위 폴더를 남겨야 depth=1 로 한 단계씩 내려가도 허용 폴더에 닿는다.
+ */
 function filterTreeByScope(nodes: TreeNode[], parentPath: string, scope: string[]): TreeNode[] {
   return nodes.filter((n) => {
     const p = parentPath ? `${parentPath}/${n.name ?? ''}` : n.name ?? '';
     if (n.isFolder) {
       if (n.children) n.children = filterTreeByScope(n.children, p, scope);
-      return isPathInScope(p, scope) || (n.children !== undefined && n.children.length > 0);
+      return isPathInScope(p, scope) || isScopeAncestor(p, scope) || (n.children !== undefined && n.children.length > 0);
     }
     return isPathInScope(p, scope);
   });

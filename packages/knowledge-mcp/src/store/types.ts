@@ -84,6 +84,8 @@ export interface Store {
 
   // Audit log (best effort: implementations swallow and log their own errors)
   logToolCall(row: ToolCallRecord): Promise<void>;
+  /** Delete tool-call log rows older than `days`. Returns how many were removed. */
+  pruneToolCalls(days: number): Promise<number>;
 
   // OAuth
   getOAuthClient(clientId: string): Promise<OAuthClientInformationFull | null>;

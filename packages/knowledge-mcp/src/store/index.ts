@@ -31,6 +31,38 @@ export function getStore(): Promise<Store> {
   return _store;
 }
 
+/**
+ * Days of tool-call log to keep, or null to keep everything. MCP_TOOL_LOG_DAYS wins; without it SQLite keeps 90 days
+ * and Supabase keeps everything (its log may feed other tools, so it is only pruned when you ask).
+ */
+export function toolLogRetentionDays(kind: 'sqlite' | 'supabase'): number | null {
+  const raw = process.env.MCP_TOOL_LOG_DAYS;
+  if (raw === undefined || raw.trim() === '') return kind === 'sqlite' ? 90 : null;
+  const days = Number(raw);
+  return Number.isFinite(days) && days > 0 ? days : null;
+}
+
+/**
+ * Prune the tool-call log now and then once a day, by toolLogRetentionDays. Returns a stop function.
+ * The timer is unref'd so it never keeps the process alive. Failures are logged, never thrown.
+ */
+export function scheduleToolLogPrune(store: Store): () => void {
+  const days = toolLogRetentionDays(store.kind);
+  if (days === null) return () => {};
+  const prune = (): void => {
+    store.pruneToolCalls(days).then(
+      (n) => {
+        if (n > 0) console.error(`[tool-log] removed ${n} rows older than ${days} days`);
+      },
+      (e: unknown) => console.error('[tool-log] prune failed:', e instanceof Error ? e.message : e),
+    );
+  };
+  prune();
+  const timer = setInterval(prune, 86_400_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 /** Tests only: use this store instead of opening one. */
 export function setStoreForTesting(store: Store | null): void {
   _store = store ? Promise.resolve(store) : null;
