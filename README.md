@@ -99,7 +99,7 @@ Every file in `src/plugins/` is a plugin. Copy the example and edit it:
 
 ```ts
 // src/plugins/weather.ts
-import { definePlugin, defineTool, ToolError, z } from '@chanthr/knowledge-mcp';
+import { definePlugin, defineTool, ToolError, z } from '@chnxthr/knowledge-mcp';
 
 export default definePlugin({
   id: 'weather',                    // also the permission group
@@ -137,7 +137,7 @@ Save the file and the dev server reloads. You did not touch a router, a tool lis
 
 ## Plugin API
 
-Everything is exported from `@chanthr/knowledge-mcp`.
+Everything is exported from `@chnxthr/knowledge-mcp`.
 
 <details open>
 <summary><code>definePlugin({...})</code></summary>
@@ -188,7 +188,7 @@ Everything is exported from `@chanthr/knowledge-mcp`.
 A generated project has one entry file. It is also the command line, so every command sees your plugins.
 
 ```ts
-import { run, builtinPlugins, loadPlugins } from '@chanthr/knowledge-mcp';
+import { run, builtinPlugins, loadPlugins } from '@chnxthr/knowledge-mcp';
 
 const mine = await loadPlugins(new URL('./plugins/', import.meta.url));
 await run({ plugins: [...builtinPlugins, ...mine] });

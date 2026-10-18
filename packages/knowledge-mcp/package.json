@@ -1,5 +1,5 @@
 {
-  "name": "@chanthr/knowledge-mcp",
+  "name": "@chnxthr/knowledge-mcp",
   "version": "0.3.0",
   "description": "Build your own MCP server from plugins. Auth (API keys, OAuth), per-user permissions, audit log, SQLite or Supabase state, and built-in Google Drive, Slack, GitHub and Railway connectors.",
   "type": "module",

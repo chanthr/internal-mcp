@@ -24,7 +24,7 @@ test('scaffold writes a runnable project with placeholders filled', () => {
   scaffold(dir, { name: 'team-mcp', coreSpec: '^9.9.9' });
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
   assert.equal(pkg.name, 'team-mcp');
-  assert.equal(pkg.dependencies['@chanthr/knowledge-mcp'], '^9.9.9');
+  assert.equal(pkg.dependencies['@chnxthr/knowledge-mcp'], '^9.9.9');
   for (const f of ['.gitignore', '.dockerignore', '.env', '.env.example', 'Dockerfile', 'tsconfig.json', 'README.md', 'src/server.ts', 'src/plugins/notes.ts']) {
     assert.ok(existsSync(join(dir, f)), `${f} exists`);
   }

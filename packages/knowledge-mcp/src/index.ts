@@ -1,7 +1,7 @@
 /**
- * @chanthr/knowledge-mcp — build your own MCP server from plugins.
+ * @chnxthr/knowledge-mcp — build your own MCP server from plugins.
  *
- *   import { run, builtinPlugins, loadPlugins } from '@chanthr/knowledge-mcp';
+ *   import { run, builtinPlugins, loadPlugins } from '@chnxthr/knowledge-mcp';
  *   await run({ plugins: [...builtinPlugins, ...(await loadPlugins(new URL('./plugins/', import.meta.url)))] });
  *
  * Importing this module loads .env and installs log masking first (bootstrap.ts), so import it before

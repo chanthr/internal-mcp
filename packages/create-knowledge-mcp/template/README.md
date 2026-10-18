@@ -19,7 +19,7 @@ Clients send the key as `Authorization: Bearer <key>`. State (keys, users, plugi
 Copy `src/plugins/notes.ts` to `src/plugins/<name>.ts` and edit it:
 
 ```ts
-import { definePlugin, defineTool, z } from '@chanthr/knowledge-mcp';
+import { definePlugin, defineTool, z } from '@chnxthr/knowledge-mcp';
 
 export default definePlugin({
   id: 'weather',                 // also the permission group

@@ -99,7 +99,7 @@ docker exec kmcp knowledge-mcp doctor        # 어떤 연결이 켜졌는지, �
 
 ```ts
 // src/plugins/weather.ts
-import { definePlugin, defineTool, ToolError, z } from '@chanthr/knowledge-mcp';
+import { definePlugin, defineTool, ToolError, z } from '@chnxthr/knowledge-mcp';
 
 export default definePlugin({
   id: 'weather',                    // 권한 그룹 이름도 됩니다
@@ -137,7 +137,7 @@ export default definePlugin({
 
 ## 플러그인 API
 
-모두 `@chanthr/knowledge-mcp`에서 가져옵니다.
+모두 `@chnxthr/knowledge-mcp`에서 가져옵니다.
 
 <details open>
 <summary><code>definePlugin({...})</code></summary>
@@ -188,7 +188,7 @@ export default definePlugin({
 만든 프로젝트에는 시작 파일이 하나 있습니다. 이 파일이 명령줄 역할도 해서, 모든 명령이 내 플러그인을 압니다.
 
 ```ts
-import { run, builtinPlugins, loadPlugins } from '@chanthr/knowledge-mcp';
+import { run, builtinPlugins, loadPlugins } from '@chnxthr/knowledge-mcp';
 
 const mine = await loadPlugins(new URL('./plugins/', import.meta.url));
 await run({ plugins: [...builtinPlugins, ...mine] });
