@@ -73,20 +73,6 @@ export async function authenticateApiKey(
     return { ok: false, reason: 'MCP_API_KEY not provided' };
   }
 
-  // Day 1 호환: 단일 dev key — **stdio(로컬 dev) 전용**.
-  // HTTP(production)에선 비활성(P2): 정적 문자열 1개가 감사 식별자 없는 admin 백도어가 되므로,
-  // 프로덕션 인증은 mcp_keys(해시 저장·revoke·expiry) 경로만 허용한다.
-  const devKey = process.env.MCP_DEV_KEY;
-  const transport = (process.env.MCP_TRANSPORT || 'http').toLowerCase();
-  if (devKey && transport === 'stdio' && timingSafeEqualStr(key, devKey)) {
-    return {
-      ok: true,
-      org_id: getConfig().orgId,
-      role: 'admin',
-      email: 'dev@local',
-    };
-  }
-
   // 캐시 hit (성공 결과만 캐시 — 실패는 매번 재검증해 빠른 키 활성화 반영)
   const cached = _authCache.get(key);
   if (cached && cached.expiresAt > Date.now()) {
@@ -112,17 +98,4 @@ export async function authenticateApiKey(
     console.error('[auth] key check failed (store unavailable):', e instanceof Error ? e.message : e);
     return { ok: false, reason: 'authentication backend unavailable', unavailable: true };
   }
-}
-
-/**
- * 도구별 role 가드. 예: 쓰기 도구는 admin 만.
- *
- * 사용 예:
- *   if (!requireRole(auth, 'admin', 'member')) {
- *     return errorResponse('forbidden — role insufficient');
- *   }
- */
-export function requireRole(auth: AuthContext, ...allowed: Role[]): boolean {
-  if (!auth.ok || !auth.role) return false;
-  return allowed.includes(auth.role);
 }

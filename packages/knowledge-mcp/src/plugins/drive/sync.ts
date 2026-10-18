@@ -279,7 +279,6 @@ export async function runIncrementalSync(): Promise<SyncResult> {
 
 let _started = false;
 let _running = false;
-let _timer: NodeJS.Timeout | null = null;
 
 /**
  * startup 호출 — 1회 실행(첫 실행은 token init) + 주기 polling.
@@ -311,7 +310,7 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
   };
 
   const scheduleNext = () => {
-    _timer = setTimeout(() => void run().finally(scheduleNext), intervalMin * 60_000);
+    setTimeout(() => void run().finally(scheduleNext), intervalMin * 60_000);
   };
 
   void run().finally(scheduleNext); // startup 1회 후 주기 시작

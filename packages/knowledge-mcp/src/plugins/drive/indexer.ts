@@ -232,7 +232,7 @@ export async function indexFile(drive: DriveClient, file: IndexableFile): Promis
   const classification = classifyFile(file.path, file.source);
   const bizMeta = deriveBizMeta(file.path, file.source);
   // heading breadcrumb 포함 임베딩(embedInputForChunk) — 저장 content 는 그대로, 임베딩 입력만 섹션 맥락 부여.
-  const vectors = await embedTexts(chunks.map(embedInputForChunk), 'RETRIEVAL_DOCUMENT');
+  const vectors = await embedTexts(chunks.map(embedInputForChunk));
 
   const points = chunks.map((c, idx) => ({
     id: makeChunkId(file.id, idx),

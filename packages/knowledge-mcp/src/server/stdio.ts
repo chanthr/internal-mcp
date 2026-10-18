@@ -27,7 +27,7 @@ export async function runStdio(registry: Registry): Promise<void> {
       console.error(`[knowledge-mcp] stdio auth failed: ${auth.reason}. Check MCP_API_KEY, or unset it to run as the local admin.`);
       process.exit(1);
     }
-    if (auth.email && auth.email !== 'dev@local') {
+    if (auth.email) {
       const { role, scopes } = await resolveUser(auth.key_id ?? 'direct', auth.email);
       auth = { ...auth, role, scopes };
     }

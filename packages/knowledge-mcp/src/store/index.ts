@@ -63,9 +63,4 @@ export function scheduleToolLogPrune(store: Store): () => void {
   return () => clearInterval(timer);
 }
 
-/** Tests only: use this store instead of opening one. */
-export function setStoreForTesting(store: Store | null): void {
-  _store = store ? Promise.resolve(store) : null;
-}
-
 export type { Store } from './types.js';

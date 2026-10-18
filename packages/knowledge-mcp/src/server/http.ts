@@ -265,7 +265,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
       auth = await authenticateApiKey(key);
       // 직접 키(IDE)도 직원 email 로 role+scope 를 app_users 에서 재계산(act-as·OAuth 와 통일).
       // P1: role 도 재계산해 퇴사·강등 즉시 반영(옛 구멍: revoke 전까지 admin 유지). dev key 는 제외.
-      if (auth.ok && auth.email && auth.email !== 'dev@local') {
+      if (auth.ok && auth.email) {
         const { role, scopes } = await resolveUser(auth.key_id ?? 'direct', auth.email);
         auth = { ...auth, role, scopes };
       }

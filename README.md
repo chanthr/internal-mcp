@@ -56,13 +56,17 @@ The project comes with an example plugin, `src/plugins/notes.ts`. Point a client
 **Only the built-in connectors**
 
 ```bash
+cp .env.example .env                         # fill in the connectors you want
+cp mcp.config.example.json mcp.config.json   # Drive folders, excluded folders, sign-in allowlist
 docker run -d --name kmcp -p 8080:8080 -v kmcp-data:/data --env-file .env \
-  ghcr.io/chanthr/knowledge-mcp:latest
+  -v "$PWD/mcp.config.json:/app/mcp.config.json:ro" ghcr.io/chanthr/knowledge-mcp:latest
 docker exec kmcp knowledge-mcp keys create --email you@example.com --role admin
 docker exec kmcp knowledge-mcp doctor        # which connectors are on, and what each one is missing
 ```
 
 [`.env.example`](.env.example) lists every variable. Each connector turns on when its variables are set.
+The image holds no config: mount `mcp.config.json` as above, or pass it inline with `-e MCP_CONFIG_JSON='{…}'`.
+[`compose.yaml`](compose.yaml) does the same with Docker Compose.
 
 ## How it works
 
@@ -123,13 +127,14 @@ export default definePlugin({
 });
 ```
 
-Save the file and the dev server reloads. You did not touch a router, a tool list or a permission table.
+Save the file and the dev server restarts. New files in `src/plugins/` are picked up too. You did not touch a
+router, a tool list or a permission table.
 
 | The core does this for you | How |
 | --- | --- |
 | Lists the tool | From `name`, `description` and the zod `input` (zod 3 or 4), turned into JSON Schema |
 | Hides it when not configured | Until every name in `env` is set, and `enabled()` returns true when you add one |
-| Validates input | Bad input returns `[invalid_input] field: reason` to the model, and `run` is not called |
+| Validates input | Bad input returns `[invalid_input] tool '<name>': field: reason` to the model, and `run` is not called |
 | Checks permission | The plugin `id` is the permission group (see [Access control](#access-control)) |
 | Formats the result | A string becomes text, any other value becomes pretty JSON, an MCP result passes through |
 | Handles errors | `throw new ToolError('...')` returns `[error] ...`. Any other error returns `[fatal] ...` |
@@ -224,7 +229,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | `drive` | `semantic_search_drive` | `QDRANT_URL`, `OPENAI_API_KEY` and an index (`knowledge-mcp drive reindex`) |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
-| `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_TOKEN` with Contents: read |
+| `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
 | `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | `RAILWAY_TOKEN` |
 | core | `ping` | Nothing. Shows who you are and which plugins are on |
 
@@ -237,7 +242,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | First full index | `knowledge-mcp drive reindex` (`docker compose run --rm knowledge-mcp drive reindex`) |
 | Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`). Do the full index first |
 | Clean up | A full run deletes vectors of files no longer listed, such as files moved into an excluded folder |
-| Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks |
+| Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks. It skips OCR, so it never charges Mathpix |
 
 | Format | How text is extracted |
 | --- | --- |
@@ -256,9 +261,15 @@ Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or inde
 <summary>Slack channel map</summary>
 <br>
 
-`slack_list_channels` tells the model what each channel is for. New channels are added switched off. Describe
-and switch them on with `knowledge-mcp slack channel '#dev' --purpose "Deploys and incidents" --on`, and list
-them with `knowledge-mcp slack channels`.
+`slack_list_channels` tells the model what each channel is for.
+
+1. Invite the bot to the channels it should read, then call `slack_list_channels` once from a client. That call
+   copies the channel list from Slack into the map. New channels arrive switched off.
+2. Describe a channel and switch it on: `knowledge-mcp slack channel '#dev' --purpose "Deploys and incidents" --on`.
+   List the map with `knowledge-mcp slack channels`.
+
+On and off only decide what `slack_list_channels` shows by default. They do not grant or block reading:
+that depends on the bot's channels and on each person's allowed channels.
 
 </details>
 
@@ -271,7 +282,8 @@ them with `knowledge-mcp slack channels`.
 
 `.env` and `mcp.config.json` are read from the working directory first, then from your project folder, so a
 client that starts the server from elsewhere still finds them. `MCP_CONFIG_JSON` (inline) and
-`MCP_CONFIG_PATH` override the file.
+`MCP_CONFIG_PATH` override the file. The config is read once at startup: restart the server after you change
+it, the sign-in allowlist included.
 
 | Config key | Meaning |
 | --- | --- |
@@ -383,7 +395,7 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 
 | Client | How |
 | --- | --- |
-| Claude Code, local | `claude mcp add my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` |
+| Claude Code, local | `claude mcp add my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
 | Claude web and desktop | Turn on OAuth, then add a custom connector with `https://<host>/mcp` |
 | Any MCP client | URL `https://<host>/mcp` with header `Authorization: Bearer <key>` |
