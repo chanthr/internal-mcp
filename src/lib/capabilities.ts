@@ -5,6 +5,7 @@
  * Dropping it from the list up front means the LLM never tries it. Upstream (github_/railway_ remote)
  * is gated separately by connection success.
  */
+import { slackUserToken, slackBotToken } from '../integrations/slack.js';
 
 const has = (v: string | undefined): boolean => !!v && v.trim().length > 0;
 
@@ -23,13 +24,17 @@ export function semanticConfigured(): boolean {
   return has(process.env.QDRANT_URL) && has(process.env.OPENAI_API_KEY);
 }
 
-/** Slack tools — any of the three tokens (user/bot/common). Matches integrations/slack.ts. */
+/**
+ * Slack read tools (list/read channel, files) — need a bot token (xoxb). Matches integrations/slack.ts.
+ * A user token never stands in for the bot: that would widen "what the bot can see" to the token owner's DMs.
+ */
 export function slackConfigured(): boolean {
-  return (
-    has(process.env.SLACK_USER_TOKEN) ||
-    has(process.env.SLACK_BOT_TOKEN) ||
-    has(process.env.SLACK_TOKEN)
-  );
+  return has(slackBotToken());
+}
+
+/** slack_search — needs a user token (search API) AND a bot token (results are limited to bot-member channels). */
+export function slackSearchConfigured(): boolean {
+  return has(slackUserToken()) && has(slackBotToken());
 }
 
 /** repo_tree — GitHub token. Matches tools/repo_tree.ts. */
@@ -47,7 +52,7 @@ export function capabilitySummary(): string {
   return [
     `drive=${driveConfigured() ? 'on' : 'off'}`,
     `semantic=${semanticConfigured() ? 'on' : 'off'}`,
-    `slack=${slackConfigured() ? 'on' : 'off'}`,
+    `slack=${slackConfigured() ? (slackSearchConfigured() ? 'on' : 'on(no-search)') : 'off'}`,
     `github=${githubConfigured() ? 'on' : 'off'}`,
     `railway=${railwayConfigured() ? 'on' : 'off'}`,
   ].join(' ');

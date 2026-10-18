@@ -4,22 +4,28 @@
  * 우리 MCP 서버가 AS 이자 RS(같은 프로세스)다:
  *   - AS: /authorize·/token·/register(.well-known 메타) 는 SDK `mcpAuthRouter` 가 깔고,
  *         실제 로직은 이 파일의 `KnowledgeOAuthProvider`(OAuthServerProvider 구현)가 담당.
- *   - 로그인: Google Workspace(OIDC)로 브리지. hd(허용 도메인) + email allowlist 로 조직 제한.
+ *   - 동의: /authorize 는 바로 Google 로 보내지 않고 동의 화면을 먼저 보여 준다(어떤 앱이, 어디로 토큰을 받는지).
+ *           DCR 로 누구나 client 를 등록할 수 있어, 동의 없이 넘기면 링크 한 번에 토큰이 공격자 redirect_uri 로 간다
+ *           (MCP 보안 모범 사례의 confused deputy). 승인 버튼은 쿠키에 묶어 다른 사이트가 대신 누르지 못하게 한다.
+ *   - 로그인: Google Workspace(OIDC)로 브리지. 허용 도메인(hd) 또는 허용 이메일 중 하나에 들어야 한다.
  *   - 토큰: access/refresh 를 HS256 JWT 로 자체 발급(AS=RS 라 JWKS 배포 불필요, 대칭키로 in-process 검증).
  *           access token 의 aud = canonical resource(=우리 /mcp). RFC 8707.
  *   - PKCE(S256): SDK token 핸들러가 challengeForAuthorizationCode() 로 받아 자체 검증.
  *
- * graceful: 필수 env 가 없으면 isOAuthConfigured()=false → index.ts 가 라우터를 안 깐다(기존 Bearer 무손상).
+ * graceful: 필수 값이 없으면 isOAuthConfigured()=false → index.ts 가 라우터를 안 깐다(기존 Bearer 무손상).
+ *   허용 목록(도메인·이메일)도 필수 값이다. 둘 다 비면 아무 Google 계정이나 로그인되므로 OAuth 를 켜지 않는다.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
 import { getSupabase } from './supabase.js';
 import { getConfig } from './config.js';
+import { timingSafeEqualStr } from './auth.js';
 import type { Response } from 'express';
 import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { InvalidGrantError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 
 // ── 설정 (env) ──
 const ISSUER = (process.env.MCP_OAUTH_ISSUER || '').replace(/\/$/, ''); // e.g. https://mcp.example.com
@@ -28,23 +34,28 @@ const RESOURCE = (process.env.MCP_RESOURCE || (ISSUER ? `${ISSUER}/mcp` : '')).r
 const GOOGLE_CLIENT_ID = process.env.OAUTH_GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.OAUTH_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET || '';
 const JWT_SECRET = process.env.OAUTH_JWT_SECRET || '';
-const ALLOWED_HD = process.env.OAUTH_ALLOWED_HD || getConfig().oauth.allowedDomains[0] || '';
+const csv = (v: string) => v.split(',');
+const ALLOWED_DOMAINS = (process.env.OAUTH_ALLOWED_HD ? csv(process.env.OAUTH_ALLOWED_HD) : getConfig().oauth.allowedDomains)
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 const ALLOWED_EMAILS = (
-  process.env.OAUTH_ALLOWED_EMAILS ? process.env.OAUTH_ALLOWED_EMAILS.split(',') : getConfig().oauth.allowedEmails
+  process.env.OAUTH_ALLOWED_EMAILS ? csv(process.env.OAUTH_ALLOWED_EMAILS) : getConfig().oauth.allowedEmails
 )
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
+const emailDomain = (e: string) => e.slice(e.lastIndexOf('@') + 1);
+
 /**
- * 계정 허용 판정 — allowlist 있으면 그 목록만, 없으면 hd 도메인.
- * 로그인뿐 아니라 **토큰 검증·refresh 마다 재확인**해서, allowlist 에서 빠진 계정은
- * 기존 토큰(특히 30일 refresh)이 남아 있어도 즉시 차단되도록 한다(보안 감사 P1 수정).
+ * 계정 허용 판정 — 허용 이메일 목록에 있거나, 이메일 도메인이 허용 도메인이면 허용(합집합).
+ * 둘 다 비어 있으면 아무도 허용하지 않는다(fail-closed). 그 경우 OAuth 자체가 켜지지 않는다.
+ * 로그인뿐 아니라 **토큰 검증·refresh 마다 재확인**해서, 허용 목록에서 빠진 계정은
+ * 기존 토큰(특히 30일 refresh)이 남아 있어도 즉시 차단되도록 한다.
  */
 function emailAllowed(email: string): boolean {
   const e = (email || '').toLowerCase();
-  if (!e) return false;
-  if (ALLOWED_EMAILS.length > 0) return ALLOWED_EMAILS.includes(e);
-  return ALLOWED_HD ? e.endsWith(`@${ALLOWED_HD.toLowerCase()}`) : true;
+  if (!e || !e.includes('@')) return false;
+  return ALLOWED_EMAILS.includes(e) || ALLOWED_DOMAINS.includes(emailDomain(e));
 }
 
 const GOOGLE_CALLBACK = ISSUER ? `${ISSUER}/oauth/google/callback` : '';
@@ -53,14 +64,35 @@ const ACCESS_TTL = 3600; // 1h
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
 const CODE_TTL = 300; // 5m
 const STATE_TTL = 600; // 10m
+const CONSENT_TTL = 600; // 10m
+export const CONSENT_COOKIE = 'kmcp_consent';
+export const CONSENT_PATH = '/oauth/consent';
 
 const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 
-/** OAuth 활성 조건 — 필수 env 가 모두 있어야 함. 없으면 index 가 라우터 미장착(기존 Bearer 유지). */
+/** OAuth 를 켜는 데 빠진 값 목록 (이름만, 값은 노출 안 함). 빈 배열이면 켤 수 있다. */
+export function oauthConfigProblems(): string[] {
+  const out: string[] = [];
+  if (!ISSUER) out.push('MCP_OAUTH_ISSUER');
+  if (!GOOGLE_CLIENT_ID) out.push('OAUTH_GOOGLE_CLIENT_ID');
+  if (!GOOGLE_CLIENT_SECRET) out.push('OAUTH_GOOGLE_CLIENT_SECRET');
+  if (JWT_SECRET.length < 32) out.push('OAUTH_JWT_SECRET (>= 32 chars)');
+  if (ALLOWED_DOMAINS.length === 0 && ALLOWED_EMAILS.length === 0) {
+    out.push('OAUTH_ALLOWED_HD or OAUTH_ALLOWED_EMAILS (config oauth.allowedDomains / allowedEmails)');
+  }
+  return out;
+}
+
+/** OAuth 를 하나라도 설정하려 한 흔적이 있는가 — 반쯤 설정된 상태를 부팅 로그에서 크게 알리기 위함. */
+export function oauthAttempted(): boolean {
+  return Boolean(ISSUER || process.env.OAUTH_GOOGLE_CLIENT_ID || JWT_SECRET);
+}
+
+/** OAuth 활성 조건 — 필수 값이 모두 있어야 함. 없으면 index 가 라우터 미장착(기존 Bearer 유지). */
 export function isOAuthConfigured(): boolean {
-  return Boolean(ISSUER && RESOURCE && GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && JWT_SECRET.length >= 32);
+  return Boolean(RESOURCE) && oauthConfigProblems().length === 0;
 }
 
 export const OAUTH_ISSUER_URL = ISSUER;
@@ -88,9 +120,50 @@ interface GooglePending {
   resource?: string;
   exp: number;
 }
+interface ConsentPending extends GooglePending {
+  csrf: string; // 동의 화면이 심은 쿠키 값 — POST 의 폼 값·쿠키 값과 모두 같아야 승인
+}
 
 const _authCodes = new Map<string, AuthCodeEntry>();
 const _googlePending = new Map<string, GooglePending>();
+const _consentPending = new Map<string, ConsentPending>();
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+/** 동의 화면 HTML. 앱 이름과 토큰이 돌아갈 주소를 그대로 보여 준다. */
+function consentPage(opts: { appName: string; clientId: string; redirectUri: string; id: string; csrf: string }): string {
+  const server = escapeHtml(getConfig().branding.name);
+  const app = escapeHtml(opts.appName);
+  let target = opts.redirectUri;
+  try {
+    const u = new URL(opts.redirectUri);
+    target = `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    /* 등록 단계에서 URL 검증됨 — 그래도 원문 표시 */
+  }
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>${server} sign-in</title>
+<style>
+body{margin:0;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f6f4;color:#111}
+main{max-width:440px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #e3e3df;border-radius:14px}
+h1{font-size:20px;margin:0 0 16px}p{margin:0 0 12px;color:#444}code{word-break:break-all;background:#f1f1ee;padding:2px 6px;border-radius:6px}
+.row{display:flex;gap:12px;margin-top:24px}button{flex:1;font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #c8cbd0;background:#fff;cursor:pointer}
+button[value=approve]{background:#111;color:#fff;border-color:#111}
+</style></head><body><main>
+<h1>${app} wants to use ${server}</h1>
+<p>If you continue, you sign in with Google and this app receives a token that can read what your account can read.</p>
+<p>The token is sent to:<br><code>${escapeHtml(target)}</code></p>
+<p>Client ID: <code>${escapeHtml(opts.clientId)}</code></p>
+<p>Continue only if you started this connection yourself.</p>
+<form method="post" action="${escapeHtml(ISSUER + CONSENT_PATH)}">
+<input type="hidden" name="id" value="${escapeHtml(opts.id)}">
+<input type="hidden" name="csrf" value="${escapeHtml(opts.csrf)}">
+<div class="row"><button type="submit" name="action" value="deny">Cancel</button>
+<button type="submit" name="action" value="approve">Continue with Google</button></div>
+</form></main></body></html>`;
+}
 
 function sweep<T extends { exp: number }>(m: Map<string, T>): void {
   const now = Date.now() / 1000;
@@ -187,13 +260,16 @@ async function verifyGoogleIdToken(idToken: string): Promise<{ email: string; hd
     algorithms: ['RS256'], // alg 고정 (defense-in-depth)
   });
   const email = String(payload.email || '').toLowerCase();
-  const hd = payload.hd ? String(payload.hd) : undefined;
+  const hd = payload.hd ? String(payload.hd).toLowerCase() : undefined;
   const emailVerified = payload.email_verified === true || payload.email_verified === 'true';
   if (!email || !emailVerified) throw new Error('google: email 미검증');
-  // 사내 도메인 제한 (hd 클레임 서버 재검증 — hd 파라미터는 힌트일 뿐이라 신뢰 불가)
-  if (ALLOWED_HD && hd !== ALLOWED_HD) throw new Error(`google: 허용되지 않은 도메인(hd=${hd ?? 'none'})`);
-  if (!emailAllowed(email)) throw new Error('google: allowlist 외 계정');
-  return { email, hd };
+  // 허용 이메일 목록에 있으면 계정 종류와 무관하게 허용(외부 협력자 등).
+  if (ALLOWED_EMAILS.includes(email)) return { email, hd };
+  // 도메인으로 허용할 때는 hd 클레임이 그 도메인이어야 한다 — Workspace 가 관리하는 계정만.
+  // (hd 파라미터는 힌트일 뿐이라 신뢰 불가. 회사 주소로 만든 개인 Google 계정은 hd 가 없다.)
+  const domain = emailDomain(email);
+  if (ALLOWED_DOMAINS.includes(domain) && hd === domain) return { email, hd };
+  throw new Error(`google: 허용되지 않은 계정(hd=${hd ?? 'none'})`);
 }
 
 // ── refresh token 상태 (DB: (config.data.schema).mcp_refresh_tokens) ──
@@ -278,19 +354,84 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   // PKCE 는 우리(AS)가 자체 검증 (Google 으로 넘기지 않음)
   skipLocalPkceValidation = false;
 
-  /** authorize: Google 로그인으로 브리지. 우리 code 는 Google 콜백에서 발급. */
+  /**
+   * authorize: 동의 화면을 먼저 보여 준다. 승인(POST /oauth/consent)이 와야 Google 로그인으로 넘긴다.
+   * 우리 code 는 Google 콜백에서 발급.
+   */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-    sweep(_googlePending);
-    const state = randomBytes(24).toString('base64url');
-    _googlePending.set(state, {
+    sweep(_consentPending);
+    const id = randomBytes(18).toString('base64url');
+    const csrf = randomBytes(24).toString('base64url');
+    _consentPending.set(id, {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
       clientState: params.state,
       scopes: params.scopes && params.scopes.length ? params.scopes : [SCOPE],
       resource: params.resource?.href,
-      exp: Date.now() / 1000 + STATE_TTL,
+      exp: Date.now() / 1000 + CONSENT_TTL,
+      csrf,
     });
+    const secure = ISSUER.startsWith('https://') ? '; Secure' : '';
+    // SameSite=Lax: 다른 사이트가 자동 제출하는 POST 에는 쿠키가 실리지 않아 승인을 대신 누를 수 없다.
+    res.setHeader(
+      'Set-Cookie',
+      `${CONSENT_COOKIE}=${csrf}; Path=${CONSENT_PATH}; Max-Age=${CONSENT_TTL}; HttpOnly; SameSite=Lax${secure}`,
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Frame-Options', 'DENY'); // 클릭재킹 방지 (승인 버튼을 투명 iframe 으로 누르게 하는 공격)
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+    );
+    res
+      .status(200)
+      .type('html')
+      .send(
+        consentPage({
+          appName: typeof client.client_name === 'string' && client.client_name ? client.client_name : 'An app',
+          clientId: client.client_id,
+          redirectUri: params.redirectUri,
+          id,
+          csrf,
+        }),
+      );
+  }
+
+  /**
+   * 동의 화면의 POST 처리 (index.ts 의 POST /oauth/consent 가 호출). 돌려줄 redirect URL 을 반환한다.
+   * 승인: 폼 csrf·쿠키 csrf·저장된 csrf 가 모두 같을 때만 Google 로그인으로. 거절: client 로 access_denied.
+   * 검증 실패는 throw — 호출부가 400 으로 끝낸다(공격자 redirect_uri 로 보내지 않는다).
+   */
+  consumeConsent(id: string, formCsrf: string, cookieCsrf: string, approve: boolean): string {
+    sweep(_consentPending);
+    const pending = _consentPending.get(id);
+    if (!pending) throw new Error('알 수 없거나 만료된 요청입니다. 연결을 처음부터 다시 시작해 주세요.');
+    if (
+      !formCsrf ||
+      !cookieCsrf ||
+      !timingSafeEqualStr(formCsrf, pending.csrf) ||
+      !timingSafeEqualStr(cookieCsrf, pending.csrf)
+    ) {
+      throw new Error('요청을 확인할 수 없습니다. 연결을 처음부터 다시 시작해 주세요.');
+    }
+    _consentPending.delete(id);
+    if (!approve) {
+      const u = new URL(pending.redirectUri);
+      u.searchParams.set('error', 'access_denied');
+      u.searchParams.set('error_description', 'user cancelled');
+      if (pending.clientState) u.searchParams.set('state', pending.clientState);
+      return u.toString();
+    }
+    const { csrf: _csrf, ...rest } = pending;
+    return this.googleRedirect(rest);
+  }
+
+  /** Google 로그인 URL 을 만들고 state 를 기록한다. */
+  private googleRedirect(pending: GooglePending): string {
+    sweep(_googlePending);
+    const state = randomBytes(24).toString('base64url');
+    _googlePending.set(state, { ...pending, exp: Date.now() / 1000 + STATE_TTL });
     const u = new URL(GOOGLE_AUTH_URL);
     u.searchParams.set('client_id', GOOGLE_CLIENT_ID);
     u.searchParams.set('redirect_uri', GOOGLE_CALLBACK);
@@ -298,9 +439,10 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     u.searchParams.set('scope', 'openid email profile');
     u.searchParams.set('access_type', 'online');
     u.searchParams.set('prompt', 'select_account');
-    if (ALLOWED_HD) u.searchParams.set('hd', ALLOWED_HD);
+    // hd 는 계정 선택 화면 힌트일 뿐(검증은 id_token 에서). 허용 도메인이 하나이고 이메일 목록이 없을 때만 붙인다.
+    if (ALLOWED_DOMAINS.length === 1 && ALLOWED_EMAILS.length === 0) u.searchParams.set('hd', ALLOWED_DOMAINS[0]);
     u.searchParams.set('state', state);
-    res.redirect(u.toString());
+    return u.toString();
   }
 
   /**
@@ -363,7 +505,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
     const entry = _authCodes.get(authorizationCode);
-    if (!entry || entry.exp <= Date.now() / 1000) throw new Error('invalid_grant: 코드 없음/만료');
+    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('authorization code 없음/만료');
     return entry.codeChallenge;
   }
 
@@ -375,10 +517,10 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     _resource?: URL,
   ): Promise<OAuthTokens> {
     const entry = _authCodes.get(authorizationCode);
-    if (!entry || entry.exp <= Date.now() / 1000) throw new Error('invalid_grant: 코드 없음/만료');
+    if (!entry || entry.exp <= Date.now() / 1000) throw new InvalidGrantError('authorization code 없음/만료');
     _authCodes.delete(authorizationCode); // one-time
-    if (entry.clientId !== client.client_id) throw new Error('invalid_grant: client 불일치');
-    if (redirectUri && redirectUri !== entry.redirectUri) throw new Error('invalid_grant: redirect_uri 불일치');
+    if (entry.clientId !== client.client_id) throw new InvalidGrantError('client 불일치');
+    if (redirectUri && redirectUri !== entry.redirectUri) throw new InvalidGrantError('redirect_uri 불일치');
 
     const scope = entry.scopes.join(' ') || SCOPE;
     const claims = { sub: entry.email, email: entry.email, scope, client_id: client.client_id };
@@ -398,6 +540,8 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     let email = '';
     let jti = '';
+    let tokenClientId = '';
+    let grantedScopes: string[] = [];
     try {
       const { payload } = await jwtVerify(refreshToken, jwtKey(), {
         issuer: ISSUER,
@@ -407,19 +551,25 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       if (payload.typ !== 'refresh') throw new Error('not a refresh token');
       email = String(payload.email || payload.sub || '');
       jti = typeof payload.jti === 'string' ? payload.jti : '';
+      tokenClientId = typeof payload.client_id === 'string' ? payload.client_id : '';
+      grantedScopes = String(payload.scope || SCOPE).split(' ').filter(Boolean);
     } catch {
-      throw new Error('invalid_grant: refresh token 무효');
+      throw new InvalidGrantError('refresh token 무효');
     }
-    // P1: refresh 시 allowlist 재확인 — 빠진 계정은 30일 refresh 가 남아도 즉시 차단.
-    if (!emailAllowed(email)) throw new Error('invalid_grant: 계정이 더 이상 허용되지 않음');
-    // P2: jti 없는 구형 refresh 는 거부(재로그인 1회 유도). jti 는 DB 에서 소비(rotation) —
+    // refresh token 은 발급받은 client 만 쓸 수 있다 — 새어 나간 토큰을 다른(공격자가 등록한) client 로 바꾸지 못하게.
+    if (!tokenClientId || tokenClientId !== client.client_id) throw new InvalidGrantError('refresh token 의 client 불일치');
+    // 처음 허용된 범위보다 넓힐 수 없다.
+    if (scopes && scopes.some((s) => !grantedScopes.includes(s))) throw new InvalidScopeError('요청 scope 가 원래 범위를 넘습니다');
+    // refresh 시 허용 목록 재확인 — 빠진 계정은 30일 refresh 가 남아도 즉시 차단.
+    if (!emailAllowed(email)) throw new InvalidGrantError('계정이 더 이상 허용되지 않음');
+    // jti 없는 구형 refresh 는 거부(재로그인 1회 유도). jti 는 DB 에서 소비(rotation) —
     // 옛 토큰 즉시 폐기, 폐기된 토큰 재사용(탈취 신호)이면 계정 전체 refresh 폐기.
-    if (!jti) throw new Error('invalid_grant: refresh token 무효(구형) — 재로그인 필요');
+    if (!jti) throw new InvalidGrantError('refresh token 무효(구형) — 재로그인 필요');
     const newJti = randomUUID();
     const state = await consumeRefreshToken(jti, email, newJti);
-    if (state !== 'ok') throw new Error('invalid_grant: refresh token 무효(폐기됨) — 재로그인 필요');
+    if (state !== 'ok') throw new InvalidGrantError('refresh token 무효(폐기됨) — 재로그인 필요');
 
-    const scope = (scopes && scopes.length ? scopes.join(' ') : SCOPE);
+    const scope = (scopes && scopes.length ? scopes : grantedScopes).join(' ') || SCOPE;
     const claims = { sub: email, email, scope, client_id: client.client_id };
     const access_token = await signJwt(claims, ACCESS_TTL, 'access');
     const refresh_token = await signJwt({ ...claims, jti: newJti }, REFRESH_TTL, 'refresh'); // rotation
@@ -445,7 +595,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       scopes,
       expiresAt: typeof payload.exp === 'number' ? payload.exp : undefined,
       resource: new URL(RESOURCE),
-      extra: { email, hd: ALLOWED_HD },
+      extra: { email },
     };
   }
 }

@@ -11,21 +11,25 @@
  * bot_can_read 판정도 channel_id 기준 — 이름 변경에 강건.
  *
  * 봇/챗봇은 Slack 관련 질문에서 이 툴을 먼저 호출해 "어느 채널이 무슨 용도인지,
- * 봇이 통째로 읽을 수 있는지(bot_can_read)" 를 파악한 뒤 slack_search(in:#채널) /
- * slack_read_channel 을 타겟팅한다.
+ * 봇이 읽을 수 있는지(bot_can_read)" 를 파악한 뒤 slack_search(in:#채널) /
+ * slack_read_channel 을 타겟팅한다. 두 도구 모두 봇이 멤버인 채널만 돌려준다.
  */
 import { z } from 'zod';
 import { getAuth } from '../lib/context.js';
 import { allowedSlackChannels } from '../lib/scope.js';
 import { getSupabase } from '../lib/supabase.js';
+import { getConfig } from '../lib/config.js';
 import { slackApi } from '../integrations/slack.js';
+
+// 다른 상태 테이블과 같은 schema(config.data.schema). 테이블 정의는 sql/setup.sql.
+const SCHEMA = getConfig().data.schema;
 
 export const slackListChannelsTool = {
   name: 'slack_list_channels',
   description:
     'Returns the Slack channel landscape — each channel purpose and whether the bot can read it (bot_can_read). ' +
     'Slack 관련 질문에서 가장 먼저 호출해 "어느 채널을 검색/읽을지" 판단하라. ' +
-    'bot_can_read=true 면 slack_read_channel 로 통째 읽기 가능, false 면 slack_search(in:#채널) 로 검색만 가능. ' +
+    'bot_can_read=true 면 slack_read_channel·slack_search 로 읽기 가능, false 면 봇을 그 채널에 초대해야 읽거나 검색할 수 있다. ' +
     '호출 시 Slack 실제 채널과 자동 동기화된다(이름 변경·신규 채널 반영). 용도 매핑은 slack_channels 테이블에서 관리.',
   inputSchema: {
     type: 'object' as const,
@@ -112,11 +116,11 @@ async function syncChannels(
   let linked = 0;
   try {
     if (toInsert.length) {
-      await sb.from('slack_channels').insert(toInsert);
+      await sb.schema(SCHEMA).from('slack_channels').insert(toInsert);
       inserted = toInsert.length;
     }
     for (const u of toUpdate) {
-      await sb.from('slack_channels').update(u.patch).eq('id', u.id);
+      await sb.schema(SCHEMA).from('slack_channels').update(u.patch).eq('id', u.id);
       if ('channel_name' in u.patch) renamed++;
       else linked++;
     }
@@ -157,7 +161,7 @@ async function _handleSlackListChannels(args: unknown) {
   const sb = getSupabase();
 
   // 1. DB 현재 매핑 (sync 비교용 — enabled 무관 전체)
-  const { data: allRows, error } = await sb.from('slack_channels').select(SELECT_COLS).order('sort_order');
+  const { data: allRows, error } = await sb.schema(SCHEMA).from('slack_channels').select(SELECT_COLS).order('sort_order');
   if (error) {
     return {
       content: [{ type: 'text' as const, text: `[error] slack_channels 조회 실패: ${error.message}` }],
@@ -166,16 +170,25 @@ async function _handleSlackListChannels(args: unknown) {
   }
   const rows = (allRows ?? []) as ChannelRow[];
 
-  // 2. 실시간 채널 (Slack 안 되면 매핑만 반환 — graceful)
+  // 2. 실시간 채널 (Slack 안 되면 매핑만 반환 — graceful). cursor 로 끝까지 — Slack 은 limit 보다
+  //    적게 주고 cursor 를 줄 수 있어, 첫 페이지만 보면 뒤 채널이 bot_can_read=false 로 잘못 나온다.
   const live: LiveChannel[] = [];
   try {
-    const r = await slackApi<{ channels?: { id: string; name: string; is_member?: boolean }[] }>(
-      'conversations.list',
-      { types: 'public_channel,private_channel', limit: 1000, exclude_archived: true },
-      'bot',
-    );
-    for (const c of r.channels ?? []) {
-      if (c.id && c.name) live.push({ id: c.id, name: c.name, is_member: !!c.is_member });
+    let cursor: string | undefined;
+    for (let page = 0; page < 15; page++) {
+      const r = await slackApi<{
+        channels?: { id: string; name: string; is_member?: boolean }[];
+        response_metadata?: { next_cursor?: string };
+      }>(
+        'conversations.list',
+        { types: 'public_channel,private_channel', limit: 1000, exclude_archived: true, cursor },
+        'bot',
+      );
+      for (const c of r.channels ?? []) {
+        if (c.id && c.name) live.push({ id: c.id, name: c.name, is_member: !!c.is_member });
+      }
+      cursor = r.response_metadata?.next_cursor || undefined;
+      if (!cursor) break;
     }
   } catch {
     /* slack 토큰/스코프 문제여도 매핑은 반환 */
@@ -190,7 +203,7 @@ async function _handleSlackListChannels(args: unknown) {
   // 4. 동기화로 바뀐 게 있으면 반영본 재조회
   let outRows = rows;
   if (synced.inserted || synced.renamed || synced.linked) {
-    const { data: fresh } = await sb.from('slack_channels').select(SELECT_COLS).order('sort_order');
+    const { data: fresh } = await sb.schema(SCHEMA).from('slack_channels').select(SELECT_COLS).order('sort_order');
     if (fresh) outRows = fresh as ChannelRow[];
   }
   if (enabledOnly) outRows = outRows.filter((r) => r.enabled);
@@ -221,7 +234,7 @@ async function _handleSlackListChannels(args: unknown) {
   const text = JSON.stringify(
     {
       count: channels.length,
-      note: 'bot_can_read=true → slack_read_channel 가능. false → slack_search(in:#채널) 만.' + syncNote,
+      note: 'bot_can_read=true → slack_read_channel·slack_search 가능. false → 봇 초대 필요.' + syncNote,
       channels,
     },
     null,

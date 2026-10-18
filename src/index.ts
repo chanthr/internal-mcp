@@ -14,6 +14,9 @@
  *   - AsyncLocalStorage 로 auth context 를 tool handler 까지 전달
  *   - Tool handler 는 getAuth() / requireRole() 로 권한 검증
  */
+// .env 를 가장 먼저 읽는다. ESM 은 import 한 모듈을 본문보다 먼저 실행하고, oauth·config·qdrant 등이
+// import 시점에 process.env 를 읽어 값을 고정하므로, 본문에서 dotenv 를 부르면 .env 값이 무시된다.
+import 'dotenv/config';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -23,7 +26,6 @@ import {
   isInitializeRequest,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
-import { config as loadEnv } from 'dotenv';
 import { ZodError } from 'zod';
 import express, { type Request as ExpressRequest, type Response as ExpressResponse } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -32,7 +34,7 @@ import { randomUUID, createHash } from 'crypto';
 import { authenticateApiKey, type AuthContext, type Role, type ResourceScopes } from './lib/auth.js';
 import { getSupabase } from './lib/supabase.js';
 import { logToolCall } from './lib/tool_log.js';
-import { authStore, getAuthMaybe } from './lib/context.js';
+import { authStore, getAuthMaybe, setProcessAuth } from './lib/context.js';
 import { isToolAllowed } from './lib/scope.js';
 import { pingTool, handlePing } from './tools/ping.js';
 import { searchDriveTool, handleSearchDrive } from './tools/search_drive.js';
@@ -56,17 +58,17 @@ import { upstreamManager } from './lib/mcp_upstream.js';
 import { startDriveSyncScheduler } from './lib/drive_sync.js';
 import { ensureCollection } from './lib/qdrant.js';
 import {
-  driveConfigured, semanticConfigured, slackConfigured,
+  driveConfigured, semanticConfigured, slackConfigured, slackSearchConfigured,
   githubConfigured, railwayConfigured, capabilitySummary,
 } from './lib/capabilities.js';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import {
-  oauthProvider, isOAuthConfigured, OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES,
+  oauthProvider, isOAuthConfigured, oauthConfigProblems, oauthAttempted,
+  OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES, CONSENT_COOKIE, CONSENT_PATH,
 } from './lib/oauth.js';
 import { installLogMasking } from './lib/log_mask.js';
 import { getConfig, configSource } from './lib/config.js';
 
-loadEnv();
 installLogMasking(); // 시크릿 마스킹을 가장 먼저 설치 — 이후 모든 console.* 출력에서 키·토큰 가림
 
 // 단일 replica 최후 안전망 — 잡히지 않은 reject/exception 을 로깅만 하고 프로세스는 유지(fail-open).
@@ -110,10 +112,17 @@ function roleFromAppUserRow(row: { role?: string | null } | null | undefined): R
   return row.role === 'admin' ? 'admin' : 'engineer';
 }
 
+/** PostgREST/Postgres 의 "컬럼 없음" 오류인가 — scope 컬럼을 아직 추가하지 않은 옛 스키마 판별용. */
+function isMissingColumnError(e: unknown): boolean {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === '42703' || code === 'PGRST204';
+}
+
 /**
  * act-as 대상 직원의 실효 role + 리소스 scope 를 app_users (config.data.schema)에서 서버 재계산.
- * 헤더의 role 은 절대 신뢰하지 않는다(위조 방지). 조회 실패/행 없음 → viewer(fail-safe, P2).
- * scope 컬럼이 아직 DB 에 없으면(add 전) graceful — role 만 얻고 scope 는 undefined(전체 허용).
+ * 헤더의 role 은 절대 신뢰하지 않는다(위조 방지). 행 없음 → viewer(기본 거부).
+ * scope 컬럼이 아직 DB 에 없으면(옛 스키마) role 만 얻고 scope 는 undefined(미설정).
+ * 그 밖의 조회 실패(타임아웃·네트워크)는 권한을 넓히지 않는다 — viewer 로 두고 캐시하지 않는다(fail-closed).
  * 같은 Supabase 프로젝트라 service-role 로 직접 읽는다. 짧은 TTL 캐시(키 key_id:email).
  */
 async function resolveActAsAuth(
@@ -127,6 +136,7 @@ async function resolveActAsAuth(
 
   let role: Role = 'viewer';
   let scopes: ResourceScopes | undefined;
+  let cacheable = true;
   try {
     // role + scope 컬럼 한 쿼리. scope 컬럼이 아직 없으면 error → catch 로 graceful.
     const { data, error } = await getSupabase()
@@ -144,27 +154,37 @@ async function resolveActAsAuth(
           tools: (data.allowed_tools as string[] | null) ?? null,
         }
       : undefined;
-  } catch {
-    // scope 컬럼 미존재(DB add 전) 등 → role 만 재조회(scope 는 전체 허용으로 둠)
-    try {
-      const { data } = await getSupabase()
-        .schema(getConfig().data.schema)
-        .from('app_users')
-        .select('role')
-        .eq('email', email.toLowerCase())
-        .maybeSingle();
-      role = roleFromAppUserRow(data);
-    } catch (e) {
-      console.error('[act-as] app_users 조회 실패 → viewer:', e instanceof Error ? e.message : e);
-    }
+  } catch (e) {
     scopes = undefined;
+    if (isMissingColumnError(e)) {
+      // scope 컬럼 미존재(옛 스키마) → role 만 재조회. scope 는 미설정(전체)으로 둔다.
+      try {
+        const { data, error } = await getSupabase()
+          .schema(getConfig().data.schema)
+          .from('app_users')
+          .select('role')
+          .eq('email', email.toLowerCase())
+          .maybeSingle();
+        if (error) throw error;
+        role = roleFromAppUserRow(data);
+      } catch (e2) {
+        console.error('[act-as] app_users 조회 실패 → viewer:', e2 instanceof Error ? e2.message : e2);
+        role = 'viewer';
+        cacheable = false;
+      }
+    } else {
+      console.error('[act-as] app_users 조회 실패 → viewer:', e instanceof Error ? e.message : e);
+      role = 'viewer';
+      cacheable = false;
+    }
   }
 
   // cap 백스톱 — 만료 정리 후 무한 증가 방지
   if (_actAsCache.size > 500) {
     for (const [k, v] of _actAsCache) if (v.expiresAt <= now) _actAsCache.delete(k);
   }
-  _actAsCache.set(cacheKey, { role, scopes, expiresAt: now + ACT_AS_TTL_MS });
+  // 실패 결과는 캐시하지 않는다 — 일시 장애가 60초 동안 굳지 않게.
+  if (cacheable) _actAsCache.set(cacheKey, { role, scopes, expiresAt: now + ACT_AS_TTL_MS });
   return { role, scopes };
 }
 
@@ -211,7 +231,7 @@ function createServer(): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     // capability 게이팅: 자격증명(env)이 갖춰진 도구군만 노출.
     // 토큰 없는 도구를 숨겨 Claude 가 헛호출(런타임 에러)하지 않게 함.
-    // (Slack 은 토큰 3종 중 하나라도 있으면 노출 — 정보 검색에서 배제되지 않음)
+    // (Slack 읽기 도구는 bot token, slack_search 는 user token + bot token 이 있어야 노출)
     const tools: Tool[] = [pingTool]; // health check 는 항상
 
     if (driveConfigured()) {
@@ -222,8 +242,11 @@ function createServer(): Server {
       tools.push(semanticSearchDriveTool); // Qdrant + OpenAI 필요 (Drive 와 별개 의존)
     }
     if (slackConfigured()) {
-      // Slack 도구 (read-only — 대화 읽기 + 파일 다운로드). 최신 논의 검색의 핵심.
-      tools.push(slackListChannelsTool, slackSearchTool, slackReadChannelTool, slackFindFilesTool, slackGetFileTool);
+      // Slack 도구 (read-only — 대화 읽기 + 파일 다운로드). 봇이 멤버인 채널만.
+      tools.push(slackListChannelsTool, slackReadChannelTool, slackFindFilesTool, slackGetFileTool);
+    }
+    if (slackSearchConfigured()) {
+      tools.push(slackSearchTool); // 검색 API 는 user token 전용, 결과는 봇 멤버 채널로 거름
     }
     if (githubConfigured()) {
       // GitHub 코드 탐색 보조 — repo 트리(구조) → upstream github_get_file_contents 로 필요 파일 조회
@@ -337,7 +360,7 @@ function createServer(): Server {
 
 async function runStdio() {
   const key = process.env.MCP_API_KEY;
-  const auth = await authenticateApiKey(key);
+  let auth = await authenticateApiKey(key);
   if (!auth.ok) {
     console.error(
       `[knowledge-mcp] stdio 인증 실패: ${auth.reason}. ` +
@@ -345,6 +368,13 @@ async function runStdio() {
     );
     process.exit(1);
   }
+  // HTTP 와 같은 규칙 — email 이 있는 키는 app_users 에서 role·scope 를 다시 계산(dev key 제외).
+  if (auth.email && auth.email !== 'dev@local') {
+    const { role, scopes } = await resolveActAsAuth(auth.key_id ?? 'direct', auth.email);
+    auth = { ...auth, role, scopes };
+  }
+  // stdio 는 한 프로세스 = 한 사용자. transport 를 만들기 전에 프로세스 단위로 둔다(context.ts 설명).
+  setProcessAuth(auth);
   await upstreamManager.connectAll();
   const server = createServer();
   const transport = new StdioServerTransport();
@@ -352,35 +382,32 @@ async function runStdio() {
   console.error(
     `[knowledge-mcp] stdio mode · ${auth.email ?? auth.org_id} (${auth.role})`
   );
+}
 
-  // AsyncLocalStorage 로 tool handler 가 getAuth() 호출 가능하게.
-  // stdio 는 단일 process 라 process-wide store 1회 set.
-  authStore.enterWith(auth);
+/** TRUST_PROXY env → express 'trust proxy' 값. 숫자=홉 수, true/false, 그 밖=서브넷 목록 문자열. */
+function trustProxySetting(): number | boolean | string {
+  const v = (process.env.TRUST_PROXY ?? '1').trim();
+  if (/^\d+$/.test(v)) return Number(v);
+  if (v === 'true') return true;
+  if (v === 'false') return false;
+  return v;
 }
 
 async function runHttp() {
-  // upstream MCP (GitHub/Railway) best-effort connect — 실패해도 자체 tool 로 작동 (graceful)
-  await upstreamManager.connectAll();
-
   // 어떤 도구군이 노출되는지(자격증명 갖춰진 것만) 부팅 시 1줄 로그 — ops 가시성.
   console.error(`[knowledge-mcp] config=${configSource()} · capabilities · ${capabilitySummary()}`);
+  if (configSource() === 'defaults') {
+    console.error(
+      '[knowledge-mcp] ⚠️ no config found, running on defaults (no Drive roots, no excluded folders, no login allowlist). ' +
+        'Set MCP_CONFIG_JSON or put mcp.config.json in the working directory (/app/mcp.config.json in the container).',
+    );
+  }
   logSecretFingerprints(); // 고권한 키 fingerprint(값 비노출) — 회전 검증용 (S1)
 
-  // Drive → Qdrant 증분 sync scheduler (polling). QDRANT 설정 + 비활성 아닐 때만.
-  if (process.env.QDRANT_URL && process.env.DRIVE_SYNC_ENABLED !== 'false') {
-    // fresh 배포 시 Qdrant 컬렉션을 부팅 때 1회 보장 — 없으면 첫 sync 가 조용히 실패하던 문제 방지.
-    try {
-      await ensureCollection();
-    } catch (e) {
-      console.error('[knowledge-mcp] ensureCollection 실패 (sync 는 계속 시도):', e);
-    }
-    startDriveSyncScheduler(parseInt(process.env.DRIVE_SYNC_INTERVAL_MIN || '30', 10));
-  }
-
   const app = express();
-  // Railway 프록시 뒤 — X-Forwarded-For 신뢰. express-rate-limit(OAuth 라우터)의
-  // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR ValidationError 방지 + 정확한 req.ip.
-  app.set('trust proxy', 1);
+  // 프록시 뒤라면 X-Forwarded-For 를 몇 홉까지 믿을지. 기본 1(Railway·Fly·Cloud Run 같은 앞단 프록시 1개).
+  // 프록시 없이 직접 노출하면 TRUST_PROXY=false 로 — 그래야 클라이언트가 보낸 헤더로 IP 를 바꿔 한도를 피하지 못한다.
+  app.set('trust proxy', trustProxySetting());
   app.use(express.json({ limit: '4mb' }));
 
   // Health check — 인증 X
@@ -418,11 +445,36 @@ async function runHttp() {
         resourceServerUrl: new URL(OAUTH_RESOURCE),
       }),
     );
+    // 동의 화면의 승인/취소 — oauth.ts consumeConsent. 쿠키(SameSite=Lax)와 폼 csrf 가 모두 맞아야 진행.
+    app.post(CONSENT_PATH, express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const cookie = String(req.headers.cookie ?? '')
+        .split(';')
+        .map((c) => c.trim())
+        .find((c) => c.startsWith(`${CONSENT_COOKIE}=`));
+      const cookieCsrf = cookie ? cookie.slice(CONSENT_COOKIE.length + 1) : '';
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Set-Cookie', `${CONSENT_COOKIE}=; Path=${CONSENT_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`);
+      try {
+        const url = oauthProvider.consumeConsent(
+          String(body.id ?? ''),
+          String(body.csrf ?? ''),
+          cookieCsrf,
+          body.action === 'approve',
+        );
+        res.redirect(url);
+      } catch (e) {
+        res.status(400).type('text').send(e instanceof Error ? e.message : String(e));
+      }
+    });
     console.error(
       `[knowledge-mcp] OAuth enabled · issuer=${OAUTH_ISSUER_URL} · resource=${OAUTH_RESOURCE}`,
     );
+  } else if (oauthAttempted()) {
+    // 반쯤 설정된 상태는 조용히 끄지 않고 빠진 값을 이름으로 알린다(값은 노출 안 함).
+    console.error(`[knowledge-mcp] ⚠️ OAuth off — missing: ${oauthConfigProblems().join(', ')}`);
   } else {
-    console.error('[knowledge-mcp] OAuth 미설정 (Bearer 전용) — MCP_OAUTH_ISSUER 등 env 없음');
+    console.error('[knowledge-mcp] OAuth 미설정 (Bearer 전용)');
   }
 
   // CORS preflight — Claude.ai 웹 커넥터 브라우저 요청용.
@@ -436,7 +488,7 @@ async function runHttp() {
 
   // ── /mcp rate-limit (S2) ── IP 기준(trust proxy 1 로 req.ip 정확). 한도는 env override.
   // 목적: 잘못된 키 폭주가 validate_mcp_key RPC 를 증폭(DB 부하·비용)시키는 것 차단 + 일반 abuse 완화.
-  // 2단: ① 전체 넉넉한 한도(정상 챗봇/IDE 무영향) ② 인증 실패(401)에 더 강한 한도(skipSuccessfulRequests).
+  // 2단: ① 전체 넉넉한 한도(정상 챗봇/IDE 무영향) ② 인증 실패(401)에만 더 강한 한도.
   const RL_WINDOW_MS = Number(process.env.MCP_RATE_LIMIT_WINDOW_MS ?? 60_000);
   const rlHandler =
     (status: number, message: string) => (req: ExpressRequest, res: ExpressResponse) => {
@@ -453,7 +505,10 @@ async function runHttp() {
   const mcpAuthFailRateLimit = rateLimit({
     windowMs: RL_WINDOW_MS,
     limit: Number(process.env.MCP_RATE_LIMIT_FAIL_MAX ?? 20),
-    skipSuccessfulRequests: true, // 2xx·3xx 는 카운트 제외 → 401(인증 실패)만 누적
+    // 401 만 센다 — 재배포 뒤 세션 만료(404), 세션 없는 GET(405), 끊긴 SSE 까지 "인증 실패"로 세면
+    // 같은 출구 IP(사내 NAT 등)의 정상 사용자가 함께 429 를 받는다.
+    skipSuccessfulRequests: true,
+    requestWasSuccessful: (_req, res) => res.statusCode !== 401,
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: rlHandler(429, 'too many failed auth attempts — slow down'),
@@ -662,6 +717,28 @@ async function runHttp() {
       `[knowledge-mcp] HTTP mode · listening on :${port} · version=${VERSION}`
     );
   });
+
+  // 외부 연결은 포트를 연 뒤 백그라운드로 — upstream·Qdrant 가 응답하지 않아도 /health 가 먼저 뜬다
+  // (예전엔 listen 전에 기다려 healthcheck 시간 안에 포트가 안 열리고 재시작이 반복될 수 있었다).
+  void (async () => {
+    // upstream MCP (GitHub/Railway) best-effort connect — 실패해도 자체 tool 로 작동 (graceful).
+    // 연결되기 전 tools/list 에는 upstream 도구가 빠져 있다가, 연결되면 다음 목록부터 나온다.
+    try {
+      await upstreamManager.connectAll();
+    } catch (e) {
+      console.error('[knowledge-mcp] upstream 연결 실패 (자체 도구로 계속):', e);
+    }
+    // Drive → Qdrant 증분 sync scheduler (polling). QDRANT 설정 + 비활성 아닐 때만.
+    if (process.env.QDRANT_URL && process.env.DRIVE_SYNC_ENABLED !== 'false') {
+      // fresh 배포 시 Qdrant 컬렉션을 부팅 때 1회 보장 — 없으면 첫 sync 가 조용히 실패하던 문제 방지.
+      try {
+        await ensureCollection();
+      } catch (e) {
+        console.error('[knowledge-mcp] ensureCollection 실패 (sync 는 계속 시도):', e);
+      }
+      startDriveSyncScheduler(parseInt(process.env.DRIVE_SYNC_INTERVAL_MIN || '30', 10));
+    }
+  })();
 }
 
 const transport = (process.env.MCP_TRANSPORT || 'http').toLowerCase();

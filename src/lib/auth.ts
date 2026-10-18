@@ -10,8 +10,8 @@ import { getConfig } from './config.js';
 
 export type Role = 'admin' | 'engineer' | 'viewer';
 
-/** 상수시간 문자열 비교 — sha256 으로 길이 정규화 후 timingSafeEqual (타이밍 누출 방지). */
-function timingSafeEqualStr(a: string, b: string): boolean {
+/** 상수시간 문자열 비교 — sha256 으로 길이 정규화 후 timingSafeEqual (타이밍 누출 방지). oauth.ts 도 사용. */
+export function timingSafeEqualStr(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
   const hb = createHash('sha256').update(b).digest();
   return timingSafeEqual(ha, hb);

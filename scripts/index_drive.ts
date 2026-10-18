@@ -12,6 +12,10 @@
  *   npm run reindex                        # index all configured Drive roots
  *   npm run reindex -- --root <folderId>  # 특정 폴더만
  *   npm run reindex -- --dry-run          # indexing X, 통계만
+ *   npm run reindex -- --recreate         # collection 을 비우고 처음부터
+ *
+ * 전체 root 로 돌리면(--root/--biz-only/--dev-only 없이) 끝에서 이번 목록에 없는 파일의 벡터를 지운다.
+ * 제외 폴더로 옮긴 파일, 나중에 excludeFolders 에 넣은 폴더, config 에서 뺀 root 의 청크가 여기서 정리된다.
  */
 import 'dotenv/config';
 import type { drive_v3 } from 'googleapis';
@@ -19,7 +23,7 @@ import { getDriveClient } from '../src/integrations/drive.js';
 import { chunkMarkdown, parseFrontmatter } from '../src/lib/chunker.js';
 import { embedTexts } from '../src/lib/embeddings.js';
 import { extractText } from '../src/lib/extract_text.js';
-import { EXCLUDED_FOLDER_NAMES } from '../src/lib/exclude.js';
+import { isExcludedName } from '../src/lib/exclude.js';
 import {
   ensureCollection,
   getQdrantClient,
@@ -36,6 +40,7 @@ import {
   embedInputForChunk,
   SUPPORTED_MIMES,
   DRIVE_ROOTS,
+  MAX_FILE_BYTES,
 } from '../src/lib/drive_indexer.js';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -68,6 +73,8 @@ interface CliArgs {
   roots: DriveRoot[];
   dryRun: boolean;
   recreate: boolean;
+  /** 일부 root 만 도는 실행인가 — 그때는 다른 root 의 벡터를 지우면 안 되므로 정리를 건너뛴다. */
+  partial: boolean;
 }
 
 function parseArgs(): CliArgs {
@@ -75,14 +82,18 @@ function parseArgs(): CliArgs {
   let roots: DriveRoot[] = DRIVE_ROOTS;
   let dryRun = false;
   let recreate = false;
+  let partial = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--root' && args[i + 1]) {
       // override default with single root (source=dev 가정)
       roots = [{ id: args[++i], name: 'custom', source: 'dev' }];
+      partial = true;
     } else if (args[i] === '--biz-only') {
       roots = DRIVE_ROOTS.filter((r) => r.source === 'biz');
+      partial = true;
     } else if (args[i] === '--dev-only') {
       roots = DRIVE_ROOTS.filter((r) => r.source === 'dev');
+      partial = true;
     } else if (args[i] === '--dry-run') {
       dryRun = true;
     } else if (args[i] === '--recreate') {
@@ -90,11 +101,8 @@ function parseArgs(): CliArgs {
       recreate = true;
     }
   }
-  return { roots, dryRun, recreate };
+  return { roots, dryRun, recreate, partial };
 }
-
-/** 색인 제외 폴더 — 민감(PII/계약/HR/deprecated) + 개발 아티팩트(node_modules 등). SSOT: lib/exclude.ts */
-const EXCLUDED_FOLDERS = EXCLUDED_FOLDER_NAMES;
 
 interface ListedFile {
   id: string;
@@ -102,6 +110,7 @@ interface ListedFile {
   path: string;
   modifiedTime: string;
   mimeType: string;
+  size?: number;
 }
 
 /**
@@ -119,7 +128,7 @@ async function listAllMarkdown(
   do {
     const resp = await drive.files.list({
       q: `'${folderId}' in parents and trashed=false`,
-      fields: 'nextPageToken, files(id,name,mimeType,modifiedTime)',
+      fields: 'nextPageToken, files(id,name,mimeType,modifiedTime,size)',
       pageSize: 100,
       pageToken,
       includeItemsFromAllDrives: true,
@@ -130,8 +139,8 @@ async function listAllMarkdown(
       if (!f.id || !f.name) continue;
       const currentPath = pathPrefix ? `${pathPrefix}/${f.name}` : f.name;
       if (f.mimeType === 'application/vnd.google-apps.folder') {
-        // 제외 폴더 (deprecated + 민감 PII/계약/HR) skip — recursion 자체 안 함
-        if (EXCLUDED_FOLDERS.has(f.name)) continue;
+        // 제외 폴더 (민감 PII/계약/HR + 개발 아티팩트. SSOT: lib/exclude.ts) skip — recursion 자체 안 함
+        if (isExcludedName(f.name)) continue;
         // gather as parallel tasks instead of sequential await (hundreds of folders: minutes -> seconds)
         subfolderTasks.push(listAllMarkdown(drive, f.id, currentPath));
       } else if (f.mimeType && SUPPORTED_MIMES.has(f.mimeType)) {
@@ -141,6 +150,7 @@ async function listAllMarkdown(
           path: currentPath,
           modifiedTime: f.modifiedTime ?? '',
           mimeType: f.mimeType,
+          size: f.size ? Number(f.size) : undefined,
         });
       }
     }
@@ -163,8 +173,38 @@ async function downloadMarkdown(drive: drive_v3.Drive, fileId: string): Promise<
   return resp.data as unknown as string;
 }
 
+/**
+ * 이번 목록(keep)에 없는 파일의 벡터를 지운다. 반환 = 지운 파일 수.
+ * 목록 단계가 실패하면 main 이 그 전에 FATAL 로 끝나므로, 여기 도달했다면 목록은 완전하다.
+ */
+async function pruneStaleVectors(keep: Set<string>): Promise<number> {
+  const qdrant = getQdrantClient();
+  const stale = new Set<string>();
+  let offset: string | number | null | undefined = undefined;
+  do {
+    const page = await qdrant.scroll(DRIVE_COLLECTION, {
+      limit: 1000,
+      offset: offset ?? undefined,
+      with_payload: ['file_id'],
+      with_vector: false,
+    });
+    for (const pt of page.points) {
+      const fid = (pt.payload as { file_id?: unknown } | null | undefined)?.file_id;
+      if (typeof fid === 'string' && !keep.has(fid)) stale.add(fid);
+    }
+    offset = (page.next_page_offset as string | number | null | undefined) ?? null;
+  } while (offset !== null);
+  for (const fid of stale) {
+    await qdrant.delete(DRIVE_COLLECTION, {
+      wait: true,
+      filter: { must: [{ key: 'file_id', match: { value: fid } }] },
+    });
+  }
+  return stale.size;
+}
+
 async function main() {
-  const { roots, dryRun, recreate } = parseArgs();
+  const { roots, dryRun, recreate, partial } = parseArgs();
   const startTs = Date.now();
 
   console.log(
@@ -187,14 +227,7 @@ async function main() {
 
   // 2. Drive 모든 markdown list (root 별)
   const drive = getDriveClient();
-  const allFiles: Array<{
-    id: string;
-    name: string;
-    path: string;
-    modifiedTime: string;
-    source: 'dev' | 'biz';
-    mimeType: string;
-  }> = [];
+  const allFiles: Array<ListedFile & { source: 'dev' | 'biz' }> = [];
 
   for (const root of roots) {
     const files = await listAllMarkdown(drive, root.id, '');
@@ -216,17 +249,26 @@ async function main() {
   for (const file of allFiles) {
     processed++;
     if (done.has(file.id)) continue; // 체크포인트 — 이미 처리됨
+    if (file.size && file.size > MAX_FILE_BYTES) {
+      console.log(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): [${file.source}] ${file.path}`);
+      done.add(file.id);
+      if (!dryRun) saveCheckpoint(done);
+      continue;
+    }
     try {
       const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
       if (needsOcr || text.trim().length === 0) {
         console.log(`[index] skip (ocr/empty): [${file.source}] ${file.path}`);
         done.add(file.id);
-        saveCheckpoint(done);
+        if (!dryRun) saveCheckpoint(done);
         continue;
       }
       const chunks = chunkMarkdown(text);
       if (chunks.length === 0) {
         console.log(`[index] skip empty: [${file.source}] ${file.path}`);
+        // 처리 완료로 기록 — 빠뜨리면 체크포인트가 영구히 남아 다음 재색인이 바뀐 파일을 건너뛴다.
+        done.add(file.id);
+        if (!dryRun) saveCheckpoint(done);
         continue;
       }
 
@@ -280,6 +322,12 @@ async function main() {
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  // 4. 이번 목록에 없는 파일의 벡터 정리 (전체 root 실행일 때만)
+  if (!dryRun && !partial) {
+    const pruned = await pruneStaleVectors(new Set(allFiles.map((f) => f.id)));
+    console.log(`[index] 정리 — 목록에 없는 파일 ${pruned}개의 벡터 삭제`);
   }
 
   const elapsedSec = ((Date.now() - startTs) / 1000).toFixed(1);

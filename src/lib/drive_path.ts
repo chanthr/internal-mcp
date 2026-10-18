@@ -9,7 +9,7 @@
  */
 import { type drive_v3 } from 'googleapis';
 import { DRIVE_ROOTS } from './drive_indexer.js';
-import { EXCLUDED_FOLDER_NAMES } from './exclude.js';
+import { isExcludedName } from './exclude.js';
 
 const ROOT_IDS = new Set(DRIVE_ROOTS.map((r) => r.id));
 
@@ -55,7 +55,7 @@ export async function classifyForSearch(
     const pid = chain[0];
     if (ROOT_IDS.has(pid)) return 'ok';
     const meta = await getFolderMeta(drive, pid);
-    if (meta.name && EXCLUDED_FOLDER_NAMES.has(meta.name)) return 'excluded';
+    if (isExcludedName(meta.name)) return 'excluded';
     chain = meta.parent ? [meta.parent] : undefined;
   }
   return 'outside';
@@ -75,9 +75,31 @@ export async function classifyAndPath(
     const pid = chain[0];
     if (ROOT_IDS.has(pid)) return { cls: 'ok', path: names.reverse().join('/') };
     const meta = await getFolderMeta(drive, pid);
-    if (meta.name && EXCLUDED_FOLDER_NAMES.has(meta.name)) return { cls: 'excluded', path: '' };
+    if (isExcludedName(meta.name)) return { cls: 'excluded', path: '' };
     if (meta.name) names.push(meta.name);
     chain = meta.parent ? [meta.parent] : undefined;
   }
   return { cls: 'outside', path: '' };
+}
+
+/**
+ * 폴더 자신을 분류 — list_drive_folder 의 시작 폴더 검사용.
+ * root 폴더면 'ok'(path ''), 그 밖에는 자기 이름이 제외 대상인지 본 뒤 부모 체인을 classifyAndPath 로 분류한다.
+ * path 는 root 바로 아래부터 이 폴더까지(자기 이름 포함). 예: root/01_고객사/Acme → "01_고객사/Acme".
+ */
+export async function classifyFolder(
+  drive: drive_v3.Drive,
+  folderId: string,
+): Promise<{ cls: SearchClass; path: string }> {
+  if (ROOT_IDS.has(folderId)) return { cls: 'ok', path: '' };
+  let d: drive_v3.Schema$File;
+  try {
+    d = (await drive.files.get({ fileId: folderId, fields: 'name,parents', supportsAllDrives: true })).data;
+  } catch {
+    return { cls: 'outside', path: '' };
+  }
+  if (isExcludedName(d.name)) return { cls: 'excluded', path: '' };
+  const parent = await classifyAndPath(drive, d.parents ?? undefined);
+  if (parent.cls !== 'ok') return { cls: parent.cls, path: '' };
+  return { cls: 'ok', path: parent.path ? `${parent.path}/${d.name ?? ''}` : d.name ?? '' };
 }

@@ -165,7 +165,8 @@ class UpstreamMcp {
  */
 const UPSTREAM_READ_VERBS = new Set<string>([
   'get', 'list', 'search', 'read', 'fetch', 'find', 'show', 'describe', 'view',
-  'query', 'count', 'check', 'status', 'ping', 'download', 'export', 'resolve',
+  // 'resolve' 는 넣지 않는다 — 리뷰 스레드 해결처럼 상태를 바꾸는 도구 이름에 쓰인다.
+  'query', 'count', 'check', 'status', 'ping', 'download', 'export',
   'lookup', 'diff', 'blame', 'compare', 'log', 'history', 'scan', 'inspect',
 ]);
 function isUpstreamReadOnly(toolName: string): boolean {
