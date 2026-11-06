@@ -2,26 +2,28 @@
   "eyebrow": "MCP SERVER FRAMEWORK",
   "title": "Knowledge MCP",
   "subtitle": "Build your own MCP server from plugins. Auth and permissions are built in",
+  "wave": "indigo",
+  "animate": true,
   "steps": [
     {
       "who": "You",
       "title": "Create",
-      "desc": "npx create-knowledge-mcp makes a server with a local store. Or run one Docker command"
+      "desc": "Run npx create-knowledge-mcp, or start the Docker image"
     },
     {
       "who": "You",
       "title": "Add a tool",
-      "desc": "One file in src/plugins: a name, a zod input and a run function"
+      "desc": "Add one file to src/plugins: name, zod input, run"
     },
     {
       "who": "Server",
       "title": "Authorize",
-      "desc": "Checks the API key or OAuth token, then loads the person's role"
+      "desc": "Checks the API key or OAuth token and loads the role"
     },
     {
       "who": "Client",
       "title": "Use",
-      "desc": "Claude sees only the tools this person may use, and calls them"
+      "desc": "Claude sees only the tools this person may use"
     }
   ],
   "badges": [

@@ -1,8 +1,5 @@
 <h1 align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
-    <img alt="Knowledge MCP" src=".github/assets/banner-light.svg" width="100%">
-  </picture>
+  <img alt="Knowledge MCP" src=".github/assets/banner.svg" width="100%">
 </h1>
 
 <p align="center">
@@ -71,11 +68,17 @@ The image holds no config: mount `mcp.config.json` as above, or pass it inline w
 ## How it works
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/flow-dark.svg">
-    <img alt="How it works: Create, Add a tool, Authorize, Use" src=".github/assets/flow-light.svg" width="100%">
-  </picture>
+  <img alt="How it works: Create, Add a tool, Authorize, Use" src=".github/assets/flow.svg" width="100%">
 </p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/parts-dark.svg">
+  <img alt="Parts: core (built in), plugins (you write one file each), gateway (config only), store (built in)" src=".github/assets/parts-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>The same as a table</summary>
+<br>
 
 | Part | What it does | You write it? |
 | --- | --- | --- |
@@ -83,6 +86,8 @@ The image holds no config: mount `mcp.config.json` as above, or pass it inline w
 | Plugins | One connector each: its tools, the env vars it needs, its permission group | Yes, one file per plugin |
 | Gateway | Proxies other MCP servers (GitHub's, Notion's, yours) under a name prefix, read-only by default | Config only |
 | Store | Keys, users, OAuth tokens, plugin state, audit log. SQLite file by default, Supabase optional | No |
+
+</details>
 
 <details>
 <summary>What happens on each request</summary>
@@ -223,6 +228,15 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 
 Each turns on when its env vars are set. All built-in tools only read.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/plugins-dark.svg">
+  <img alt="Built-in plugins: Google Drive, Slack, GitHub and Railway" src=".github/assets/plugins-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>Tools and what each plugin needs</summary>
+<br>
+
 | Plugin | Tools | Needs |
 | --- | --- | --- |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token, and `drive.roots` in the config |
@@ -232,6 +246,8 @@ Each turns on when its env vars are set. All built-in tools only read.
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
 | `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | `RAILWAY_TOKEN` |
 | core | `ping` | Nothing. Shows who you are and which plugins are on |
+
+</details>
 
 <details>
 <summary>Drive indexing for semantic search</summary>
