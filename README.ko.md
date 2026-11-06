@@ -1,8 +1,5 @@
 <h1 align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/ko/banner-dark.svg">
-    <img alt="Knowledge MCP" src=".github/assets/ko/banner-light.svg" width="100%">
-  </picture>
+  <img alt="Knowledge MCP" src=".github/assets/ko/banner.svg" width="100%">
 </h1>
 
 <p align="center">
@@ -71,11 +68,17 @@ docker exec kmcp knowledge-mcp doctor        # 어떤 연결이 켜졌는지, �
 ## 동작 방식
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/ko/flow-dark.svg">
-    <img alt="동작 방식: 만들기, 도구 추가, 권한 확인, 사용" src=".github/assets/ko/flow-light.svg" width="100%">
-  </picture>
+  <img alt="동작 방식: 만들기, 도구 추가, 권한 확인, 사용" src=".github/assets/ko/flow.svg" width="100%">
 </p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/ko/parts-dark.svg">
+  <img alt="구성: 코어(기본 제공), 플러그인(직접 씀), 게이트웨이(설정만), 저장소(기본 제공)" src=".github/assets/ko/parts-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>표로 보기</summary>
+<br>
 
 | 구성 | 하는 일 | 직접 쓰나요? |
 | --- | --- | --- |
@@ -83,6 +86,8 @@ docker exec kmcp knowledge-mcp doctor        # 어떤 연결이 켜졌는지, �
 | 플러그인 | 연결 하나씩 맡습니다. 도구, 필요한 환경변수, 권한 그룹을 정합니다 | 예, 플러그인 하나에 파일 하나 |
 | 게⁠이⁠트⁠웨⁠이 | 다른 MCP 서버(GitHub, Notion, 직접 만든 서버)를 이름 접두어를 붙여 대신 엽니다. 기본은 읽기 전용입니다 | 설정만 |
 | 저장소 | 키, 사용자, OAuth 토큰, 플러그인 상태, 호출 기록. 기본은 SQLite 파일, Supabase도 됩니다 | 아니요 |
+
+</details>
 
 <details>
 <summary>요청 하나가 처리되는 순서</summary>
@@ -223,6 +228,15 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 환경변수가 채워지면 켜집니다. 기본 도구는 모두 읽기만 합니다.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/ko/plugins-dark.svg">
+  <img alt="기본 플러그인: Google Drive, Slack, GitHub, Railway" src=".github/assets/ko/plugins-light.svg" width="100%">
+</picture>
+
+<details>
+<summary>플러그인별 도구와 필요한 것</summary>
+<br>
+
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token, 설정의 `drive.roots` |
@@ -232,6 +246,8 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
 | `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | `RAILWAY_TOKEN` |
 | 코어 | `ping` | 없음. 내가 누구로 접속했는지, 어떤 플러그인이 켜졌는지 보여 줍니다 |
+
+</details>
 
 <details>
 <summary>의미 검색용 Drive 색인</summary>

@@ -16,3 +16,4 @@ data/
 
 # Your own deployment config (may reference your infrastructure) — ship mcp.config.example.json instead
 mcp.config.json
+__pycache__/

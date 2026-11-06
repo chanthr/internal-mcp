@@ -1,0 +1,67 @@
+{
+  "out_dir": "ko",
+  "figures": [
+    {
+      "name": "parts",
+      "type": "tiles",
+      "cols": 2,
+      "tiles": [
+        {
+          "icon": "cpu",
+          "title": "코어",
+          "tag": "기본 제공",
+          "desc": "HTTP와 stdio 연결, API 키, Google 로그인 OAuth 2.1, 역할, 호출 기록, 로그 속 비밀값 가리기를 맡습니다."
+        },
+        {
+          "icon": "puzzle",
+          "title": "플러그인",
+          "tag": "직접 씀: 하나에 파일 하나",
+          "desc": "연결 하나씩 맡습니다. 도구, 필요한 환경변수, 권한 그룹을 정합니다."
+        },
+        {
+          "icon": "network",
+          "title": "게이트웨이",
+          "tag": "설정만",
+          "desc": "다른 MCP 서버(GitHub, Notion, 직접 만든 서버)를 이름 접두어를 붙여 대신 엽니다. 기본은 읽기 전용입니다."
+        },
+        {
+          "icon": "database",
+          "title": "저장소",
+          "tag": "기본 제공",
+          "desc": "키, 사용자, OAuth 토큰, 플러그인 상태, 호출 기록을 둡니다. 기본은 SQLite 파일, Supabase도 됩니다."
+        }
+      ]
+    },
+    {
+      "name": "plugins",
+      "type": "tiles",
+      "cols": 2,
+      "tiles": [
+        {
+          "icon": "folder-search",
+          "title": "Google Drive",
+          "tag": "drive",
+          "desc": "파일을 검색하고 읽고 목록을 봅니다. Qdrant 색인과 OpenAI 임베딩으로 의미 검색도 합니다."
+        },
+        {
+          "icon": "slack",
+          "title": "Slack",
+          "tag": "slack",
+          "desc": "채널 목록과 대화를 읽고 파일을 찾아 받습니다. 사용자 토큰이 있으면 전체 검색도 됩니다."
+        },
+        {
+          "icon": "github",
+          "title": "GitHub",
+          "tag": "github",
+          "desc": "저장소 파일 구조와 GitHub 원격 MCP 도구(github_*)를 읽기 전용으로 씁니다."
+        },
+        {
+          "icon": "train-front",
+          "title": "Railway",
+          "tag": "railway",
+          "desc": "서비스, 배포, 로그를 봅니다. 로그 속 비밀값은 가립니다."
+        }
+      ]
+    }
+  ]
+}

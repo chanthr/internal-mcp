@@ -3,6 +3,8 @@
   "eyebrow": "MCP SERVER FRAMEWORK",
   "title": "Knowledge MCP",
   "subtitle": "플러그인으로 우리 팀 MCP 서버를 만듭니다. 인증과 권한은 이미 들어 있습니다",
+  "wave": "indigo",
+  "animate": true,
   "steps": [
     {
       "who": "나",

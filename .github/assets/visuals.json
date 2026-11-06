@@ -1,0 +1,66 @@
+{
+  "figures": [
+    {
+      "name": "parts",
+      "type": "tiles",
+      "cols": 2,
+      "tiles": [
+        {
+          "icon": "cpu",
+          "title": "Core",
+          "tag": "Built in",
+          "desc": "HTTP and stdio transports, API keys, OAuth 2.1 with Google sign-in, roles, an audit log and secret masking in logs."
+        },
+        {
+          "icon": "puzzle",
+          "title": "Plugins",
+          "tag": "You write: one file each",
+          "desc": "One connector each: its tools, the env vars it needs and its permission group."
+        },
+        {
+          "icon": "network",
+          "title": "Gateway",
+          "tag": "Config only",
+          "desc": "Proxies other MCP servers (GitHub's, Notion's, yours) under a name prefix. Read-only by default."
+        },
+        {
+          "icon": "database",
+          "title": "Store",
+          "tag": "Built in",
+          "desc": "Keys, users, OAuth tokens, plugin state and the audit log. A SQLite file by default, Supabase optional."
+        }
+      ]
+    },
+    {
+      "name": "plugins",
+      "type": "tiles",
+      "cols": 2,
+      "tiles": [
+        {
+          "icon": "folder-search",
+          "title": "Google Drive",
+          "tag": "drive",
+          "desc": "Search, read and list files. Semantic search over a Qdrant index with OpenAI embeddings."
+        },
+        {
+          "icon": "slack",
+          "title": "Slack",
+          "tag": "slack",
+          "desc": "List and read channels, find and fetch files. Full-text search with a user token."
+        },
+        {
+          "icon": "github",
+          "title": "GitHub",
+          "tag": "github",
+          "desc": "A repository tree, plus GitHub's own remote MCP tools as github_*, read-only."
+        },
+        {
+          "icon": "train-front",
+          "title": "Railway",
+          "tag": "railway",
+          "desc": "Services, deployments and logs. Secrets in logs are masked."
+        }
+      ]
+    }
+  ]
+}

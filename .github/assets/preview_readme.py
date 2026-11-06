@@ -5,7 +5,7 @@
     python3 .github/assets/preview_readme.py --no-open  # 만들기만 한다
 
 GitHub 마크다운 API(gh api markdown)를 쓰므로 gh 로그인이 필요하다. README 내용이 GitHub API 로 전송된다.
-화면 모드(밝게, 어둡게)를 바꾸면 그림도 바뀐다. 이슈 양식과 PR 양식은 GitHub 에서만 보인다.
+화면 모드(밝게, 어둡게)를 바꾸면 바탕만 바뀐다. 배너와 흐름도는 두 화면에 같은 그림이다. 이슈 양식과 PR 양식은 GitHub 에서만 보인다.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
  .box{border:1px solid #d0d7de;border-radius:6px;padding:32px}
  @media (prefers-color-scheme: dark){.box{border-color:#30363d}}
 </style></head><body>
-<div class="bar">로컬 미리보기입니다. 원격 저장소와는 상관없습니다. 화면 모드(밝게, 어둡게)를 바꾸면 그림도 바뀝니다.</div>
+<div class="bar">로컬 미리보기입니다. 원격 저장소와는 상관없습니다. 화면 모드(밝게, 어둡게)를 바꿔 두 바탕에서 모두 확인해 주세요.</div>
 <div class="wrap"><div class="box"><article class="markdown-body">__BODY__</article></div></div>
 <script>
 // GitHub 처럼 제목에 아이디를 붙이고 #링크로 이동하게 한다

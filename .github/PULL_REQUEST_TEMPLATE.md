@@ -10,4 +10,4 @@
 
 1. [ ] No secrets or private data (API keys, tokens, passwords, internal URLs)
 2. [ ] README.md and README.ko.md reflect the change
-3. [ ] If you changed banner or flow text, you re-ran `python3 .github/assets/make.py` (and `--spec .github/assets/readme-art.ko.json`)
+3. [ ] If you changed banner or flow text, you re-ran `uv run .github/assets/make.py` (and `--spec .github/assets/readme-art.ko.json`)
