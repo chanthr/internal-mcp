@@ -12,7 +12,8 @@ import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
-import { classifyAndPath } from '../path.js';
+import { classifyAndPath, isReadableClass } from '../path.js';
+import { stripEmbeddedImages } from '../clean_text.js';
 import { extractText } from '../extract_text.js';
 import { getQdrantClient, DRIVE_COLLECTION } from '../qdrant.js';
 import { MAX_FILE_BYTES } from '../settings.js';
@@ -127,10 +128,10 @@ async function readOne(
     // search_drive / semantic_search_drive 와 동일 가드 — 임의 File ID 직접 입력으로
     // 색인 대상 밖·민감 폴더·권한 밖 파일을 읽는 우회를 차단한다.
     const { cls, path } = await classifyAndPath(drive, m.parents ?? undefined);
-    if (cls !== 'ok' || !isPathInScope(path, folderScope)) {
+    if (!isReadableClass(cls) || !isPathInScope(path, folderScope)) {
       return {
         fileId,
-        error: '[forbidden] This file is outside the allowed scope (outside the indexed roots / sensitive folder / outside your permissions).',
+        error: '[forbidden] This file is outside the allowed scope (not shared with this server / sensitive folder / outside your permissions).',
       };
     }
 
@@ -150,6 +151,9 @@ async function readOne(
         { responseType: 'text' }
       );
       body = String(res.data ?? '');
+      // A Google Doc exported as Markdown carries its pictures as base64 at the end. In a picture-heavy document that
+      // is many times the text, so maxChars would be spent on picture data or cut the text short.
+      if (mimeType === 'application/vnd.google-apps.document') body = stripEmbeddedImages(body);
     } else if (isExtractableBinary(mimeType)) {
       // PDF·docx·pptx·xlsx·image. 색인된 파일이면 Qdrant 청크 재조립(색인 시 추출·OCR 한 텍스트 재사용
       // → 재다운로드·재OCR 0)을 우선. 미색인이면 extract_text 파이프라인(pdf-parse·ooxml·Mathpix OCR 등).

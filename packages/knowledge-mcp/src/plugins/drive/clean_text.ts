@@ -34,3 +34,26 @@ export function cleanExtractedText(text: string): string {
 
   return t.trim();
 }
+
+/**
+ * Drop picture data embedded in a document. A Google Doc exported as Markdown appends every picture as a definition
+ * line (`[image1]: <data:image/png;base64,...>`) and leaves a reference (`![][image1]`) in the text. Removes those
+ * definitions, the references to them, and inline `![alt](data:image/...)`. Pictures with a real address
+ * (`![alt](https://...)`) are kept.
+ */
+export function stripEmbeddedImages(text: string): string {
+  if (!text || !text.includes('data:image/')) return text;
+  const labels = new Set<string>();
+  let t = text.replace(
+    /^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,[^\n]*\n?/gm,
+    (_m, label: string) => {
+      labels.add(label);
+      return '';
+    },
+  );
+  if (labels.size > 0) {
+    t = t.replace(/!\[[^\]\n]*\]\[([^\]\n]+)\]/g, (m, label: string) => (labels.has(label) ? '' : m));
+  }
+  t = t.replace(/!\[[^\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,[^)\n]*\)/g, '');
+  return t.replace(/\n{3,}/g, '\n\n');
+}

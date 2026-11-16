@@ -66,6 +66,14 @@ const ConfigSchema = z
       .object({
         /** SSOT for index/search scope. Empty = Drive indexing disabled (tools still gated by credentials). */
         roots: z.array(DriveRootSchema).default([]),
+        /**
+         * Which Drive documents the tools and the index cover.
+         *   - "shared" (default): everything shared with the service account. That is the roots plus any file or
+         *     folder shared with it separately. Sharing a document with the account is all it takes to make it searchable.
+         *   - "roots": only files under `roots` (the behaviour up to 0.3.x).
+         * Excluded folders stay hidden either way. env DRIVE_SCOPE takes precedence.
+         */
+        scope: z.enum(['shared', 'roots']).default('shared'),
         /** Folder names to exclude from the search index (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */
         excludeFolders: z.array(z.string()).default([]),
         /**

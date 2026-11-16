@@ -16,7 +16,7 @@
  * lazy import (pdf-parse, xlsx) — 필요 시에만 로드.
  */
 import type { DriveClient } from './client.js';
-import { cleanExtractedText } from './clean_text.js';
+import { cleanExtractedText, stripEmbeddedImages } from './clean_text.js';
 
 export interface ExtractResult {
   text: string;
@@ -83,7 +83,7 @@ async function extractRaw(
 
   // 2. Google Workspace — Drive export (무료)
   if (mimeType === 'application/vnd.google-apps.document') {
-    return { text: await exportGoogle(drive, fileId, 'text/markdown'), method: 'gdoc→md' };
+    return { text: stripEmbeddedImages(await exportGoogle(drive, fileId, 'text/markdown')), method: 'gdoc→md' };
   }
   if (mimeType === 'application/vnd.google-apps.spreadsheet') {
     return { text: await exportGoogle(drive, fileId, 'text/csv'), method: 'gsheet→csv' };

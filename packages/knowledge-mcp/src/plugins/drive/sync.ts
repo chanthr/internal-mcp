@@ -12,6 +12,7 @@
 import type { DriveChangeList, DriveClient } from './client.js';
 import { DriveApiError, getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
+import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
 import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS } from './sync_state.js';
 import { isExcludedPath } from './exclude.js';
 import { clearFolderMetaCache, getFolderMeta } from './path.js';
@@ -39,7 +40,12 @@ async function resolveFromParents(
     if (meta.name) folders.unshift(meta.name);
     parents = meta.parent ? [meta.parent] : undefined;
   }
-  return null; // root 하위 아님 → skip
+  // Nothing further up: this is the top of what was shared with the service account. With drive.scope "shared"
+  // such a file is indexed with its path starting at the top shared folder. A chain deeper than 12 hops stays out.
+  if ((!parents || parents.length === 0) && sharedScopeEnabled()) {
+    return { path: [...folders, fileName].join('/'), source: SHARED_SOURCE };
+  }
+  return null;
 }
 
 async function resolvePathAndSource(drive: DriveClient, fileId: string, fileName: string) {

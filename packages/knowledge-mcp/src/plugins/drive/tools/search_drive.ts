@@ -8,7 +8,7 @@ import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
-import { classifyAndPath, type SearchClass } from '../path.js';
+import { classifyAndPath, isReadableClass, type SearchClass } from '../path.js';
 import { isExcludedName } from '../exclude.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -77,13 +77,13 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
     const cps = await Promise.all(
       raw.map(async (f): Promise<{ cls: SearchClass; path: string }> => {
         const parent = await classifyAndPath(drive, f.parents);
-        if (f.mimeType !== FOLDER_MIME || parent.cls !== 'ok') return parent;
+        if (f.mimeType !== FOLDER_MIME || !isReadableClass(parent.cls)) return parent;
         if (isExcludedName(f.name)) return { cls: 'excluded', path: '' };
-        return { cls: 'ok', path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
+        return { cls: parent.cls, path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
       }),
     );
     const files = raw.filter(
-      (_, i) => cps[i].cls === 'ok' && (!folderScope || isPathInScope(cps[i].path, folderScope)),
+      (_, i) => isReadableClass(cps[i].cls) && (!folderScope || isPathInScope(cps[i].path, folderScope)),
     );
 
     return {

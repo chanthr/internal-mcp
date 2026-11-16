@@ -23,6 +23,8 @@ import { chunkMarkdown } from './chunker.js';
 import { embedTexts } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
+import { classifyAndPath } from './path.js';
+import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
 import { ensureCollection, getQdrantClient, DRIVE_COLLECTION } from './qdrant.js';
 // 색인 코어 로직 SSOT — drive_sync(증분)와 공유해 drift 방지(특히 makeChunkId 일치 = orphan 로직 정합).
 import {
@@ -84,10 +86,10 @@ interface CliArgs {
 
 function parseArgs(args: string[]): CliArgs {
   let roots: DriveRoot[] = DRIVE_ROOTS;
-  if (DRIVE_ROOTS.length === 0) {
+  if (DRIVE_ROOTS.length === 0 && !sharedScopeEnabled()) {
     // 빈 목록으로 전체 실행을 하면 "목록에 없는 파일" 정리가 컬렉션을 통째로 지운다.
     throw new Error(
-      'drive.roots is empty, so there is nothing to index. Set drive.roots in mcp.config.json or MCP_CONFIG_JSON ' +
+      'drive.roots is empty and drive.scope is "roots", so there is nothing to index. Set drive.roots in mcp.config.json or MCP_CONFIG_JSON ' +
         '(the Docker image reads /app/mcp.config.json).',
     );
   }
@@ -183,6 +185,41 @@ async function listAllMarkdown(
 }
 
 /**
+ * Files shared with the service account that are not under any root. `sharedWithMe` returns only the top item of each
+ * share (a shared folder is one entry), so folders are walked. Items under a root are left to the root listing, and
+ * excluded folders are skipped. Paths start at the top shared folder.
+ */
+async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]> {
+  const rootIds = new Set(DRIVE_ROOTS.map((r) => r.id));
+  const out: ListedFile[] = [];
+  let pageToken: string | undefined;
+  do {
+    const resp = await drive.files.list({
+      q: 'sharedWithMe = true and trashed = false',
+      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, size, parents)',
+      pageSize: 200,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    for (const f of resp.data.files ?? []) {
+      if (!f.id || !f.name || rootIds.has(f.id)) continue;
+      const { cls, path: parentPath } = await classifyAndPath(drive, f.parents ?? undefined);
+      if (cls !== 'shared') continue;
+      if (isExcludedName(f.name)) continue;
+      const path = parentPath ? `${parentPath}/${f.name}` : f.name;
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        out.push(...(await listAllMarkdown(drive, f.id, path)));
+      } else if (f.mimeType && SUPPORTED_MIMES.has(f.mimeType)) {
+        out.push({ id: f.id, name: f.name, path, modifiedTime: f.modifiedTime ?? '', mimeType: f.mimeType, size: f.size ? Number(f.size) : undefined });
+      }
+    }
+    pageToken = resp.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return out;
+}
+
+/**
  * 이번 목록(keep)에 없는 파일의 벡터를 지운다. 반환 = 지운 파일 수.
  * 목록 단계가 실패하면 main 이 그 전에 FATAL 로 끝나므로, 여기 도달했다면 목록은 완전하다.
  */
@@ -243,6 +280,13 @@ export async function runReindex(argv: string[]): Promise<void> {
     const files = await listAllMarkdown(drive, root.id, '');
     console.log(`[index] '${root.name}' (${root.source}) — ${files.length} files`);
     for (const f of files) allFiles.push({ ...f, source: root.source });
+  }
+  // Documents shared with the service account outside the roots (drive.scope "shared"). Skipped on a partial run.
+  if (!partial && sharedScopeEnabled()) {
+    const seen = new Set(allFiles.map((f) => f.id));
+    const shared = (await listSharedOutsideRoots(drive)).filter((f) => !seen.has(f.id) && !!seen.add(f.id));
+    console.log(`[index] shared outside the roots (${SHARED_SOURCE}) — ${shared.length} files`);
+    for (const f of shared) allFiles.push({ ...f, source: SHARED_SOURCE });
   }
   console.log(`[index] total ${allFiles.length} files`);
 

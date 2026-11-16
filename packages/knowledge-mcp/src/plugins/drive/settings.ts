@@ -8,6 +8,19 @@ import { getConfig } from '../../core/config.js';
 export const DRIVE_ROOTS = getConfig().drive.roots;
 
 /**
+ * Whether documents shared with the service account outside the roots are visible (config drive.scope, env DRIVE_SCOPE).
+ * Read on every call so an env change needs no code change to roll back.
+ */
+export function sharedScopeEnabled(): boolean {
+  const v = process.env.DRIVE_SCOPE?.trim().toLowerCase();
+  if (v === 'roots' || v === 'shared') return v === 'shared';
+  return getConfig().drive.scope === 'shared';
+}
+
+/** Index label for documents shared outside the roots (general documents, not structured knowledge docs). */
+export const SHARED_SOURCE = 'biz' as const;
+
+/**
  * 색인·읽기 파일 크기 상한(바이트). 파일을 통째로 메모리에 올리므로, 거대한 파일 하나가 서버를 죽이지 않게 막는다.
  * Google 문서·시트·슬라이드는 Drive 메타에 size 가 없어(export) 이 검사를 받지 않는다.
  */

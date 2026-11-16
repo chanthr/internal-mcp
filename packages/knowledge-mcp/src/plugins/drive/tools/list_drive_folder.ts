@@ -21,7 +21,7 @@ import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { isExcludedName } from '../exclude.js';
 import { allowedDriveFolders, isPathInScope, isScopeAncestor } from '../../../core/scope.js';
-import { classifyFolder } from '../path.js';
+import { classifyFolder, isReadableClass } from '../path.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const MAX_FOLDER_VISITS = 120; // 재귀 폭발 방지 — 총 폴더 방문(list 호출) 상한
@@ -104,7 +104,7 @@ async function resolveFolderId(drive: DriveClient, name: string): Promise<{ id: 
   for (const f of res.data.files ?? []) {
     if (!f.id) continue;
     const c = await classifyFolder(drive, f.id);
-    if (c.cls === 'ok') return { id: f.id, path: c.path };
+    if (isReadableClass(c.cls)) return { id: f.id, path: c.path };
   }
   return null;
 }
@@ -206,8 +206,8 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
         if (spec.id) {
           // 시작 폴더 가드 — 색인 root 하위 + 제외 폴더 미경유일 때만 연다.
           const c = await classifyFolder(drive, spec.id);
-          if (c.cls !== 'ok') {
-            return { folderId: spec.id, folderName: null, error: '[forbidden] This folder is outside the allowed scope (outside the indexed roots / sensitive folder).' };
+          if (!isReadableClass(c.cls)) {
+            return { folderId: spec.id, folderName: null, error: '[forbidden] This folder is outside the allowed scope (not shared with this server, or a sensitive folder).' };
           }
           fid = spec.id;
           rootPath = c.path;

@@ -8,7 +8,7 @@
  * 성능: 폴더 메타(id→name,parent)는 거의 변하지 않으므로 프로세스 캐시 → 부모 walk 가 warmup 후 캐시 hit.
  */
 import type { DriveClient, DriveFile } from './client.js';
-import { DRIVE_ROOTS } from './settings.js';
+import { DRIVE_ROOTS, sharedScopeEnabled } from './settings.js';
 import { isExcludedName } from './exclude.js';
 
 const ROOT_IDS = new Set(DRIVE_ROOTS.map((r) => r.id));
@@ -39,16 +39,32 @@ export function clearFolderMetaCache(): void {
 }
 
 /**
- * 'ok'       : root 하위 + 제외 폴더 미경유 → 노출
- * 'excluded' : 제외 폴더(PII/계약/HR/deprecated/node_modules 등)를 경유 → 응답에서 제거
- * 'outside'  : root 에 닿지 못함(색인 대상 밖), 또는 폴더 조회 실패 → 보수적으로 제거
+ * 'ok'       : under an index root, not through an excluded folder → visible
+ * 'shared'   : outside the roots but shared with the service account (directly, or inside a shared folder) → visible
+ *              when drive.scope is "shared"
+ * 'excluded' : passes through an excluded folder (config drive.excludeFolders, node_modules, …) → hidden
+ * 'outside'  : could not be classified (a folder lookup failed, or the chain is too deep), or outside the roots
+ *              while drive.scope is "roots" → hidden
  */
-export type SearchClass = 'ok' | 'excluded' | 'outside';
+export type SearchClass = 'ok' | 'shared' | 'excluded' | 'outside';
+
+/** May this class be returned by search, read and list? */
+export function isReadableClass(cls: SearchClass): boolean {
+  return cls === 'ok' || cls === 'shared';
+}
+
+const MAX_HOPS = 12;
 
 /**
- * 파일의 parents 에서 root 까지 올라가며 분류하고 폴더 경로(root 하위)를 돌려준다 — 도구 결과와 직원별 폴더 scope 필터용.
- * parents[0] 만 따라간다(최대 12 hop). path 는 폴더만(파일명 제외), root 바로 아래부터, 예: "Clients/Acme".
- * cls!=='ok' 면 path 무의미. 폴더 조회가 실패하면 'outside'(숨김) — 도구는 모를 때 보여 주지 않는다.
+ * Walk up from a file's parents, classify it and return its folder path. Only parents[0] is followed (at most 12 hops).
+ *
+ * Drive leaves out parents the account cannot see, so when there is nothing further up, that is the top of what was
+ * shared with the service account. Reaching that point without meeting a root means 'shared'.
+ * A failed folder lookup means 'outside': an excluded folder may sit above it, and a tool does not show what it cannot check.
+ *
+ * `path` holds folders only (no file name). For 'ok' it starts right under the root ("Clients/Acme"); for 'shared' it
+ * starts at the top shared folder ("Team handbook"), and is empty for a file shared on its own. Per-user folder scopes
+ * are matched against this path, so a scoped user sees a shared document only if its path is in their allowed list.
  */
 export async function classifyAndPath(
   drive: DriveClient,
@@ -56,7 +72,11 @@ export async function classifyAndPath(
 ): Promise<{ cls: SearchClass; path: string }> {
   const names: string[] = [];
   let chain = parents;
-  for (let hop = 0; hop < 12 && chain && chain.length > 0; hop++) {
+  for (let hop = 0; hop <= MAX_HOPS; hop++) {
+    if (!chain || chain.length === 0) {
+      return sharedScopeEnabled() ? { cls: 'shared', path: names.reverse().join('/') } : { cls: 'outside', path: '' };
+    }
+    if (hop === MAX_HOPS) break;
     const pid = chain[0];
     if (ROOT_IDS.has(pid)) return { cls: 'ok', path: names.reverse().join('/') };
     let meta: { name: string; parent: string | undefined };
@@ -73,9 +93,9 @@ export async function classifyAndPath(
 }
 
 /**
- * 폴더 자신을 분류 — list_drive_folder 의 시작 폴더 검사용.
- * root 폴더면 'ok'(path ''), 그 밖에는 자기 이름이 제외 대상인지 본 뒤 부모 체인을 classifyAndPath 로 분류한다.
- * path 는 root 바로 아래부터 이 폴더까지(자기 이름 포함). 예: root/Clients/Acme → "Clients/Acme".
+ * Classify a folder itself — the start-folder check of list_drive_folder, and folder hits in search_drive.
+ * A root is 'ok' (path ''). Otherwise the folder's own name is checked against the excluded names, then its parent
+ * chain is classified. `path` runs down to and including this folder: root/Clients/Acme → "Clients/Acme".
  */
 export async function classifyFolder(
   drive: DriveClient,
@@ -90,6 +110,6 @@ export async function classifyFolder(
   }
   if (isExcludedName(d.name)) return { cls: 'excluded', path: '' };
   const parent = await classifyAndPath(drive, d.parents ?? undefined);
-  if (parent.cls !== 'ok') return { cls: parent.cls, path: '' };
-  return { cls: 'ok', path: parent.path ? `${parent.path}/${d.name ?? ''}` : d.name ?? '' };
+  if (!isReadableClass(parent.cls)) return { cls: parent.cls, path: '' };
+  return { cls: parent.cls, path: parent.path ? `${parent.path}/${d.name ?? ''}` : d.name ?? '' };
 }
