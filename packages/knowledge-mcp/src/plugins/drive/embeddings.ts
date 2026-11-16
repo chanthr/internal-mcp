@@ -31,13 +31,14 @@ export function embeddingsConfigured(): boolean {
   return !!(process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || process.env.EMBEDDING_BASE_URL?.trim());
 }
 
-// 한 batch 당 input 수 (OpenAI 는 배열 input 지원). 토큰 한도 여유 위해 보수적 128.
+// Inputs per batch (OpenAI accepts an array input). A conservative 128 leaves headroom under the token limit.
 const BATCH_SIZE = Number(process.env.EMBED_BATCH ?? 128);
 
-// ── 재시도 정책 2종 (경로별 분리) ──
-// 색인(배치) 경로 — patient: 대량 청크·일시 429/5xx 를 최대한 흡수(백그라운드라 tail 길어도 무방).
-// 쿼리(인터랙티브 검색) 경로 — fail-fast: 사용자가 대기하므로 tail 을 짧게. 두 경로가 같은 정책을
-// 쓰면 OpenAI 지연·429 시 검색 한 번이 최악 ~80s(5×10s+백오프) 매달릴 수 있어 분리한다.
+// ── Two retry policies (one per path) ──
+// Indexing (batch) path, patient: absorbs large chunk volumes and transient 429/5xx as far as possible (it runs in
+// the background, so a long tail is fine). Query (interactive search) path, fail-fast: the user is waiting, so the
+// tail is kept short. If both paths shared one policy, a single search could hang about 80s in the worst case
+// (5×10s + backoff) on OpenAI latency or 429, so they are separate.
 interface EmbedPolicy {
   maxRetries: number;
   timeoutMs: number;
@@ -66,7 +67,7 @@ function getApiKey(): string | undefined {
   return key || undefined;
 }
 
-/** 재시도 가능 여부 (429 rate limit 또는 5xx/timeout). */
+/** Whether the error is retryable (429 rate limit, or 5xx/timeout). */
 function parseRetryable(status: number | null, msg: string): boolean {
   const is429 = status === 429 || /rate limit|quota|too many requests/i.test(msg);
   const is5xx =
@@ -75,7 +76,8 @@ function parseRetryable(status: number | null, msg: string): boolean {
   return is429 || is5xx;
 }
 
-// lone surrogate 방어 — 깨진 이모지 반쪽이 들어오면 400. 빈 입력도 400 → 공백 fallback.
+// Guards against lone surrogates: half of a broken emoji causes a 400. Empty input also causes a 400, so it falls
+// back to a space.
 function sanitize(text: string): string {
   const s = text.replace(
     /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
@@ -84,7 +86,7 @@ function sanitize(text: string): string {
   return s.length > 0 ? s : ' ';
 }
 
-/** input 배열 → 임베딩 배열 (batch 1회 호출 + retry). 순서 보장. policy 로 재시도·timeout 경로별 분리. */
+/** Input array → embedding array (one batch call + retry). Order is preserved. policy sets retry and timeout per path. */
 async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[][]> {
   const apiKey = getApiKey();
   const inputs = texts.map(sanitize);
@@ -116,7 +118,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
       }
 
       const j = (await resp.json()) as { data: Array<{ index: number; embedding: number[] }> };
-      // index 순 정렬 후 벡터만 (OpenAI 는 보통 정렬돼 오지만 방어)
+      // Sort by index and keep only the vectors (OpenAI usually returns them in order, this is defensive)
       const sorted = [...j.data].sort((a, b) => a.index - b.index);
       const vecs = sorted.map((d) => d.embedding);
       if (vecs.length !== inputs.length || vecs[0]?.length !== EMBEDDING_DIM) {
@@ -137,8 +139,8 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
 }
 
 /**
- * 여러 텍스트 → embedding 벡터들 (input 순서 보장).
- * BATCH_SIZE 씩 묶어 batch 호출. policy 기본 = 색인용(patient). 쿼리는 embedQuery 가 fail-fast 사용.
+ * Several texts → embedding vectors (input order preserved).
+ * Calls in batches of BATCH_SIZE. The default policy is the indexing one (patient). Queries use fail-fast via embedQuery.
  */
 export async function embedTexts(
   texts: string[],
@@ -154,7 +156,7 @@ export async function embedTexts(
   return results;
 }
 
-/** 단일 query → 벡터. 인터랙티브 검색 경로라 fail-fast 정책(QUERY_POLICY) 사용. */
+/** Single query → vector. This is the interactive search path, so it uses the fail-fast policy (QUERY_POLICY). */
 export async function embedQuery(query: string): Promise<number[]> {
   const [vec] = await embedTexts([query], QUERY_POLICY);
   return vec;

@@ -1,8 +1,8 @@
 /**
- * slack_search(query, count?) — Slack 워크스페이스 메시지 검색.
+ * slack_search(query, count?): searches messages in the Slack workspace.
  *
- * search.messages API 사용 → User token (xoxp-…, search:read scope) 필수.
- * 권한 그룹: slack. 결과는 봇이 멤버인 채널과 직원 채널 범위로 거른다.
+ * Uses the search.messages API, so a User token (xoxp-…, search:read scope) is required.
+ * Permission group: slack. Results are filtered to channels the bot is a member of and to the user's channel scope.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -72,19 +72,19 @@ interface SlackSearchMatch {
 }
 
 /**
- * 검색 표면 = "봇이 멤버인 채널" — read_channel 과 동일한 신뢰 경계.
+ * Search surface = "channels the bot is a member of", the same trust boundary as read_channel.
  *
- * search.messages 는 User token(xoxp) 권한이라 토큰 소유자의 개인 DM·비공개 채널까지 보인다.
- * 그대로 노출하면 토큰 소유자의 사적 대화가 새므로, "봇이 초대된 채널"로만 한정한다
- * (봇 초대 = 어시스턴트가 읽어도 된다고 팀이 허가한 채널). 채널이 대부분 비공개라,
- * 과거의 'public만' 필터는 사실상 전부를 막아 검색이 0건이었다.
- *   - DM(D…)·그룹DM(mpim): conversations.list 에 안 잡혀 botMemberIds 에 자연 부재 → 제외.
- *   - 봇 미초대 비공개 채널: 허가되지 않음 → 제외(read_channel 로도 못 읽음).
+ * search.messages runs with User token (xoxp) permissions, so it sees the token owner's personal DMs and private channels.
+ * Exposing that as is would leak the token owner's private conversations, so results are limited to "channels the bot was
+ * invited to" (a bot invite = a channel the team has allowed the assistant to read). Most channels are private, so the
+ * earlier "public only" filter blocked nearly everything and search returned 0 results.
+ *   - DMs (D…) and group DMs (mpim): not listed by conversations.list, so absent from botMemberIds → excluded.
+ *   - Private channels the bot was not invited to: not permitted → excluded (read_channel cannot read them either).
  */
 function isAllowedSearchMatch(m: SlackSearchMatch, botMemberIds: Set<string>): boolean {
   const c = m.channel;
   if (!c?.id) return false;
-  if (c.is_im || c.is_mpim) return false; // 이중 방어 — DM 은 절대 검색 표면에 안 올림
+  if (c.is_im || c.is_mpim) return false; // defense in depth: DMs never appear in the search surface
   return botMemberIds.has(c.id);
 }
 
@@ -101,8 +101,9 @@ export async function handleSlackSearch(args: z.infer<typeof inputSchema>) {
       'search',
     );
 
-    // 1) 봇이 멤버인 채널만 (DM·봇 미초대 비공개 채널 제외 — User token 의 개인 가시범위 차단)
-    // 2) 직원별 Slack 채널 scope (admin·미설정 = 전체). 결과 메시지를 허용 채널로 필터.
+    // 1) Only channels the bot is a member of (drops DMs and private channels the bot was not invited to, which blocks the
+    //    User token's personal visibility)
+    // 2) Per-user Slack channel scope (admin or unset = all). Result messages are filtered to the allowed channels.
     const channelScope = allowedSlackChannels(auth);
     const botMemberIds = await loadBotMemberChannelIds();
     const matches = (res.messages?.matches ?? []).filter(
@@ -120,15 +121,15 @@ export async function handleSlackSearch(args: z.infer<typeof inputSchema>) {
       permalink: m.permalink ?? null,
     }));
 
-    // search.messages 는 단일 메시지만 반환 — 매칭이 thread 안이면 주변 답글 맥락이 누락된다.
-    // 봇이 멤버인 채널은 conversations.replies(ts=매칭ts)로 thread 전체를 가져와 붙인다.
-    // (Slack 은 thread 내 아무 메시지 ts 로도 thread 전체를 돌려준다 — 부모/답글 무관)
-    // 봇 미참여 채널은 not_in_channel 등으로 실패 → thread_unavailable 로만 표기(평면 결과 유지).
+    // search.messages returns single messages only. When the match is inside a thread, the surrounding replies are missing.
+    // For channels the bot is a member of, fetch the whole thread with conversations.replies (ts = match ts) and attach it.
+    // (Slack returns the whole thread for the ts of any message in it, parent or reply.)
+    // In channels the bot is not in, this fails with not_in_channel etc. → only marked thread_unavailable (flat result kept).
     if (expandThreads && results.length > 0) {
       const userMap = await loadSlackUserMap();
       const nameOf = (t: ThreadMsg) =>
         t.user ? (userMap[t.user] ?? t.user) : t.bot_id ? `bot:${t.bot_id}` : null;
-      const seenThreads = new Set<string>(); // channelId:rootTs — 같은 thread 중복 확장 방지
+      const seenThreads = new Set<string>(); // channelId:rootTs, avoids expanding the same thread twice
 
       await mapLimit(results, 6, async (r) => {
         if (!r.channelId || !r.ts) return;
@@ -139,11 +140,11 @@ export async function handleSlackSearch(args: z.infer<typeof inputSchema>) {
             'bot',
           );
           const msgs = rep.messages ?? [];
-          if (msgs.length <= 1) return; // thread 아님(단일 메시지) — 붙일 맥락 없음
+          if (msgs.length <= 1) return; // not a thread (single message): no context to attach
           const rootTs = msgs[0]?.ts ?? r.ts;
           const key = `${r.channelId}:${rootTs}`;
           if (seenThreads.has(key)) {
-            (r as any).thread_root_ts = rootTs; // 이미 다른 매칭에서 확장한 thread
+            (r as any).thread_root_ts = rootTs; // thread already expanded from another match
             return;
           }
           seenThreads.add(key);
@@ -151,10 +152,10 @@ export async function handleSlackSearch(args: z.infer<typeof inputSchema>) {
             ts: t.ts,
             user: nameOf(t),
             text: t.text ?? '',
-            is_match: t.ts === r.ts, // 검색에 걸린 바로 그 메시지 표시
+            is_match: t.ts === r.ts, // marks the exact message the search matched
           }));
         } catch {
-          // 봇이 채널 멤버가 아님(not_in_channel) 등 → 답글이 더 있을 수 있으나 못 읽음
+          // The bot is not a channel member (not_in_channel) etc. → there may be more replies, but they cannot be read
           (r as any).thread_unavailable = true;
         }
       });
@@ -165,7 +166,8 @@ export async function handleSlackSearch(args: z.infer<typeof inputSchema>) {
         {
           type: 'text' as const,
           text: JSON.stringify(
-            // total(Slack 원본 건수)은 싣지 않는다 — DM·권한 밖 채널의 일치 건수까지 드러난다.
+            // total (Slack's raw count) is not included: it would reveal match counts from DMs and channels outside the user's
+            // permissions.
             { query, count: results.length, results },
             null,
             2,

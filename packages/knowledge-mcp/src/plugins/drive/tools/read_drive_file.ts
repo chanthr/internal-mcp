@@ -1,11 +1,11 @@
 /**
- * read_drive_file(fileId | fileIds, maxChars?) — Drive 파일 본문 read.
+ * read_drive_file(fileId | fileIds, maxChars?): reads the content of a Drive file.
  *
- * Markdown / text 는 raw media. Google Docs/Sheets/Slides 는 export.
+ * Markdown / text are read as raw media. Google Docs/Sheets/Slides are exported.
  *
- * 배치: fileIds 로 여러 파일을 한 번에 **병렬** read.
- *   순차 호출(파일당 MCP 왕복 + Drive API 2회)을 1회 호출로 합쳐 per-call 네트워크
- *   floor 를 N→1 로 줄이고 Drive I/O 도 동시 처리. 원문 여러 개를 비교/요약할 때 핵심.
+ * Batch: fileIds reads several files at once, in **parallel**.
+ *   Sequential calls (one MCP round trip + 2 Drive API calls per file) are merged into one call, which cuts the per-call
+ *   network floor from N to 1 and runs Drive I/O concurrently. Essential when comparing or summarizing several sources.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -54,7 +54,7 @@ const GOOGLE_DOC_EXPORT: Record<string, string> = {
   'application/vnd.google-apps.presentation': 'text/plain',
 };
 
-/** raw text 로 읽으면 깨지는 바이너리 — extract_text 파이프라인으로 본문 추출해야 하는 형식. */
+/** Binary formats that break when read as raw text. Their content must be extracted through the extract_text pipeline. */
 function isExtractableBinary(mime: string): boolean {
   return (
     mime === 'application/pdf' ||
@@ -66,9 +66,11 @@ function isExtractableBinary(mime: string): boolean {
 }
 
 /**
- * 색인된 파일이면 Qdrant 청크를 chunk_index 순으로 재조립해 원문 복원 — 색인 시 이미 추출(스캔본은 OCR)한
- * 텍스트를 재사용하므로 재다운로드·재OCR 비용 0(스캔 PDF 를 읽을 때마다 Mathpix 를 다시 태우지 않음).
- * 미색인이거나 조회 실패면 null(→ extract_text 폴백). 청크 overlap 접두("…") 는 best-effort 제거.
+ * For an indexed file, restores the original text by reassembling its Qdrant chunks in chunk_index order. It reuses the
+ * text already extracted at indexing time (OCR for scans), so re-download and re-OCR cost is 0 (a scanned PDF does not go
+ * through Mathpix again on every read).
+ * Returns null when the file is not indexed or the lookup fails (→ extract_text fallback). The chunk overlap prefix ("…")
+ * is removed on a best-effort basis.
  */
 async function reassembleFromIndex(fileId: string): Promise<string | null> {
   try {
@@ -92,7 +94,7 @@ async function reassembleFromIndex(fileId: string): Promise<string | null> {
     return chunks
       .map((c, i) => {
         if (i === 0 || !c.content.startsWith('…')) return c.content;
-        const nl = c.content.indexOf('\n\n'); // overlap 접두(…tail\n\n) 제거
+        const nl = c.content.indexOf('\n\n'); // strip the overlap prefix (…tail\n\n)
         return nl >= 0 ? c.content.slice(nl + 2) : c.content;
       })
       .join('\n\n');
@@ -103,7 +105,7 @@ async function reassembleFromIndex(fileId: string): Promise<string | null> {
 
 type DriveClient = Awaited<ReturnType<typeof getDriveClient>>;
 
-/** 파일 1개 read → 구조화 객체 (배치에서 파일별 에러 격리용으로 throw 대신 error 필드 반환). */
+/** Reads one file → a structured object (returns an error field instead of throwing, to isolate per-file errors in a batch). */
 async function readOne(
   drive: DriveClient,
   fileId: string,
@@ -114,7 +116,7 @@ async function readOne(
     const meta = await drive.files.get({
       fileId,
       fields: 'id, name, mimeType, parents, size, modifiedTime, webViewLink',
-      supportsAllDrives: true, // 공유 드라이브 파일은 이 플래그가 없으면 404
+      supportsAllDrives: true, // without this flag, files on a shared drive return 404
     });
     const m = meta.data;
     const mimeType = m.mimeType || '';
@@ -123,9 +125,10 @@ async function readOne(
       return { fileId, error: 'fileId is a folder. use list_drive_folder instead.' };
     }
 
-    // 보안: dev/biz root 하위 + 제외 폴더(PII·계약·HR·deprecated) 미경유 + 직원 폴더 scope.
-    // search_drive / semantic_search_drive 와 동일 가드 — 임의 File ID 직접 입력으로
-    // 색인 대상 밖·민감 폴더·권한 밖 파일을 읽는 우회를 차단한다.
+    // Security: under the dev/biz root + not passing through an excluded folder (PII, contracts, HR, deprecated) + the
+    // per-user folder scope.
+    // Same guard as search_drive / semantic_search_drive. It blocks the bypass of entering an arbitrary File ID directly
+    // to read files outside the index, in sensitive folders or outside the user's permissions.
     const { cls, path } = await classifyAndPath(drive, m.parents ?? undefined);
     if (!isReadableClass(cls) || !isPathInScope(path, folderScope)) {
       return {
@@ -134,8 +137,9 @@ async function readOne(
       };
     }
 
-    // 크기 상한 — 파일을 통째로 메모리에 올리므로 거대한 파일(영상·대용량 PDF)이 서버를 죽이지 않게 막는다.
-    // 색인 재조립본이 있으면 그것으로 읽는다(재다운로드 없음). Google 문서는 size 가 없어 해당 없음.
+    // Size cap: the file is loaded into memory whole, so this keeps a huge file (video, large PDF) from killing the server.
+    // If a reassembled copy exists in the index, read that instead (no re-download). Google documents have no size, so the
+    // cap does not apply to them.
     const tooLarge = !!m.size && Number(m.size) > MAX_FILE_BYTES;
     const tooLargeError = {
       fileId,
@@ -159,9 +163,10 @@ async function readOne(
       // is many times the text, so maxChars would be spent on picture data or cut the text short.
       if (mimeType === 'application/vnd.google-apps.document') body = stripEmbeddedImages(body);
     } else if (isExtractableBinary(mimeType)) {
-      // PDF·docx·pptx·xlsx·image. 색인된 파일이면 Qdrant 청크 재조립(색인 시 추출·OCR 한 텍스트 재사용
-      // → 재다운로드·재OCR 0)을 우선. 미색인이면 extract_text 파이프라인(pdf-parse·ooxml·Mathpix OCR 등).
-      // 예전엔 바이너리를 String() 해 깨진 텍스트를 반환했다(검색 챗봇 PDF 읽기 실패의 원인).
+      // PDF, docx, pptx, xlsx, image. For an indexed file, prefer reassembling the Qdrant chunks (reuses the text extracted and
+      // OCRed at indexing time → 0 re-downloads, 0 re-OCR). If not indexed, use the extract_text pipeline (pdf-parse, ooxml,
+      // Mathpix OCR etc.).
+      // Previously the binary was passed through String() and garbled text was returned, which made PDF reads fail.
       const reassembled = await reassembleFromIndex(fileId);
       if (reassembled && reassembled.trim()) {
         body = reassembled;
@@ -217,7 +222,7 @@ export async function handleReadDriveFile(args: z.infer<typeof inputSchema>) {
   const drive = await getDriveClient();
   const folderScope = allowedDriveFolders(auth);
 
-  // 배치: fileIds 면 병렬 read (per-call floor 1회 + Drive I/O 동시).
+  // Batch: with fileIds, read in parallel (one per-call floor + concurrent Drive I/O).
   if (fileIds && fileIds.length > 0) {
     const files = await Promise.all(
       fileIds.map((id) => readOne(drive, id, maxChars, folderScope)),
@@ -229,7 +234,7 @@ export async function handleReadDriveFile(args: z.infer<typeof inputSchema>) {
     };
   }
 
-  // 단일 (하위호환): 기존 응답 형식 유지.
+  // Single (backward compatible): keeps the original response format.
   const result = await readOne(drive, fileId!, maxChars, folderScope);
   if ('error' in result) {
     return { content: [{ type: 'text' as const, text: `[error] ${result.error}` }], isError: true };

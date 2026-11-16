@@ -1,19 +1,24 @@
 /**
- * OAuth 2.1 Authorization Server + Resource Server (Route X) — Claude 앱 커스텀 커넥터용.
+ * OAuth 2.1 Authorization Server + Resource Server, for Claude app custom connectors.
  *
- * 우리 MCP 서버가 AS 이자 RS(같은 프로세스)다:
- *   - AS: /authorize·/token·/register(.well-known 메타) 는 SDK `mcpAuthRouter` 가 깔고,
- *         실제 로직은 이 파일의 `KnowledgeOAuthProvider`(OAuthServerProvider 구현)가 담당.
- *   - 동의: /authorize 는 바로 Google 로 보내지 않고 동의 화면을 먼저 보여 준다(어떤 앱이, 어디로 토큰을 받는지).
- *           DCR 로 누구나 client 를 등록할 수 있어, 동의 없이 넘기면 링크 한 번에 토큰이 공격자 redirect_uri 로 간다
- *           (MCP 보안 모범 사례의 confused deputy). 승인 버튼은 쿠키에 묶어 다른 사이트가 대신 누르지 못하게 한다.
- *   - 로그인: Google Workspace(OIDC)로 브리지. 허용 도메인(hd) 또는 허용 이메일 중 하나에 들어야 한다.
- *   - 토큰: access/refresh 를 HS256 JWT 로 자체 발급(AS=RS 라 JWKS 배포 불필요, 대칭키로 in-process 검증).
- *           access token 의 aud = canonical resource(=우리 /mcp). RFC 8707.
- *   - PKCE(S256): SDK token 핸들러가 challengeForAuthorizationCode() 로 받아 자체 검증.
+ * This MCP server is both the AS and the RS (same process):
+ *   - AS: the SDK `mcpAuthRouter` mounts /authorize, /token and /register (plus the .well-known metadata),
+ *         and the actual logic lives in `KnowledgeOAuthProvider` in this file (an OAuthServerProvider implementation).
+ *   - Consent: /authorize does not go straight to Google. It first shows a consent page (which app, and where the
+ *           token will be sent).
+ *           Anyone can register a client through DCR, so without consent one link would send the token to an
+ *           attacker's redirect_uri (the confused deputy problem in the MCP security best practices). The approve
+ *           button is bound to a cookie so that another site cannot press it on the user's behalf.
+ *   - Sign-in: bridged to Google Workspace (OIDC). The account must match an allowed domain (hd) or an allowed email.
+ *   - Tokens: access and refresh tokens are self-issued HS256 JWTs (AS = RS, so no JWKS to publish; verified
+ *           in-process with a symmetric key).
+ *           The access token aud is the canonical resource (our /mcp). RFC 8707.
+ *   - PKCE (S256): the SDK token handler gets the challenge from challengeForAuthorizationCode() and verifies it itself.
  *
- * graceful: 필수 값이 없으면 isOAuthConfigured()=false → server/http.ts 가 라우터를 안 깐다(기존 Bearer 무손상).
- *   허용 목록(도메인·이메일)도 필수 값이다. 둘 다 비면 아무 Google 계정이나 로그인되므로 OAuth 를 켜지 않는다.
+ * Graceful: if a required value is missing, isOAuthConfigured() is false and server/http.ts does not mount the router
+ *   (existing Bearer auth is unaffected).
+ *   The allowlist (domains, emails) is also required. If both are empty, any Google account could sign in, so OAuth
+ *   stays off.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
@@ -27,10 +32,11 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { OAuthClientInformationFull, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { InvalidGrantError, InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 
-// ── 설정 (env) ──
+// ── Settings (env) ──
 const ISSUER = (process.env.MCP_OAUTH_ISSUER || '').replace(/\/$/, ''); // e.g. https://mcp.example.com
 const RESOURCE = (process.env.MCP_RESOURCE || (ISSUER ? `${ISSUER}/mcp` : '')).replace(/\/$/, ''); // canonical, = token aud
-// 로그인 브리지용 Google 클라이언트. 전용 OAUTH_GOOGLE_* 우선, 없으면 기존 Drive용 GOOGLE_OAUTH_* 재사용.
+// Google client for the sign-in bridge. The dedicated OAUTH_GOOGLE_* values win; otherwise the existing
+// GOOGLE_OAUTH_* values (used for Drive) are reused.
 const GOOGLE_CLIENT_ID = process.env.OAUTH_GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.OAUTH_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET || '';
 const JWT_SECRET = process.env.OAUTH_JWT_SECRET || '';
@@ -47,10 +53,10 @@ const ALLOWED_EMAILS = (
 const emailDomain = (e: string) => e.slice(e.lastIndexOf('@') + 1);
 
 /**
- * 계정 허용 판정 — 허용 이메일 목록에 있거나, 이메일 도메인이 허용 도메인이면 허용(합집합).
- * 둘 다 비어 있으면 아무도 허용하지 않는다(fail-closed). 그 경우 OAuth 자체가 켜지지 않는다.
- * 로그인뿐 아니라 **토큰 검증·refresh 마다 재확인**해서, 허용 목록에서 빠진 계정은
- * 기존 토큰(특히 30일 refresh)이 남아 있어도 즉시 차단되도록 한다.
+ * Account check: allowed if the email is on the allowed email list or its domain is an allowed domain (union).
+ * If both lists are empty, nobody is allowed (fail-closed). In that case OAuth itself is not enabled.
+ * This is **rechecked on every token verification and refresh**, not only at sign-in, so an account removed
+ * from the allowlist is blocked at once even if it still holds tokens (in particular the 30-day refresh token).
  */
 function emailAllowed(email: string): boolean {
   const e = (email || '').toLowerCase();
@@ -75,7 +81,7 @@ const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const GOOGLE_JWKS = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
 
-/** OAuth 를 켜는 데 빠진 값 목록 (이름만, 값은 노출 안 함). 빈 배열이면 켤 수 있다. */
+/** Values still missing to enable OAuth (names only, never the values). An empty array means it can be enabled. */
 export function oauthConfigProblems(): string[] {
   const out: string[] = [];
   if (!ISSUER) out.push('MCP_OAUTH_ISSUER');
@@ -88,12 +94,12 @@ export function oauthConfigProblems(): string[] {
   return out;
 }
 
-/** OAuth 를 하나라도 설정하려 한 흔적이 있는가 — 반쯤 설정된 상태를 부팅 로그에서 크게 알리기 위함. */
+/** Whether anyone tried to configure OAuth at all. Used to report a half-configured state loudly in the boot log. */
 export function oauthAttempted(): boolean {
   return Boolean(ISSUER || process.env.OAUTH_GOOGLE_CLIENT_ID || JWT_SECRET);
 }
 
-/** OAuth 활성 조건 — 필수 값이 모두 있어야 함. 없으면 index 가 라우터 미장착(기존 Bearer 유지). */
+/** OAuth is active only when every required value is set. Otherwise index does not mount the router (Bearer stays). */
 export function isOAuthConfigured(): boolean {
   return Boolean(RESOURCE) && oauthConfigProblems().length === 0;
 }
@@ -104,7 +110,7 @@ export const OAUTH_SCOPES = [SCOPE];
 
 const jwtKey = () => new TextEncoder().encode(JWT_SECRET);
 
-// ── in-memory 스토어 (단일 replica·짧은 TTL 이라 충분. 재시작 시 코드/상태는 휘발, JWT 는 무상태) ──
+// ── In-memory stores (enough for one replica and short TTLs: restart drops codes and state, JWTs stateless) ──
 interface AuthCodeEntry {
   codeChallenge: string;
   clientId: string;
@@ -124,10 +130,10 @@ interface LoginRequest {
   exp: number;
 }
 interface GooglePending extends LoginRequest {
-  binding: string; // 승인한 브라우저에만 심은 쿠키 값 — Google 콜백에서 같은 값이 와야 code 를 낸다
+  binding: string; // cookie set only in the approving browser; the Google callback must carry the same value to get a code
 }
 interface ConsentPending extends LoginRequest {
-  csrf: string; // 동의 화면이 심은 쿠키 값 — POST 의 폼 값·쿠키 값과 모두 같아야 승인
+  csrf: string; // cookie set by the consent page; the POST form value and the cookie must both match it to approve
 }
 
 const _authCodes = new Map<string, AuthCodeEntry>();
@@ -138,7 +144,7 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
-/** 동의 화면 HTML. 앱 이름과 토큰이 돌아갈 주소를 그대로 보여 준다. */
+/** Consent page HTML. Shows the app name and the address the token will be sent to, as they are. */
 function consentPage(opts: { appName: string; clientId: string; redirectUri: string; id: string; csrf: string }): string {
   const server = escapeHtml(getConfig().branding.name);
   const app = escapeHtml(opts.appName);
@@ -147,7 +153,7 @@ function consentPage(opts: { appName: string; clientId: string; redirectUri: str
     const u = new URL(opts.redirectUri);
     target = `${u.protocol}//${u.host}${u.pathname}`;
   } catch {
-    /* 등록 단계에서 URL 검증됨 — 그래도 원문 표시 */
+    /* The URL was validated at registration. If parsing still fails, show the original string. */
   }
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${server} sign-in</title>
@@ -171,7 +177,7 @@ button[value=approve]{background:#111;color:#fff;border-color:#111}
 </form></main></body></html>`;
 }
 
-/** client redirect_uri 로 OAuth 오류를 돌려줄 URL. */
+/** URL that returns an OAuth error to the client redirect_uri. */
 function clientError(p: LoginRequest, error: string, description: string): string {
   const u = new URL(p.redirectUri);
   u.searchParams.set('error', error);
@@ -185,16 +191,18 @@ function sweep<T extends { exp: number }>(m: Map<string, T>): void {
   for (const [k, v] of m) if (v.exp <= now) m.delete(k);
 }
 
-// ── 클라이언트 스토어 (DCR — Claude/ChatGPT 자동 등록) ──
-// 저장소(SQLite 파일 또는 Supabase mcp_oauth_clients) 영속화 + 인메모리 캐시.
-// 왜: 예전 순수 인메모리 Map 은 서버 재시작(재배포)마다 등록 클라이언트를 통째로 잃어, 커넥터가
-//     옛 client_id 로 재접속 시 "invalid_client" 를 냈다(특히 ChatGPT — 자동 재등록 안 함). DB 를
-//     정본으로 두면 재시작에도 살아남는다. 캐시는 핫패스(매 authorize/token 의 getClient)용.
-// graceful: DB 불가(마이그레이션 전 배포·일시 장애)면 캐시로 폴백 → 그 프로세스 세션 동안만 유효
-//           (기존 인메모리 동작과 동일). 배포 순서에 안전 — 테이블 없어도 안 깨진다.
+// ── Client store (DCR: Claude and ChatGPT register automatically) ──
+// Persisted in the store (SQLite file or Supabase mcp_oauth_clients), with an in-memory cache in front.
+// Why: the earlier purely in-memory Map lost every registered client on each server restart (redeploy), so a
+//     connector reconnecting with its old client_id got "invalid_client" (ChatGPT in particular does not
+//     re-register automatically). With the DB as the source of truth, clients survive restarts. The cache is for
+//     the hot path (getClient on every authorize and token call).
+// Graceful: if the DB is unavailable (deployed before the migration, or a brief outage), fall back to the cache,
+//           which is valid only for that process (same as the old in-memory behavior). Safe for any deploy order:
+//           nothing breaks when the table does not exist.
 class ClientsStore implements OAuthRegisteredClientsStore {
   private cache = new Map<string, OAuthClientInformationFull>();
-  private static readonly CACHE_MAX = 500; // 캐시 cap — 정본은 DB 라 evict 돼도 재조회로 복구(안전)
+  private static readonly CACHE_MAX = 500; // cache cap; the DB is the source of truth, so an evicted entry is just looked up again (safe)
 
   private putCache(client: OAuthClientInformationFull): void {
     while (this.cache.size >= ClientsStore.CACHE_MAX) {
@@ -213,7 +221,7 @@ class ClientsStore implements OAuthRegisteredClientsStore {
       const client = await store.getOAuthClient(clientId);
       if (!client) return undefined;
       this.putCache(client);
-      // last_used 갱신 (best-effort — cleanup 판단용, 실패 무시)
+      // Update last_used (best-effort; used to decide cleanup, failures are ignored)
       void store.touchOAuthClient(clientId).catch((e: unknown) => {
         console.error('[oauth] could not update client last_used:', e instanceof Error ? e.message : e);
       });
@@ -224,46 +232,52 @@ class ClientsStore implements OAuthRegisteredClientsStore {
     }
   }
 
-  // register 핸들러가 client_id/secret 를 이미 생성해 넘김 → 캐시 + DB 저장.
+  // The register handler has already generated client_id/secret and passes them in. Cache it and save it to the DB.
   async registerClient(client: OAuthClientInformationFull): Promise<OAuthClientInformationFull> {
-    this.putCache(client); // 즉시 사용 가능
+    this.putCache(client); // usable immediately
     try {
       await (await getStore()).saveOAuthClient(client);
     } catch (e) {
-      // fail-open: 저장 실패해도 등록은 성공(그 세션 동안 캐시로 유효). 커넥터 설정을 하드 실패시키는
-      // 것보단 낫다(저장소 장애는 드묾). 경고 로그로 노출 — 재시작 시 유실될 수 있음.
+      // fail-open: registration succeeds even if the save fails (valid from the cache for this process). That is
+      // better than hard-failing connector setup (store outages are rare). Logged as a warning: may be lost on restart.
       console.error('[oauth] could not save the client (kept in memory; lost on restart):', e instanceof Error ? e.message : e);
     }
     return client;
   }
 }
 
-// ── Google id_token 검증 (hd + email allowlist 로 사내 제한) ──
+// ── Google id_token verification (restricted to the organization by the hd + email allowlist) ──
 async function verifyGoogleIdToken(idToken: string): Promise<{ email: string; hd?: string }> {
   const { payload } = await jwtVerify(idToken, GOOGLE_JWKS, {
     issuer: ['https://accounts.google.com', 'accounts.google.com'],
     audience: GOOGLE_CLIENT_ID,
-    algorithms: ['RS256'], // alg 고정 (defense-in-depth)
+    algorithms: ['RS256'], // pin alg (defense-in-depth)
   });
   const email = String(payload.email || '').toLowerCase();
   const hd = payload.hd ? String(payload.hd).toLowerCase() : undefined;
   const emailVerified = payload.email_verified === true || payload.email_verified === 'true';
   if (!email || !emailVerified) throw new Error('google: email not verified');
-  // 허용 이메일 목록에 있으면 계정 종류와 무관하게 허용(외부 협력자 등).
+  // An email on the allowed list is accepted whatever the account type (external collaborators, for example).
   if (ALLOWED_EMAILS.includes(email)) return { email, hd };
-  // 도메인으로 허용할 때는 hd 클레임이 그 도메인이어야 한다 — Workspace 가 관리하는 계정만.
-  // (hd 파라미터는 힌트일 뿐이라 신뢰 불가. 회사 주소로 만든 개인 Google 계정은 hd 가 없다.)
+  // When allowing by domain, the hd claim must equal that domain: only accounts managed by Workspace.
+  // (The hd parameter is only a hint and cannot be trusted. A personal Google account created with a company
+  // address has no hd claim.)
   const domain = emailDomain(email);
   if (ALLOWED_DOMAINS.includes(domain) && hd === domain) return { email, hd };
   throw new Error(`google: this account is not allowed (hd=${hd ?? 'none'})`);
 }
 
-// ── refresh token 상태 (저장소 mcp_refresh_tokens) ──
-// 왜: HS256 JWT 는 무상태라 rotation 해도 옛 refresh 가 만료(30일)까지 유효했다(P2 — 탈취 시 차단 불가).
-// jti 를 저장소에 기록해 rotation 시 옛 토큰을 즉시 폐기하고, 폐기된 토큰 재사용(탈취 신호)이 오면
-// 그 계정의 활성 refresh 전부를 강제 폐기한다. access token(1h)은 무상태 유지 — 요청 지연 없음.
+// ── Refresh token state (store table mcp_refresh_tokens) ──
+// Why: an HS256 JWT is stateless, so even after rotation the old refresh token stayed valid until it expired
+// (30 days), and a stolen one could not be blocked.
+// The jti is recorded in the store so the old token is revoked at once on rotation. If a revoked token is reused
+// (a sign of theft), every active refresh token of that account is revoked. The access token (1h) stays stateless,
+// so requests are not delayed.
 
-/** 발급한 refresh jti 기록. 만료 row 도 김에 정리. 실패 시 throw — 기록 안 된 토큰은 refresh 불가라 발급 자체를 실패시킨다. */
+/**
+ * Records an issued refresh jti and purges expired rows while at it. Throws on failure: an unrecorded token
+ * cannot be refreshed, so issuing fails as a whole.
+ */
 async function recordRefreshToken(jti: string, email: string, clientId: string): Promise<void> {
   const store = await getStore();
   try {
@@ -277,11 +291,11 @@ async function recordRefreshToken(jti: string, email: string, clientId: string):
 }
 
 /**
- * refresh jti 소비(rotation) — 활성 row 만 원자적으로 폐기 표시.
- *   'ok'      : 정상 — 폐기 완료, 새 토큰 발급 진행
- *   'reused'  : 이미 폐기된 jti 재사용(탈취 신호) → 계정 전체 refresh 폐기됨
- *   'unknown' : 기록에 없음(구형 토큰·저장소 유실) → 거부(재로그인)
- * 저장소 오류는 throw — fail-closed (revocation 체크를 못 하면 refresh 를 내주지 않는다).
+ * Consumes a refresh jti (rotation). Atomically marks the row revoked, only if it is active.
+ *   'ok'      : normal. Revoked, go on to issue the new token
+ *   'reused'  : an already revoked jti was reused (a sign of theft), so every refresh token of the account was revoked
+ *   'unknown' : not on record (old-format token, or the store lost it), so reject (sign in again)
+ * Store errors throw: fail-closed (if revocation cannot be checked, no refresh is granted).
  */
 async function consumeRefreshToken(jti: string, email: string, rotatedTo: string): Promise<'ok' | 'reused' | 'unknown'> {
   const store = await getStore();
@@ -316,12 +330,12 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   get clientsStore(): OAuthRegisteredClientsStore {
     return this._clients;
   }
-  // PKCE 는 우리(AS)가 자체 검증 (Google 으로 넘기지 않음)
+  // PKCE is verified here, by the AS (it is not passed on to Google)
   skipLocalPkceValidation = false;
 
   /**
-   * authorize: 동의 화면을 먼저 보여 준다. 승인(POST /oauth/consent)이 와야 Google 로그인으로 넘긴다.
-   * 우리 code 는 Google 콜백에서 발급.
+   * authorize: shows the consent page first. Only an approval (POST /oauth/consent) continues to Google sign-in.
+   * Our own code is issued in the Google callback.
    */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     sweep(_consentPending);
@@ -338,13 +352,14 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       csrf,
     });
     const secure = ISSUER.startsWith('https://') ? '; Secure' : '';
-    // SameSite=Lax: 다른 사이트가 자동 제출하는 POST 에는 쿠키가 실리지 않아 승인을 대신 누를 수 없다.
+    // SameSite=Lax: the cookie is not sent on a POST auto-submitted by another site, so that site cannot approve for
+    // the user.
     res.setHeader(
       'Set-Cookie',
       `${CONSENT_COOKIE}=${csrf}; Path=${CONSENT_PATH}; Max-Age=${CONSENT_TTL}; HttpOnly; SameSite=Lax${secure}`,
     );
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Frame-Options', 'DENY'); // 클릭재킹 방지 (승인 버튼을 투명 iframe 으로 누르게 하는 공격)
+    res.setHeader('X-Frame-Options', 'DENY'); // blocks clickjacking (the approve button pressed through a transparent iframe)
     res.setHeader(
       'Content-Security-Policy',
       "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
@@ -364,13 +379,15 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * 동의 화면의 POST 처리 (server/http.ts 의 POST /oauth/consent 가 호출).
-   * 승인: 폼 csrf·쿠키 csrf·저장된 csrf 가 모두 같을 때만 Google 로그인으로. 거절: client 로 access_denied.
-   * 검증 실패는 throw — 호출부가 400 으로 끝낸다(공격자 redirect_uri 로 보내지 않는다).
+   * Handles the POST from the consent page (called by POST /oauth/consent in server/http.ts).
+   * Approve: continues to Google sign-in only when the form csrf, the cookie csrf and the stored csrf all match.
+   * Deny: returns access_denied to the client.
+   * A failed check throws, and the caller ends with a 400 (nothing is sent to an attacker's redirect_uri).
    *
-   * 승인하면 loginBinding 을 돌려준다. 호출부는 이 값을 Google 콜백 경로 전용 쿠키로 심는다. 콜백은 같은 쿠키가
-   * 올 때만 code 를 낸다. 이게 없으면 공격자가 자기 브라우저에서 승인한 뒤 Google 로그인 URL 만 피해자에게 보내,
-   * 피해자는 동의 화면을 보지 않고 Google 계정만 고르고, code 는 공격자 redirect_uri 로 간다.
+   * On approval it returns loginBinding. The caller sets this value as a cookie scoped to the Google callback path.
+   * The callback issues a code only when the same cookie comes back. Without this, an attacker could approve in their
+   * own browser and send only the Google sign-in URL to the victim. The victim would never see the consent page, would
+   * only pick a Google account, and the code would go to the attacker's redirect_uri.
    */
   consumeConsent(id: string, formCsrf: string, cookieCsrf: string, approve: boolean): { redirect: string; loginBinding?: string } {
     sweep(_consentPending);
@@ -391,7 +408,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     return { redirect: this.googleRedirect({ ...request, binding: loginBinding }), loginBinding };
   }
 
-  /** Google 로그인 URL 을 만들고 state 를 기록한다. */
+  /** Builds the Google sign-in URL and records the state. */
   private googleRedirect(pending: GooglePending): string {
     sweep(_googlePending);
     const state = randomBytes(24).toString('base64url');
@@ -403,24 +420,27 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     u.searchParams.set('scope', 'openid email profile');
     u.searchParams.set('access_type', 'online');
     u.searchParams.set('prompt', 'select_account');
-    // hd 는 계정 선택 화면 힌트일 뿐(검증은 id_token 에서). 허용 도메인이 하나이고 이메일 목록이 없을 때만 붙인다.
+    // hd is only a hint for the account chooser (verification happens on the id_token). It is added only when there
+    // is exactly one allowed domain and no email list.
     if (ALLOWED_DOMAINS.length === 1 && ALLOWED_EMAILS.length === 0) u.searchParams.set('hd', ALLOWED_DOMAINS[0]);
     u.searchParams.set('state', state);
     return u.toString();
   }
 
   /**
-   * Google 콜백 처리 (server/http.ts 의 /oauth/google/callback 라우트가 호출).
-   * binding 은 승인한 브라우저의 로그인 쿠키 값이다. 맞지 않으면 throw — client 로 아무것도 보내지 않는다.
-   * Google 에서 취소(error)했으면 client redirect_uri 로 access_denied 를 돌려준다(커넥터가 멈춰 있지 않게).
-   * 성공/실패 모두 client redirect_uri 로 돌려보낼 URL 을 반환한다.
+   * Handles the Google callback (called by the /oauth/google/callback route in server/http.ts).
+   * binding is the login cookie value from the browser that approved. If it does not match this throws, and nothing
+   * is sent to the client.
+   * If the user cancelled at Google (error), access_denied goes back to the client redirect_uri (so the connector
+   * is not left hanging).
+   * On success and on failure alike, it returns the URL that sends the user back to the client redirect_uri.
    */
   async completeGoogleLogin(params: { code?: string; error?: string; state: string; binding: string }): Promise<string> {
     sweep(_googlePending);
     const pending = _googlePending.get(params.state);
     if (!pending) throw new Error('Unknown or expired sign-in. Start the connection again.');
     if (!params.binding || !timingSafeEqualStr(params.binding, pending.binding)) {
-      // 다른 브라우저(링크를 전달받은 사람)에서 온 콜백. 이 state 는 버린다.
+      // A callback from a different browser (someone who was forwarded the link). Discard this state.
       _googlePending.delete(params.state);
       throw new Error('This sign-in was started in a different browser. Start the connection again from your app.');
     }
@@ -431,7 +451,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
 
     let email: string;
     try {
-      // Google code → id_token 교환
+      // Exchange the Google code for an id_token
       const body = new URLSearchParams({
         code: googleCode,
         client_id: GOOGLE_CLIENT_ID,
@@ -451,7 +471,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       return redirectErr('access_denied', e instanceof Error ? e.message : 'sign-in failed');
     }
 
-    // 우리 authorization code 발급 (one-time, 짧은 TTL)
+    // Issue our own authorization code (one-time, short TTL)
     sweep(_authCodes);
     const code = randomBytes(24).toString('base64url');
     _authCodes.set(code, {
@@ -478,7 +498,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
   async exchangeAuthorizationCode(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-    _codeVerifier?: string, // SDK 가 challengeForAuthorizationCode 와 PKCE 검증 완료
+    _codeVerifier?: string, // the SDK has already verified PKCE using challengeForAuthorizationCode
     redirectUri?: string,
     _resource?: URL,
   ): Promise<OAuthTokens> {
@@ -491,7 +511,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     const scope = entry.scopes.join(' ') || SCOPE;
     const claims = { sub: entry.email, email: entry.email, scope, client_id: client.client_id };
     const access_token = await signJwt(claims, ACCESS_TTL, 'access');
-    // refresh 는 jti 발급 + DB 기록 — rotation 시 즉시 폐기 가능하게 (P2)
+    // The refresh token gets a jti that is recorded in the DB, so it can be revoked at once on rotation
     const jti = randomUUID();
     const refresh_token = await signJwt({ ...claims, jti }, REFRESH_TTL, 'refresh');
     await recordRefreshToken(jti, entry.email, client.client_id);
@@ -522,14 +542,17 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     } catch {
       throw new InvalidGrantError('invalid refresh token');
     }
-    // refresh token 은 발급받은 client 만 쓸 수 있다 — 새어 나간 토큰을 다른(공격자가 등록한) client 로 바꾸지 못하게.
+    // Only the client a refresh token was issued to may use it, so a leaked token cannot be exchanged through
+    // another client (one registered by an attacker).
     if (!tokenClientId || tokenClientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to another client');
-    // 처음 허용된 범위보다 넓힐 수 없다.
+    // The scope cannot be widened beyond the original grant.
     if (scopes && scopes.some((s) => !grantedScopes.includes(s))) throw new InvalidScopeError('requested scope exceeds the original grant');
-    // refresh 시 허용 목록 재확인 — 빠진 계정은 30일 refresh 가 남아도 즉시 차단.
+    // Recheck the allowlist on refresh: a removed account is blocked at once even with a 30-day refresh token left.
     if (!emailAllowed(email)) throw new InvalidGrantError('this account is no longer allowed');
-    // jti 없는 구형 refresh 는 거부(재로그인 1회 유도). jti 는 DB 에서 소비(rotation) —
-    // 옛 토큰 즉시 폐기, 폐기된 토큰 재사용(탈취 신호)이면 계정 전체 refresh 폐기.
+    // An old-format refresh token without a jti is rejected (this forces one new sign-in). The jti is consumed in the
+    // DB (rotation):
+    // the old token is revoked at once, and reuse of a revoked token (a sign of theft) revokes every refresh token
+    // of the account.
     if (!jti) throw new InvalidGrantError('outdated refresh token; sign in again');
     const newJti = randomUUID();
     const state = await consumeRefreshToken(jti, email, newJti);
@@ -543,16 +566,16 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL, scope, refresh_token };
   }
 
-  /** RS: access token 검증 (requireBearerAuth + 우리 /mcp dual-auth 가 사용) */
+  /** RS: verifies an access token (used by requireBearerAuth and by our /mcp dual-auth) */
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const { payload } = await jwtVerify(token, jwtKey(), {
       issuer: ISSUER,
       audience: RESOURCE,
-      algorithms: ['HS256'], // alg 고정 (none/RS256 confusion 차단)
+      algorithms: ['HS256'], // pin alg (blocks none/RS256 confusion)
     });
     if (payload.typ === 'refresh') throw new Error('a refresh token cannot be used as an access token');
     const email = typeof payload.sub === 'string' ? payload.sub : '';
-    // P1: 매 요청 allowlist 재확인 — allowlist 에서 빠지면 미만료 토큰도 즉시 거부.
+    // Recheck the allowlist on every request: once an account is removed, even an unexpired token is rejected at once.
     if (!emailAllowed(email)) throw new Error('this account is no longer allowed');
     const scopes = String(payload.scope || '').split(' ').filter(Boolean);
     return {

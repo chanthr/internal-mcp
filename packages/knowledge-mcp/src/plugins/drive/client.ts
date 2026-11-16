@@ -1,23 +1,23 @@
 /**
  * Google Drive API (v3, read-only) over plain HTTPS.
  *
- * 인증 옵션 (우선순위 순):
- *   1. Service Account JSON (권장 — production-grade)
- *      - GOOGLE_SERVICE_ACCOUNT_KEY (inline JSON, Railway 친화)
- *      - GOOGLE_APPLICATION_CREDENTIALS (JSON 파일 path. service_account 또는 authorized_user)
+ * Auth options (in priority order):
+ *   1. Service Account JSON (recommended, production-grade)
+ *      - GOOGLE_SERVICE_ACCOUNT_KEY (inline JSON, convenient on Railway)
+ *      - GOOGLE_APPLICATION_CREDENTIALS (path to a JSON file: service_account or authorized_user)
  *
  *   2. OAuth Refresh Token (fallback, single-user)
  *      - GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET + GOOGLE_OAUTH_REFRESH_TOKEN
  *      - Legacy DRIVE_* fallback
  *
- * Service Account 사용 시:
- *   - Drive 폴더에 service account email (xxx@<project>.iam.gserviceaccount.com) viewer 공유 필수
- *   - refresh_token 만료·rotation 없음
+ * With a Service Account:
+ *   - the Drive folder must be shared with the service account email (xxx@<project>.iam.gserviceaccount.com) as viewer
+ *   - no refresh_token expiry or rotation
  *
- * googleapis 대신 직접 부르는 이유: googleapis(google-auth-library → gaxios → node-fetch → fetch-blob)는
- * 최신판도 폐기된 패키지(node-domexception, 옛 판은 uuid)를 끌어와 설치마다 경고를 남겼고, 불러오는 데만
- * CPU 1초가 넘게 들었다. 이 서버가 쓰는 Drive 엔드포인트는 5개뿐이다. 호출 모양(drive.files.list 등,
- * { data } 반환)은 googleapis 와 같게 둬서 도구 코드는 바꾸지 않았다.
+ * Why this calls the API directly instead of using googleapis: googleapis (google-auth-library → gaxios → node-fetch →
+ * fetch-blob) pulls in deprecated packages even in its latest version (node-domexception, and uuid in older versions),
+ * which left warnings on every install, and loading it alone took more than 1 second of CPU. This server uses only 5 Drive
+ * endpoints. The call shape (drive.files.list etc., returning { data }) matches googleapis, so the tool code did not change.
  */
 import { readFileSync } from 'node:fs';
 import { SignJWT, importPKCS8 } from 'jose';
@@ -26,12 +26,12 @@ const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
 
-// Drive API 전역 timeout — 명시 timeout 이 없으면 매달린 호출 하나가 도구 호출 전체를 멈춘다.
+// Global timeout for the Drive API. Without an explicit timeout, one hung call stalls the entire tool call.
 const DRIVE_TIMEOUT_MS = Number(process.env.DRIVE_TIMEOUT_MS ?? 15_000);
 const DRIVE_DOWNLOAD_TIMEOUT_MS = Number(process.env.DRIVE_DOWNLOAD_TIMEOUT_MS ?? 120_000);
-const RETRIES = 3; // 429, 403 속도 제한, 5xx, 네트워크 오류. GET 만 쓰므로 다시 보내도 안전하다
+const RETRIES = 3; // 429, 403 rate limits, 5xx, network errors. Only GET is used, so resending is safe
 
-// ── 응답 타입 (이 서버가 읽는 필드만) ──
+// ── Response types (only the fields this server reads) ──
 export interface DriveFile {
   id?: string | null;
   name?: string | null;
@@ -86,7 +86,7 @@ export class DriveApiError extends Error {
   }
 }
 
-// ── 인증: 액세스 토큰을 만들고 만료 1분 전까지 다시 쓴다 ──
+// ── Auth: create an access token and reuse it until 1 minute before it expires ──
 type Credentials =
   | { kind: 'service_account'; clientEmail: string; privateKey: string; tokenUri: string }
   | { kind: 'refresh_token'; clientId: string; clientSecret: string; refreshToken: string; tokenUri: string };
@@ -148,7 +148,7 @@ export function resolveCredentials(env: NodeJS.ProcessEnv = process.env): Creden
 async function requestToken(creds: Credentials): Promise<{ token: string; expiresAt: number }> {
   const form = new URLSearchParams();
   if (creds.kind === 'service_account') {
-    // OAuth 2.0 JWT bearer grant (RFC 7523): 서비스 계정 키로 서명한 assertion 을 토큰으로 바꾼다.
+    // OAuth 2.0 JWT bearer grant (RFC 7523): exchanges an assertion signed with the service account key for a token.
     const now = Math.floor(Date.now() / 1000);
     const key = await importPKCS8(creds.privateKey, 'RS256');
     const assertion = await new SignJWT({ scope: DRIVE_READONLY_SCOPE })
@@ -174,7 +174,7 @@ async function requestToken(creds: Credentials): Promise<{ token: string; expire
   });
   const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
   if (!res.ok || !body.access_token) {
-    // Google 은 오류 본문에 토큰이나 키를 돌려주지 않는다. 오류 코드와 설명만 남긴다.
+    // Google does not return tokens or keys in error bodies. Only the error code and description are kept.
     throw new DriveApiError(`[drive] token request failed ${res.status}: ${body.error ?? ''} ${body.error_description ?? ''}`.trim(), res.status);
   }
   return { token: body.access_token, expiresAt: Date.now() + (body.expires_in ?? 3600) * 1000 };
@@ -201,7 +201,7 @@ export function createDriveClient(creds: Credentials, apiBase = DRIVE_API): Driv
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== undefined) qs.set(k, String(v));
     const url = `${apiBase}${path}${qs.size ? `?${qs}` : ''}`;
-    // 본문 다운로드(media, export)는 큰 PDF 나 PPTX 를 받으므로 메타 조회보다 길게 기다린다.
+    // Content downloads (media, export) fetch large PDFs or PPTX files, so they wait longer than metadata lookups.
     const timeoutMs = responseType === 'json' ? DRIVE_TIMEOUT_MS : DRIVE_DOWNLOAD_TIMEOUT_MS;
     const backoff = (attempt: number, retryAfter?: number) =>
       new Promise((r) => setTimeout(r, retryAfter && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt));
@@ -219,7 +219,7 @@ export function createDriveClient(creds: Credentials, apiBase = DRIVE_API): Driv
         }
         if (!res.ok) {
           const text = await res.text().catch(() => '');
-          // Drive 는 속도 제한을 429 말고 403 rateLimitExceeded / userRateLimitExceeded 로도 준다.
+          // Drive also signals rate limits with 403 rateLimitExceeded / userRateLimitExceeded, not just 429.
           const rateLimited = res.status === 429 || (res.status === 403 && /rateLimitExceeded|userRateLimitExceeded/.test(text));
           if ((rateLimited || res.status >= 500) && retriesLeft) {
             await backoff(attempt, Number(res.headers.get('retry-after')));
@@ -233,7 +233,8 @@ export function createDriveClient(creds: Credentials, apiBase = DRIVE_API): Driv
           }
           throw new DriveApiError(`[drive] ${res.status} ${path}: ${msg}`, res.status);
         }
-        // 본문 읽기도 재시도 범위 안 — 느린 회선에서 큰 파일이 도중에 끊겨도 한 번 더 받는다.
+        // Reading the body is inside the retry scope too: if a large file is cut off midway on a slow link, it is fetched
+        // once more.
         if (responseType === 'arraybuffer') return { data: await res.arrayBuffer() };
         if (responseType === 'text') return { data: await res.text() };
         return { data: await res.json() };
@@ -271,7 +272,7 @@ export async function getDriveClient(): Promise<DriveClient> {
   return _client;
 }
 
-/** Google Drive query language 의 single-quote escape. */
+/** Single-quote escape for the Google Drive query language. */
 export function escapeDriveQuery(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }

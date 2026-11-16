@@ -1,19 +1,19 @@
 /**
- * slack_list_channels(enabledOnly?) — Slack 채널 지형(용도 매핑) 반환 + 자동 동기화.
+ * slack_list_channels(enabledOnly?): returns the Slack channel map (purpose mapping) and syncs it automatically.
  *
- * 데이터: 저장소 `slack_channels`(용도 매핑, single source — SQLite 파일 또는 Supabase)
- *         + Slack `conversations.list`(실시간 채널·멤버십) join.
+ * Data: the `slack_channels` store (purpose mapping, single source: a SQLite file or Supabase)
+ *       joined with Slack `conversations.list` (live channels and membership).
  *
- * 자동 동기화 (호출 시 lazy — 변경분이 있을 때만 write):
- *   - 기존 채널 이름 변경  → channel_name 갱신 (channel_id 가 매칭 기준이라 이름이 바뀌어도 안 깨짐)
- *   - channel_id 미기록 행 → 이름으로 매칭해 channel_id backfill (최초 1회 정착)
- *   - 신규 채널           → enabled=false 로 추가 (사람이 `knowledge-mcp slack channel` 명령이나
- *                           Supabase 표에서 purpose 를 채우고 켜면 노출)
- * bot_can_read 판정도 channel_id 기준 — 이름 변경에 강건.
+ * Automatic sync (lazy, on call. Writes only when something changed):
+ *   - existing channel renamed → update channel_name (matching is by channel_id, so a rename does not break it)
+ *   - row without channel_id   → match by name and backfill channel_id (settles once, the first time)
+ *   - new channel              → added with enabled=false (exposed once a person fills in purpose and enables it
+ *                                with the `knowledge-mcp slack channel` command or in the Supabase table)
+ * bot_can_read is also decided by channel_id, so it survives renames.
  *
- * 봇/챗봇은 Slack 관련 질문에서 이 툴을 먼저 호출해 "어느 채널이 무슨 용도인지,
- * 봇이 읽을 수 있는지(bot_can_read)" 를 파악한 뒤 slack_search(in:#채널) /
- * slack_read_channel 을 타겟팅한다. 두 도구 모두 봇이 멤버인 채널만 돌려준다.
+ * For Slack questions, a bot or assistant calls this tool first to learn which channel is for what and whether the bot
+ * can read it (bot_can_read), then targets slack_search (in:#channel) or slack_read_channel. Both tools return only
+ * channels the bot is a member of.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -41,10 +41,10 @@ export const slackListChannelsTool = defineTool({
   run: (args) => handleSlackListChannels(args),
 });
 
-// ── 응답 TTL 캐시 ──
-// 이 도구는 매 호출마다 conversations.list(Slack) + 동기화 write + DB read 를 수행한다.
-// 여러 사용자가 Slack 질문을 동시에 던지면 같은 작업이 중복되므로, 짧은 TTL 로 최종 응답을 캐시한다.
-// (채널 추가/이름변경 반영 지연은 최대 TTL 초 — lazy 동기화 특성상 허용 범위)
+// ── Response TTL cache ──
+// On every call this tool runs conversations.list (Slack), a sync write and a DB read.
+// When several users ask Slack questions at once the same work repeats, so the final response is cached with a short TTL.
+// (Channel additions and renames show up at most TTL seconds late, which is acceptable for a lazy sync.)
 const LIST_CACHE_TTL_MS = Number(process.env.SLACK_LIST_CACHE_TTL_MS ?? 60_000);
 const _listCache = new Map<string, { text: string; expiresAt: number }>();
 
@@ -57,8 +57,8 @@ interface LiveChannel {
 }
 
 /**
- * conversations.list 결과로 slack_channels 동기화 (변경분만 write).
- * graceful — 실패해도 throw 하지 않고 0 카운트 반환 (read 는 계속 진행).
+ * Syncs slack_channels with the conversations.list result (writes only what changed).
+ * Graceful: on failure it does not throw and returns zero counts (the read still proceeds).
  */
 async function syncChannels(
   store: Store,
@@ -78,18 +78,18 @@ async function syncChannels(
   for (const c of live) {
     const hit = byId.get(c.id);
     if (hit) {
-      // 이미 id 로 정착된 채널 — 이름이 바뀌었으면 갱신
+      // Channel already settled by id: update the name if it changed
       if (hit.channel_name !== c.name) toUpdate.push({ id: hit.id, patch: { channel_name: c.name } });
       continue;
     }
     const named = byName.get(c.name);
     if (named && !named.channel_id) {
-      // 이름은 매칭되나 channel_id 미기록 — 최초 backfill
+      // Name matches but channel_id is not recorded: first backfill
       toUpdate.push({ id: named.id, patch: { channel_id: c.id } });
       continue;
     }
     if (!named) {
-      // DB 에 없는 신규 채널 — 비활성으로 추가 (사람이 purpose 채우면 노출)
+      // New channel not in the DB: add it disabled (exposed once a person fills in purpose)
       toInsert.push({ channel_id: c.id, channel_name: c.name, purpose: '', category: null, enabled: false, sort_order: 100 });
     }
   }
@@ -108,13 +108,14 @@ async function syncChannels(
       else linked++;
     }
   } catch {
-    /* sync 실패해도 매핑 read 는 진행 */
+    /* the mapping read proceeds even if the sync fails */
   }
   return { inserted, renamed, linked };
 }
 
 export async function handleSlackListChannels(args: z.infer<typeof inputSchema>) {
-  // 저장소 read 의 네트워크 throw 가 [fatal] 로 누수하지 않게 graceful 래핑. 입력은 registry 가 검증했다.
+  // Graceful wrapper so a network throw from the store read does not leak as [fatal]. The registry has already validated
+  // the input.
   try {
     return await _handleSlackListChannels(args);
   } catch (e: unknown) {
@@ -130,7 +131,7 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
   const { enabledOnly } = args;
   const channelScope = allowedSlackChannels(auth);
 
-  // 캐시 hit — Slack 호출·동기화·DB read 전부 skip. scope 있는 직원은 캐시 오염 방지 위해 skip.
+  // Cache hit: skip the Slack call, the sync and the DB read. Users with a scope skip the cache to avoid cache pollution.
   const cacheKey = enabledOnly ? 'enabled' : 'all';
   if (!channelScope) {
     const cached = _listCache.get(cacheKey);
@@ -141,7 +142,7 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
 
   const store = await getStore();
 
-  // 1. 저장소의 현재 매핑 (sync 비교용 — enabled 무관 전체)
+  // 1. Current mapping in the store (for sync comparison: all rows, regardless of enabled)
   let rows: ChannelRow[];
   try {
     rows = await store.listSlackChannels();
@@ -152,8 +153,8 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
     };
   }
 
-  // 2. 실시간 채널 (Slack 안 되면 매핑만 반환 — graceful). cursor 로 끝까지 — Slack 은 limit 보다
-  //    적게 주고 cursor 를 줄 수 있어, 첫 페이지만 보면 뒤 채널이 bot_can_read=false 로 잘못 나온다.
+  // 2. Live channels (if Slack is unavailable, return the mapping only: graceful). Follow the cursor to the end: Slack may
+  //    return fewer than limit along with a cursor, so reading only the first page marks later channels bot_can_read=false.
   const live: LiveChannel[] = [];
   try {
     let cursor: string | undefined;
@@ -173,25 +174,25 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
       if (!cursor) break;
     }
   } catch {
-    /* slack 토큰/스코프 문제여도 매핑은 반환 */
+    /* the mapping is still returned on a Slack token or scope problem */
   }
 
-  // 3. 자동 동기화 (live 가 있을 때만 — 빈 응답으로 DB 를 망가뜨리지 않게)
+  // 3. Automatic sync (only when live is non-empty, so an empty response cannot corrupt the DB)
   let synced = { inserted: 0, renamed: 0, linked: 0 };
   if (live.length > 0) {
     synced = await syncChannels(store, rows, live);
   }
 
-  // 4. 동기화로 바뀐 게 있으면 반영본 재조회
+  // 4. If the sync changed anything, re-read the updated rows
   let outRows = rows;
   if (synced.inserted || synced.renamed || synced.linked) {
     outRows = await store.listSlackChannels().catch(() => rows);
   }
   if (enabledOnly) outRows = outRows.filter((r) => r.enabled);
-  // 직원별 Slack 채널 scope (admin·미설정 = 전체). channel_id 기준.
+  // Per-user Slack channel scope (admin or unset = all). Based on channel_id.
   if (channelScope) outRows = outRows.filter((r) => r.channel_id && channelScope.has(r.channel_id));
 
-  // 5. bot_can_read — channel_id 기준 (이름 변경에 강건), 미링크 행은 이름 fallback
+  // 5. bot_can_read: based on channel_id (survives renames). Unlinked rows fall back to the name
   const liveById = new Map<string, boolean>();
   const liveByName = new Map<string, boolean>();
   for (const c of live) {
@@ -221,7 +222,8 @@ async function _handleSlackListChannels(args: z.infer<typeof inputSchema>) {
     null,
     2,
   );
-  // Slack 응답이 정상일 때만 캐시 (live 비었으면 일시 장애일 수 있어 캐시 안 함 → 다음 호출 재시도)
+  // Cache only when the Slack response was healthy (an empty live may be a transient outage, so it is not cached and the
+  // next call retries)
   if (live.length > 0 && !channelScope) {
     _listCache.set(cacheKey, { text, expiresAt: Date.now() + LIST_CACHE_TTL_MS });
   }

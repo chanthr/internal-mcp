@@ -15,7 +15,10 @@ import { getConfig } from './config.js';
  */
 export type Role = 'admin' | 'member' | 'viewer';
 
-/** 상수시간 문자열 비교 — sha256 으로 길이 정규화 후 timingSafeEqual (타이밍 누출 방지). oauth.ts 도 사용. */
+/**
+ * Constant-time string comparison: normalizes length with sha256, then timingSafeEqual (prevents timing leaks).
+ * Also used by oauth.ts.
+ */
 export function timingSafeEqualStr(a: string, b: string): boolean {
   const ha = createHash('sha256').update(a).digest();
   const hb = createHash('sha256').update(b).digest();
@@ -23,13 +26,14 @@ export function timingSafeEqualStr(a: string, b: string): boolean {
 }
 
 /**
- * 직원별 리소스 스코프 (app_users 의 allowed_* 컬럼에서 옴).
- * 각 필드 null/undefined/빈배열 = 그 차원은 전체 허용(미설정). admin role 은 scope 무시 전체.
+ * Per-user resource scopes (from the allowed_* columns of app_users).
+ * A field that is null/undefined/an empty array means that dimension is fully allowed (unset). The admin role
+ * ignores scopes and gets everything.
  */
 export type ResourceScopes = {
-  slackChannels?: string[] | null; // 허용 Slack 채널 id
-  driveFolders?: string[] | null; // 허용 Drive 폴더 path prefix
-  tools?: string[] | null; // 허용 도구군 = 플러그인 id (drive, slack, github, railway, 직접 만든 플러그인)
+  slackChannels?: string[] | null; // allowed Slack channel ids
+  driveFolders?: string[] | null; // allowed Drive folder path prefixes
+  tools?: string[] | null; // allowed tool groups = plugin ids (drive, slack, github, railway, your own plugins)
 };
 
 export type AuthContext = {
@@ -40,26 +44,29 @@ export type AuthContext = {
   email?: string;
   key_id?: string;
   scopes?: ResourceScopes;
-  /** act-as(신뢰하는 프록시가 X-MCP-Act-As-Email 로 사람을 대신) 요청인가. 이 경로의 역할은 member 를 넘지 않는다(http.ts). */
+  /**
+   * Whether this is an act-as request (a trusted proxy stands in for a person through X-MCP-Act-As-Email).
+   * The role on this path never exceeds member (http.ts).
+   */
   actAs?: boolean;
-  /** 저장소 장애로 키를 확인하지 못했다(잘못된 키가 아님). HTTP 는 401 대신 503 을 준다. */
+  /** The key could not be checked because the store is down (not a wrong key). HTTP returns 503 instead of 401. */
   unavailable?: boolean;
 };
 
-// ── 인증 결과 TTL 캐시 ──
-// HTTP transport 는 도구 호출 1건 = 요청 1건 = validate_mcp_key RPC 1회.
-// 챗봇 ReAct 루프(여러 도구)·여러 사용자가 몰리면 같은 key 로 RPC 가 다발 →
-// 짧은 TTL 캐시로 DB 왕복을 줄인다. (key revoke 반영 지연은 최대 TTL 초)
+// ── TTL cache of auth results ──
+// On the HTTP transport, one tool call = one request = one validate_mcp_key RPC.
+// A chatbot ReAct loop (several tools) or several users at once fire many RPCs with the same key, so
+// a short TTL cache cuts DB round trips. (A key revoke takes effect after at most the TTL.)
 const AUTH_CACHE_TTL_MS = Number(process.env.AUTH_CACHE_TTL_MS ?? 60_000);
-const AUTH_CACHE_MAX = 500; // hard cap 백스톱 — key 회전이 많아도 무한 증가 방지(B-15)
+const AUTH_CACHE_MAX = 500; // hard cap as a backstop: prevents unbounded growth even with frequent key rotation
 const _authCache = new Map<string, { auth: AuthContext; expiresAt: number }>();
 
-/** 만료 항목 제거 + cap 초과 시 가장 오래된 것부터 정리 (단일 인스턴스 in-memory 캐시 누수 방지). */
+/** Removes expired entries and, over the cap, evicts the oldest first (prevents a leak in the single-instance cache). */
 function setAuthCache(key: string, auth: AuthContext): void {
   const now = Date.now();
   for (const [k, v] of _authCache) if (v.expiresAt <= now) _authCache.delete(k);
   while (_authCache.size >= AUTH_CACHE_MAX) {
-    const oldest = _authCache.keys().next().value; // Map 삽입 순서 = 오래된 것 먼저
+    const oldest = _authCache.keys().next().value; // Map insertion order = oldest first
     if (oldest === undefined) break;
     _authCache.delete(oldest);
   }
@@ -73,13 +80,13 @@ export async function authenticateApiKey(
     return { ok: false, reason: 'MCP_API_KEY not provided' };
   }
 
-  // 캐시 hit (성공 결과만 캐시 — 실패는 매번 재검증해 빠른 키 활성화 반영)
+  // Cache hit (only successes are cached; failures are rechecked every time so a newly activated key works quickly)
   const cached = _authCache.get(key);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.auth;
   }
 
-  // 저장소(SQLite 파일 또는 Supabase validate_mcp_key RPC)에서 해시로 조회
+  // Look up by hash in the store (SQLite file or Supabase validate_mcp_key RPC)
   try {
     const store = await getStore();
     const r = await store.validateKey(key);
@@ -94,7 +101,7 @@ export async function authenticateApiKey(
     setAuthCache(key, auth);
     return auth;
   } catch (e: unknown) {
-    // 저장소 장애. 내부 오류 문구는 서버 로그에만 남기고 클라이언트에는 보내지 않는다.
+    // Store outage. The internal error text goes to the server log only and is not sent to the client.
     console.error('[auth] key check failed (store unavailable):', e instanceof Error ? e.message : e);
     return { ok: false, reason: 'authentication backend unavailable', unavailable: true };
   }

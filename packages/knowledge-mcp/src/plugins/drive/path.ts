@@ -1,11 +1,14 @@
 /**
- * Drive 파일의 부모 체인 분류 — search_drive 가 민감/제외 폴더를 응답에서 거르는 데 사용.
+ * Classifies the parent chain of a Drive file. search_drive uses it to filter sensitive and excluded folders out of
+ * its responses.
  *
- * 왜: semantic 색인은 제외 폴더(config drive.excludeFolders, 예: "HR", "Contracts")를 건너뛰지만(exclude.ts),
- * search_drive 는 Drive API 를 직접 때려 service account 가 공유받은 전체를 노출했다 → 계약·PII·HR 유출 위험.
- * 이 모듈로 검색 결과를 "dev/biz root 하위 + 제외 폴더 미경유"로 한정한다.
+ * Why: the semantic index skips excluded folders (config drive.excludeFolders, e.g. "HR", "Contracts") (exclude.ts),
+ * but search_drive called the Drive API directly and exposed everything shared with the service account, a risk of
+ * leaking contracts, PII and HR data. This module limits search results to "under a dev/biz root and not through an
+ * excluded folder".
  *
- * 성능: 폴더 메타(id→name,parent)는 거의 변하지 않으므로 프로세스 캐시 → 부모 walk 가 warmup 후 캐시 hit.
+ * Performance: folder metadata (id → name, parent) rarely changes, so it is cached per process and the parent walk
+ * hits the cache after warmup.
  */
 import type { DriveClient, DriveFile } from './client.js';
 import { DRIVE_ROOTS, sharedScopeEnabled } from './settings.js';
@@ -13,9 +16,10 @@ import { isExcludedName } from './exclude.js';
 
 const ROOT_IDS = new Set(DRIVE_ROOTS.map((r) => r.id));
 
-// 폴더 메타 캐시 (id → {name, parent}). TTL 부여 — 영구 캐시면 폴더를 제외 이름(예: "HR")으로
-// rename 하거나 제외 폴더로 move 해도 옛 이름으로 분류돼 새로 민감해진 폴더가 재배포 전까지
-// 노출(under-exclude)된다. 짧은 TTL(기본 10분)로 분류 변경을 반영. rename/move 는 드물어 캐시 효과는 유지.
+// Folder metadata cache (id → {name, parent}) with a TTL. With a permanent cache, a folder renamed to an excluded name
+// (e.g. "HR") or moved into an excluded folder would still be classified by its old name, and the newly sensitive
+// folder would stay exposed (under-exclude) until a redeploy. A short TTL (default 10 minutes) picks up such changes.
+// Renames and moves are rare, so the cache stays effective.
 const FOLDER_META_TTL_MS = Number(process.env.FOLDER_META_TTL_MS ?? 600_000);
 const _folderMeta = new Map<string, { name: string; parent: string | undefined; expiresAt: number }>();
 
@@ -26,14 +30,15 @@ export async function getFolderMeta(
   const now = Date.now();
   const cached = _folderMeta.get(id);
   if (cached && cached.expiresAt > now) return { name: cached.name, parent: cached.parent };
-  // 조회 실패는 throw 한다(캐시하지 않음). 예전엔 빈 값을 돌려줘 동기화가 "root 밖"으로 보고 멀쩡한 벡터를 지웠다.
+  // A failed lookup throws (nothing is cached). It used to return an empty value, so the sync saw the file as
+  // "outside the roots" and deleted good vectors.
   const d = (await drive.files.get({ fileId: id, fields: 'name,parents', supportsAllDrives: true })).data;
   const meta = { name: d.name ?? '', parent: d.parents?.[0], expiresAt: now + FOLDER_META_TTL_MS };
   _folderMeta.set(id, meta);
   return { name: meta.name, parent: meta.parent };
 }
 
-/** 폴더 이름이나 위치가 바뀌었을 때(동기화가 폴더 변경을 봤을 때) 캐시를 비운다. */
+/** Clears the cache when a folder name or location changes (when the sync sees a folder change). */
 export function clearFolderMetaCache(): void {
   _folderMeta.clear();
 }

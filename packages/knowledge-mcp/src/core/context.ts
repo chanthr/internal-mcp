@@ -1,30 +1,30 @@
 /**
- * AsyncLocalStorage 기반 request-scoped AuthContext.
+ * Request-scoped AuthContext, based on AsyncLocalStorage.
  *
- * HTTP transport 에선 per-request 마다 다른 사용자가 호출 →
- * Express middleware 에서 authStore.run() 안에 transport.handleRequest() 감싸면
- * tool handler 가 getAuth() 로 현재 호출자 확인 가능.
+ * On the HTTP transport a different user may call on each request, so
+ * the Express middleware wraps transport.handleRequest() in authStore.run(), and
+ * a tool handler can then identify the current caller with getAuth().
  *
- * stdio transport 에선 한 프로세스 = 한 사용자라 setProcessAuth() 로 프로세스 전체 값을 둔다.
- * (enterWith 는 그 뒤에 생기는 비동기 작업에만 전파되고, stdin 핸들은 그 전에 만들어져
- *  도구 호출 콜백에서 getStore() 가 비어 모든 호출이 거부됐다.)
+ * On the stdio transport one process = one user, so setProcessAuth() sets a process-wide value.
+ * (enterWith only propagates to async work created after it, and the stdin handle is created before that,
+ *  so getStore() was empty in tool call callbacks and every call was rejected.)
  */
 import { AsyncLocalStorage } from 'async_hooks';
 import type { AuthContext } from './auth.js';
 
 export const authStore = new AsyncLocalStorage<AuthContext>();
 
-// stdio 전용 프로세스 단위 인증. HTTP 에서는 설정하지 않는다(요청마다 authStore.run).
+// Process-wide auth for stdio only. Not set on HTTP (authStore.run per request).
 let _processAuth: AuthContext | undefined;
 
-/** stdio 시작 시 1회 — 이 프로세스의 모든 도구 호출이 이 인증으로 처리된다. */
+/** Called once when stdio starts: every tool call in this process is handled with this auth. */
 export function setProcessAuth(auth: AuthContext): void {
   _processAuth = auth;
 }
 
 /**
- * 현재 request 의 AuthContext 반환. 없거나 ok=false 면 throw.
- * Tool handler 안에서 호출.
+ * Returns the AuthContext of the current request. Throws if it is missing or ok=false.
+ * Call it inside a tool handler.
  */
 export function getAuth(): AuthContext {
   const auth = authStore.getStore() ?? _processAuth;
@@ -35,7 +35,7 @@ export function getAuth(): AuthContext {
 }
 
 /**
- * 옵션: ok 여부 무관하게 반환. middleware error response 생성 시 사용.
+ * Optional: returns it whether ok or not. Used when building a middleware error response.
  */
 export function getAuthMaybe(): AuthContext | undefined {
   return authStore.getStore() ?? _processAuth;

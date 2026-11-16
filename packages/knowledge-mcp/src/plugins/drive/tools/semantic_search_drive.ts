@@ -1,16 +1,17 @@
 /**
- * semantic_search_drive — 자연어 질의 → Qdrant vector search → top-K chunks.
+ * semantic_search_drive: natural-language query → Qdrant vector search → top-K chunks.
  *
  * Pipeline:
  *   1. embed query (OpenAI text-embedding-3-small, 1536d)
  *   2. Qdrant search (Cosine, optional payload filter)
- *   3. rerank: config drive.rank 규칙(경로 접두별 가중치)과 frontmatter status(superseded, parked 강등)
- *   4. 제외 폴더와 직원별 폴더 범위로 거른 뒤 markdown 으로 포맷 (Drive 링크 포함)
+ *   3. rerank: config drive.rank rules (weights per path prefix) and frontmatter status (superseded and parked are demoted)
+ *   4. filter by excluded folders and the per-user folder scope, then format as markdown (with Drive links)
  *
- * 예전엔 한 회사의 위키 구조(특정 폴더 이름별 "현황, 결정, 이력" 가중치)와 그 회사 예시가 코드에 박혀 있었다.
- * 이제 가중치는 설정(drive.rank)으로만 주고, 없으면 의미 점수 그대로 정렬한다.
+ * Formerly one company's wiki structure (weights for "status, decision, history" keyed by specific folder names) and that
+ * company's examples were hard-coded here. Now weights come only from config (drive.rank). Without them, results are
+ * sorted by the semantic score as is.
  *
- * Indexing 안 됐으면 `knowledge-mcp drive reindex` 안내.
+ * If nothing is indexed yet, the tool points to `knowledge-mcp drive reindex`.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -63,7 +64,8 @@ export const semanticSearchDriveTool = defineTool({
 const MAX_PER_DOC = Math.max(1, Number(process.env.SEMANTIC_MAX_PER_DOC ?? 2));
 
 export async function handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
-  // 외부 의존(OpenAI 임베딩·Qdrant) 실패를 도구 특화 graceful 에러로 — 예전엔 [fatal] 로만 떴다.
+  // Turn failures of external dependencies (OpenAI embeddings, Qdrant) into a tool-specific graceful error. Previously they
+  // only showed up as [fatal].
   try {
     return await _handleSemanticSearchDrive(args);
   } catch (e: unknown) {

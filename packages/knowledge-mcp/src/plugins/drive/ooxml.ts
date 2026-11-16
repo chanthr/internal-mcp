@@ -1,15 +1,17 @@
 /**
- * Word(.docx), PowerPoint(.pptx) 본문 텍스트 추출 — 의존성 없이 zip 과 XML 만 읽는다.
+ * Extracts body text from Word (.docx) and PowerPoint (.pptx) with no dependencies, reading only the zip and the XML.
  *
- * 왜 직접: 예전엔 docx 는 mammoth, pptx 는 officeparser 를 썼다. mammoth 최신판도 argparse → sprintf-js
- * (보안 권고)를, officeparser 7 은 취약한 pdfjs-dist 를, 8 은 OCR 엔진(tesseract.js)까지 끌어와 설치마다
- * 경고가 났다. 색인에 필요한 건 본문 텍스트뿐이라 zip 목록과 XML 의 글자 노드만 읽으면 된다.
+ * Why do it directly: docx used to go through mammoth and pptx through officeparser. Even the latest mammoth pulls in
+ * argparse → sprintf-js (security advisory), officeparser 7 pulls in a vulnerable pdfjs-dist, and 8 even pulls in an
+ * OCR engine (tesseract.js), so every install showed warnings. Indexing needs only the body text, so reading the zip
+ * listing and the text nodes of the XML is enough.
  *
- *   docx: word/document.xml 의 문단(<w:p>)마다 글자(<w:t>), 탭, 줄바꿈 → 문단 사이 빈 줄 (mammoth extractRawText 와 같은 모양)
- *   pptx: ppt/slides/slideN.xml 을 번호 순으로, 문단(<a:p>)마다 글자(<a:t>). 그 슬라이드의 SmartArt, 차트 글자와
- *         발표자 노트를 관계 파일(_rels)로 찾아 뒤에 붙인다
+ *   docx: in word/document.xml, text (<w:t>), tabs and line breaks per paragraph (<w:p>), with a blank line between
+ *         paragraphs (same shape as mammoth extractRawText)
+ *   pptx: ppt/slides/slideN.xml in number order, text (<a:t>) per paragraph (<a:p>). The SmartArt and chart text and
+ *         the speaker notes of that slide are found through the relationship file (_rels) and appended
  *
- * 압축 폭탄 방어: 항목 하나 MAX_ENTRY_BYTES, 합계 MAX_TOTAL_BYTES 를 넘으면 멈춘다.
+ * Zip bomb defense: stops when one entry exceeds MAX_ENTRY_BYTES or the total exceeds MAX_TOTAL_BYTES.
  */
 import { inflateRawSync } from 'node:zlib';
 
@@ -24,9 +26,9 @@ interface ZipEntry {
   localOffset: number;
 }
 
-/** Central directory 목록. ZIP64 는 Office 문서에 쓰이지 않아(4GB 미만) 다루지 않는다. */
+/** Central directory listing. ZIP64 is not handled because Office documents do not use it (under 4GB). */
 function listEntries(buf: Buffer): ZipEntry[] {
-  // End of central directory: 0x06054b50, 파일 끝에서 최대 64KB(주석) + 22바이트 안에 있다.
+  // End of central directory: 0x06054b50, located within the last 64KB (comment) + 22 bytes of the file at most.
   const min = Math.max(0, buf.length - 65_557);
   let eocd = -1;
   for (let i = buf.length - 22; i >= min; i--) {
@@ -149,7 +151,7 @@ export function pptxText(buf: Buffer): string {
         ...lines(parts.get(name)),
         ...targets.filter((t) => !t.includes('notesSlides/')).flatMap((t) => lines(parts.get(t))),
       ].join('\n');
-      // 노트 틀의 슬라이드 번호 자리(숫자만 있는 문단)는 뺀다
+      // Drop the slide number placeholder of the notes frame (a paragraph with digits only)
       const notes = lines(parts.get(notesPart))
         .filter((p) => !/^\d+$/.test(p.trim()))
         .join('\n');

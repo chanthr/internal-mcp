@@ -1,19 +1,19 @@
 /**
- * Slack Web API wrapper — read-only (대화 읽기 + 파일 다운로드).
+ * Slack Web API wrapper, read-only (reading conversations and downloading files).
  *
- * SDK(@slack/web-api) 없이 fetch 직접 호출 — 의존성 최소화.
+ * Calls fetch directly without the SDK (@slack/web-api), to keep dependencies minimal.
  *
- * 토큰 (용도별 분기, 서로 대신 쓰지 않음):
- *   - SLACK_USER_TOKEN (xoxp-…)  → search.messages / search.files 전용. 결과는 "봇이 멤버인 채널"로 거른다.
- *   - SLACK_BOT_TOKEN  (xoxb-…)  → conversations.* / files.* / users.list (봇이 채널 멤버여야 history 조회 가능).
- *   - SLACK_TOKEN                → 접두사(xoxp-/xoxb-)로 용도를 판별해, 비어 있는 쪽에만 쓴다.
- * user token 을 bot 자리에 쓰지 않는 이유: "봇이 볼 수 있는 범위"가 토큰 주인의 DM·비공개 채널로 넓어져
- * 모든 MCP 사용자에게 열린다.
+ * Tokens (split by purpose, never substituted for each other):
+ *   - SLACK_USER_TOKEN (xoxp-…)  → search.messages / search.files only. Results are filtered to bot-member channels.
+ *   - SLACK_BOT_TOKEN  (xoxb-…)  → conversations.* / files.* / users.list (history needs the bot to be a channel member).
+ *   - SLACK_TOKEN                → the prefix (xoxp-/xoxb-) decides its purpose, and it only fills the slot that is empty.
+ * Why a user token is never used in the bot slot: "what the bot can see" would widen to the token owner's DMs and
+ * private channels, and that would be open to every MCP user.
  *
- * 필요 OAuth scope (read-only):
+ * Required OAuth scopes (read-only):
  *   - User token : search:read
  *   - Bot token  : channels:history, groups:history, channels:read, groups:read, files:read, users:read
- *                  (DM 은 읽지 않으므로 im:history, mpim:history 는 필요 없다)
+ *                  (DMs are not read, so im:history and mpim:history are not needed)
  */
 
 const SLACK_API = 'https://slack.com/api';
@@ -27,27 +27,27 @@ export class SlackError extends Error {
   }
 }
 
-// 토큰 회전(rotation)을 켠 앱의 access token 은 "xoxe." 접두가 붙는다.
+// Access tokens of apps with token rotation enabled carry an "xoxe." prefix.
 const USER_TOKEN_RE = /^(xoxe\.)?xoxp-/;
 const BOT_TOKEN_RE = /^(xoxe\.)?xoxb-/;
 
 function pickToken(explicit: string | undefined, re: RegExp): string | undefined {
-  if (explicit) return re.test(explicit) ? explicit : undefined; // 잘못 넣은 토큰 종류는 쓰지 않는다
+  if (explicit) return re.test(explicit) ? explicit : undefined; // a token of the wrong kind is not used
   const common = process.env.SLACK_TOKEN;
   return common && re.test(common) ? common : undefined;
 }
 
-/** search.* 용 user token (xoxp). 없으면 undefined. */
+/** User token (xoxp) for search.*. undefined if absent. */
 export function slackUserToken(): string | undefined {
   return pickToken(process.env.SLACK_USER_TOKEN, USER_TOKEN_RE);
 }
 
-/** conversations.* / files.* 용 bot token (xoxb). 없으면 undefined. */
+/** Bot token (xoxb) for conversations.* / files.*. undefined if absent. */
 export function slackBotToken(): string | undefined {
   return pickToken(process.env.SLACK_BOT_TOKEN, BOT_TOKEN_RE);
 }
 
-/** 용도에 맞는 토큰 선택. 다른 종류 토큰으로 대신하지 않는다. */
+/** Picks the token for the given purpose. A token of another kind is never used as a substitute. */
 export function getSlackToken(kind: SlackTokenKind): string {
   if (kind === 'search') {
     const t = slackUserToken();
@@ -66,11 +66,11 @@ export function getSlackToken(kind: SlackTokenKind): string {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Slack Web API 호출. 응답 `ok=false` 면 SlackError throw.
- * params 는 application/x-www-form-urlencoded 로 전송 (Slack 권장 — 모든 메서드 호환).
- * 429(rate limit)·일시 timeout 은 `Retry-After` 존중해 재시도(기본 2회). search 는 Tier2 라 429 가
- * 잦고 병렬(mapLimit)이 이를 유발하는데, 백오프가 없으면 thread 확장이 조용히 "unavailable" 로
- * 오표기됐다 → 재시도로 신뢰성 확보.
+ * Calls the Slack Web API. Throws SlackError when the response has `ok=false`.
+ * params are sent as application/x-www-form-urlencoded (recommended by Slack, works with every method).
+ * 429 (rate limit) and transient timeouts are retried, honoring `Retry-After` (2 retries by default). search is Tier 2,
+ * so 429s are frequent and parallel calls (mapLimit) trigger them. Without backoff, thread expansion was silently
+ * mislabeled as "unavailable". Retrying makes it reliable.
  */
 export async function slackApi<T = any>(
   method: string,
@@ -97,8 +97,8 @@ export async function slackApi<T = any>(
         body: body.toString(),
         signal: ctrl.signal,
       });
-      clearTimeout(timeoutId); // fetch 완료 — 재시도 대기 중 타이머 오작동 방지
-      // 429: Retry-After(초) 만큼 대기 후 재시도 (상한 30s)
+      clearTimeout(timeoutId); // fetch finished: keep the timer from firing while waiting to retry
+      // 429: wait Retry-After (seconds), then retry (capped at 30s)
       if (resp.status === 429) {
         if (attempt < retries) {
           const ra = Math.min(Number(resp.headers.get('retry-after')) || 1, 30);
@@ -109,7 +109,7 @@ export async function slackApi<T = any>(
       }
       const json = (await resp.json()) as any;
       if (!json.ok) {
-        // 본문 ratelimited(드묾) 도 재시도
+        // Also retry on a ratelimited error in the body (rare)
         if (json.error === 'ratelimited' && attempt < retries) {
           await sleep(1000 * (attempt + 1));
           continue;
@@ -122,7 +122,7 @@ export async function slackApi<T = any>(
     } catch (e) {
       if (e instanceof SlackError) throw e;
       if (e instanceof Error && e.name === 'AbortError') {
-        // 일시 timeout — 짧게 대기 후 재시도, 소진 시 에러
+        // Transient timeout: wait briefly and retry, error once retries run out
         if (attempt < retries) {
           await sleep(500);
           continue;
@@ -136,13 +136,13 @@ export async function slackApi<T = any>(
   }
 }
 
-export { mapLimit } from '../../core/concurrency.js'; // 공용 위치(core/concurrency.ts)로 옮김. 도구들은 여기서 가져간다
+export { mapLimit } from '../../core/concurrency.js'; // moved to the shared core/concurrency.ts. Tools import it from here
 
-// 사용자 ID → 표시명 캐시 (분 단위로 거의 안 변함) — 여러 도구가 공유.
+// Cache of user ID → display name (rarely changes within minutes), shared by several tools.
 let _userMapCache: { map: Record<string, string>; expiresAt: number } | null = null;
-const USER_MAP_TTL_MS = Number(process.env.SLACK_USERMAP_TTL_MS ?? 300_000); // 5분
+const USER_MAP_TTL_MS = Number(process.env.SLACK_USERMAP_TTL_MS ?? 300_000); // 5 minutes
 
-/** users.list 로 ID→이름 맵 로드 (TTL 캐시). 실패해도 throw 안 함(이름 없으면 ID 그대로). */
+/** Loads the ID→name map with users.list (TTL cache). Never throws on failure (without a name, the ID is shown as is). */
 export async function loadSlackUserMap(): Promise<Record<string, string>> {
   const now = Date.now();
   if (_userMapCache && _userMapCache.expiresAt > now) return _userMapCache.map;
@@ -159,20 +159,21 @@ export async function loadSlackUserMap(): Promise<Record<string, string>> {
       if (!cursor) break;
     }
   } catch {
-    /* users:read scope 없으면 ID 그대로 — 치명적 아님 */
+    /* Without the users:read scope the ID is shown as is. Not fatal */
   }
   if (Object.keys(map).length > 0) _userMapCache = { map, expiresAt: now + USER_MAP_TTL_MS };
   return map;
 }
 
-// 봇이 멤버인 채널 id 집합 캐시 — 봇 초대/탈퇴는 드물어 TTL 캐시.
-// search 의 신뢰 경계(봇 멤버 = 허가된 채널)와 thread 확장 가능 여부 판정에 공유.
+// Cache of the IDs of channels the bot is a member of. Bot invites and removals are rare, so a TTL cache is enough.
+// Shared by the search trust boundary (bot member = permitted channel) and the check for whether a thread can be expanded.
 let _botMemberCache: { ids: Set<string>; expiresAt: number } | null = null;
-const BOT_MEMBER_TTL_MS = Number(process.env.SLACK_BOT_MEMBER_TTL_MS ?? 300_000); // 5분
+const BOT_MEMBER_TTL_MS = Number(process.env.SLACK_BOT_MEMBER_TTL_MS ?? 300_000); // 5 minutes
 
 /**
- * 봇이 멤버인 (공개+비공개) 채널 id 집합. DM·그룹DM 은 conversations.list 에 안 잡혀 자연 제외.
- * 실패 시 직전 캐시가 있으면 그대로, 없으면 빈 집합(fail-closed — 못 읽으면 노출 안 함).
+ * IDs of the (public + private) channels the bot is a member of. DMs and group DMs never appear in conversations.list,
+ * so they are excluded naturally. On failure, returns the previous cache if there is one, otherwise an empty set
+ * (fail-closed: if it cannot be read, nothing is exposed).
  */
 export async function loadBotMemberChannelIds(): Promise<Set<string>> {
   const now = Date.now();
@@ -194,7 +195,8 @@ export async function loadBotMemberChannelIds(): Promise<Set<string>> {
       if (!cursor) break;
     }
   } catch {
-    // 실패 시 직전 캐시 유지(만료됐어도) — 일시 장애로 검색을 통째 막지 않게. 캐시 없으면 빈 집합.
+    // On failure keep the previous cache (even if expired), so a transient outage does not block search entirely.
+    // With no cache, return an empty set.
     if (_botMemberCache) return _botMemberCache.ids;
     return ids;
   }
@@ -202,11 +204,11 @@ export async function loadBotMemberChannelIds(): Promise<Set<string>> {
   return ids;
 }
 
-// 채널 이름 → {id,name} 캐시 — 이름으로 채널 resolve 시 반복 conversations.list 순회 제거.
-// (slack_read_channel 이 매 호출 최대 10페이지 순차 조회하던 지연을 warmup 후 0콜로.)
+// Cache of channel name → {id,name}. Removes the repeated conversations.list paging when resolving a channel by name.
+// (slack_read_channel used to fetch up to 10 pages sequentially on every call. After warmup that is 0 calls.)
 let _channelNameCache: { byName: Map<string, { id: string; name: string }>; expiresAt: number } | null = null;
 
-/** 봇이 보는 (공개+비공개) 채널의 name→{id,name} 맵 (TTL 캐시). 실패 시 직전 캐시 유지 or 빈 맵. */
+/** name→{id,name} map of the (public + private) channels the bot can see (TTL cache). On failure: previous cache or empty map. */
 export async function loadChannelNameMap(): Promise<Map<string, { id: string; name: string }>> {
   const now = Date.now();
   if (_channelNameCache && _channelNameCache.expiresAt > now) return _channelNameCache.byName;
@@ -227,13 +229,13 @@ export async function loadChannelNameMap(): Promise<Map<string, { id: string; na
       if (!cursor) break;
     }
   } catch {
-    if (_channelNameCache) return _channelNameCache.byName; // 일시 장애 — 직전 캐시로 버팀
+    if (_channelNameCache) return _channelNameCache.byName; // transient outage: fall back to the previous cache
   }
   if (byName.size > 0) _channelNameCache = { byName, expiresAt: now + BOT_MEMBER_TTL_MS };
   return byName;
 }
 
-/** 텍스트로 인라인 표시할 mimetype 인지 (그 외는 메타+URL 만). */
+/** Whether the mimetype is shown inline as text (anything else gets metadata + URL only). */
 export function isTextualMime(mimetype: string | undefined, filetype: string | undefined): boolean {
   const m = (mimetype ?? '').toLowerCase();
   if (m.startsWith('text/')) return true;
@@ -247,8 +249,8 @@ export function isTextualMime(mimetype: string | undefined, filetype: string | u
 }
 
 /**
- * Slack 파일 본문 다운로드. url_private_download 에 Bearer 인증 필요.
- * 텍스트면 string, 바이너리면 byte 길이만 반환 (MCP text 채널 한계).
+ * Downloads the content of a Slack file. url_private_download requires Bearer auth.
+ * Returns a string for text, and only the byte length for binary (limit of the MCP text channel).
  */
 export async function downloadSlackFile(
   urlPrivate: string,
@@ -267,7 +269,8 @@ export async function downloadSlackFile(
     if (!resp.ok) {
       throw new SlackError(`File download failed: HTTP ${resp.status}`);
     }
-    // maxBytes 까지만 읽고 끊는다. 예전엔 파일 전체를 메모리에 올린 뒤 잘라, 큰 .log 하나가 서버 메모리를 채울 수 있었다.
+    // Read only up to maxBytes, then stop. This used to load the whole file into memory before truncating, so one large .log
+    // could fill the server's memory.
     const declared = Number(resp.headers.get('content-length') ?? NaN);
     if (!opts.asText) {
       await resp.body?.cancel().catch(() => undefined);
