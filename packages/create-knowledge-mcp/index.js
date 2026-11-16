@@ -75,7 +75,7 @@ export function scaffold(target, { name, coreSpec }) {
     if (existsSync(join(target, from))) renameSync(join(target, from), join(target, to));
   }
   const vars = { NAME: name, CORE_SPEC: coreSpec, VERSION };
-  for (const f of ['package.json', 'README.md']) fill(join(target, f), vars);
+  for (const f of ['package.json', 'README.md', 'AGENTS.md', 'CLAUDE.md']) fill(join(target, f), vars);
   if (!existsSync(join(target, '.env'))) cpSync(join(target, '.env.example'), join(target, '.env'));
 }
 
@@ -138,6 +138,9 @@ ${bold('Next')}
   cd ${dir}
   ${runScript} setup                                ${dim('# connect services: asks, checks, writes .env. Run it again any time')}
   ${runScript} dev                                  ${dim('# http://localhost:8080/mcp, reloads on save')}
+
+${bold('Let an AI agent set it up')}
+  Open this folder in Claude Code (or another agent) and say: "set this server up, follow AGENTS.md"
 
 ${bold('Add a tool')}
   Copy src/plugins/notes.ts to src/plugins/<name>.ts and edit it. Every file there is loaded.

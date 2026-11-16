@@ -14,6 +14,11 @@ import { join } from 'node:path';
 const { runSetup, parseSelection } = await import('../src/setup/wizard.js');
 const { updateEnvFile, readEnvKeys, formatEnvValue } = await import('../src/setup/envfile.js');
 const { checkEmbedding, checkSlack, checkGithub, checkRailway } = await import('../src/setup/checks.js');
+const auto = await import('../src/setup/auto.js');
+type Exec = import('../src/setup/auto.js').Exec;
+
+/** No CLI installed: every command fails like a missing binary. */
+const noTools: Exec = () => ({ status: 127, stdout: '', stderr: 'not found' });
 
 // One fake for Slack, GitHub, Railway and an embedding endpoint. "good-*" tokens pass.
 const server = createServer((req, res) => {
@@ -111,6 +116,7 @@ test('wizard: a rejected token is retried, skipped services write nothing, the a
     endpoints: { slack: `${base}/slack`, github: `${base}/github`, railway: `${base}/railway` },
     createAdmin: async (email) => (admins.push(email), { key: 'kmcp_test_key', existed: false }),
     canRunClient: false,
+    exec: noTools,
     serveCommand: ['node', '/app/dist/server.js', 'serve', '--stdio'],
   });
   assert.deepEqual(r.connected, ['slack', 'railway']);
@@ -129,7 +135,166 @@ test('wizard: a rejected token is retried, skipped services write nothing, the a
 test('wizard: nothing picked saves nothing and says how to come back', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
   const s = scripted(['']);
-  const r = await runSetup(s.io, { dir, canRunClient: false });
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
   assert.deepEqual(r, { envWritten: [], configWritten: false, connected: [], adminEmail: null });
   assert.match(s.said.join('\n'), /Nothing to save[\s\S]*Run `knowledge-mcp setup` again any time/);
+});
+
+/** A fake gcloud and gh. Records every call; `fail` makes one gcloud step fail with the given stderr. */
+function fakeCli(o: { account?: string; fail?: { match: string; stderr: string }; saExists?: boolean; gh?: string } = {}) {
+  const calls: string[] = [];
+  const exec: Exec = (cmd, args) => {
+    const line = `${cmd} ${args.join(' ')}`;
+    calls.push(line);
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    if (args[0] === '--version') return cmd === 'gcloud' || (cmd === 'gh' && o.gh) ? ok('1.0') : { status: 127, stdout: '', stderr: '' };
+    if (cmd === 'gh' && line === 'gh auth token') return o.gh ? ok(`${o.gh}\n`) : { status: 1, stdout: '', stderr: 'not logged in' };
+    if (cmd !== 'gcloud') return { status: 127, stdout: '', stderr: '' };
+    if (o.fail && line.includes(o.fail.match)) return { status: 1, stdout: '', stderr: o.fail.stderr };
+    if (line.startsWith('gcloud auth list')) return ok(o.account === undefined ? 'me@acme.com\n' : o.account);
+    if (line.startsWith('gcloud projects list')) return ok(JSON.stringify([{ projectId: 'acme-prod', name: 'Acme' }, { projectId: 'acme-lab', name: 'acme-lab' }]));
+    if (line.startsWith('gcloud config get-value project')) return ok('acme-lab\n');
+    if (line.includes('service-accounts describe')) return o.saExists ? ok('x') : { status: 1, stdout: '', stderr: 'NOT_FOUND' };
+    return ok();
+  };
+  return { exec, calls };
+}
+
+test('gcloud: the plan lists the exact commands, and the account gets no role', () => {
+  const plan = { project: 'acme-lab', name: 'knowledge-mcp-drive', keyPath: '/tmp/k.json' };
+  assert.equal(auto.serviceAccountEmail(plan), 'knowledge-mcp-drive@acme-lab.iam.gserviceaccount.com');
+  const cmds = auto.serviceAccountCommands(plan).map((c) => c.join(' '));
+  assert.equal(cmds.length, 3);
+  assert.match(cmds[0], /^gcloud services enable drive\.googleapis\.com --project=acme-lab$/);
+  assert.match(cmds[2], /keys create \/tmp\/k\.json --iam-account=knowledge-mcp-drive@acme-lab\.iam\.gserviceaccount\.com/);
+  assert.ok(!cmds.some((c) => /add-iam-policy-binding|roles\//.test(c)), 'no role is granted');
+});
+
+test('gcloud: creates the account once, reuses an existing one, and explains a blocked key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-gc-'));
+  const plan = { project: 'acme-lab', name: 'knowledge-mcp-drive', keyPath: join(dir, 'k.json') };
+  const fresh = fakeCli();
+  assert.deepEqual(auto.createDriveServiceAccount(fresh.exec, plan), { email: 'knowledge-mcp-drive@acme-lab.iam.gserviceaccount.com', created: true });
+  assert.ok(fresh.calls.some((c) => c.includes('service-accounts create knowledge-mcp-drive')));
+  const again = fakeCli({ saExists: true });
+  assert.equal(auto.createDriveServiceAccount(again.exec, plan).created, false);
+  assert.ok(!again.calls.some((c) => c.includes('service-accounts create')));
+  const blocked = fakeCli({ fail: { match: 'keys create', stderr: 'ERROR: (gcloud.iam.service-accounts.keys.create) FAILED_PRECONDITION: Key creation is not allowed on this service account.\n- constraints/iam.disableServiceAccountKeyCreation' } });
+  assert.throws(() => auto.createDriveServiceAccount(blocked.exec, plan), /organization blocks service account keys/);
+  const noBilling = fakeCli({ fail: { match: 'services enable', stderr: 'ERROR: Billing account for project is not found.' } });
+  assert.throws(() => auto.createDriveServiceAccount(noBilling.exec, plan), /no billing account/);
+  assert.throws(() => auto.createDriveServiceAccount(fresh.exec, { ...plan, name: 'Bad Name' }), /6-30 characters/);
+  writeFileSync(plan.keyPath, '{}');
+  assert.throws(() => auto.createDriveServiceAccount(fresh.exec, plan), /already exists/);
+});
+
+test('wizard + gcloud: shows the commands, creates nothing without a yes, and falls back to a key file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const cli = fakeCli();
+  const s = scripted([
+    'drive', // which services
+    '1', // create with gcloud
+    '2', // project number → acme-lab
+    'n', // do not create
+    '', // key file path: skip
+  ]);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: cli.exec, retryDelayMs: 0 });
+  const text = s.said.join('\n');
+  assert.match(text, /Signed in to Google Cloud as me@acme\.com/);
+  assert.match(text, /2\. acme-lab  \[current\]/);
+  assert.match(text, /gcloud iam service-accounts keys create .*drive-service-account\.json --iam-account=knowledge-mcp-drive@acme-lab/);
+  assert.match(text, /gets no project role/);
+  assert.ok(!cli.calls.some((c) => /services enable|service-accounts create|keys create/.test(c)), 'nothing was created');
+  assert.deepEqual(r.connected, []);
+  assert.equal(s.left.length, 0);
+});
+
+test('wizard + gcloud: a signed-out gcloud is explained, then the key file path is asked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const s = scripted(['1', '1', '', '']);
+  await runSetup(s.io, { dir, canRunClient: false, exec: fakeCli({ account: '' }).exec, retryDelayMs: 0 });
+  const text = s.said.join('\n');
+  assert.match(text, /gcloud is not signed in[\s\S]*gcloud auth login/);
+  assert.match(text, /Path to the key file/);
+});
+
+test('wizard + gh: the gh login is offered with a warning and only used after a yes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const s = scripted(['github', 'y']);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: fakeCli({ gh: 'good-gh-token' }).exec, endpoints: { github: `${base}/github` } });
+  assert.deepEqual(r.envWritten, ['GITHUB_PAT']);
+  assert.match(readFileSync(join(dir, '.env'), 'utf8'), /GITHUB_PAT=good-gh-token/);
+  const text = s.said.join('\n');
+  assert.match(text, /can do everything your gh login can/);
+  assert.ok(!text.includes('good-gh-token'));
+
+  const s2 = scripted(['github', 'n', '']);
+  const r2 = await runSetup(s2.io, { dir: mkdtempSync(join(tmpdir(), 'kmcp-setup-')), canRunClient: false, exec: fakeCli({ gh: 'good-gh-token' }).exec, endpoints: { github: `${base}/github` } });
+  assert.deepEqual(r2.envWritten, []);
+});
+
+const { runSetupCommand } = await import('../src/setup/commands.js');
+function collect() {
+  const lines: string[] = [];
+  return { lines, out: (l: string) => void lines.push(l) };
+}
+
+test('setup check: verifies what is configured, reports what is not, exit code follows failures', async () => {
+  const endpoints = { slack: `${base}/slack`, github: `${base}/github`, railway: `${base}/railway` };
+  const ok = collect();
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0);
+  assert.match(ok.lines.join('\n'), /✓ slack\s+Acme as kbot[\s\S]*✓ github\s+signed in as octo/);
+  assert.match(ok.lines.join('\n'), /✓ embeddings\s+bge-m3 \(1024 dimensions\)/);
+  assert.match(ok.lines.join('\n'), /· drive\s+not configured/);
+  const bad = collect();
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: bad.out, endpoints, env: { SLACK_BOT_TOKEN: 'expired', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '768' } }), 1);
+  assert.match(bad.lines.join('\n'), /✗ slack\s+Slack: the token was rejected/);
+  assert.match(bad.lines.join('\n'), /returns 1024-dimension vectors but EMBEDDING_DIM is 768/);
+  const none = collect();
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: none.out, env: {} }), 0);
+  assert.match(none.lines.join('\n'), /Nothing is configured yet/);
+});
+
+test('setup drive --gcloud: prints the plan and creates nothing without --yes; says who must sign in', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const cli = fakeCli();
+  const plan = collect();
+  assert.equal(await runSetupCommand(['drive', '--gcloud', '--project', 'acme-prod'], { dir, out: plan.out, exec: cli.exec }), 2);
+  assert.match(plan.lines.join('\n'), /Project: acme-prod[\s\S]*keys create[\s\S]*Nothing was created[\s\S]*--yes/);
+  assert.ok(!cli.calls.some((c) => /services enable|keys create/.test(c)));
+  const out = collect();
+  assert.equal(await runSetupCommand(['drive', '--gcloud'], { dir, out: out.out, exec: fakeCli({ account: '' }).exec }), 1);
+  assert.match(out.lines.join('\n'), /gcloud is not signed in[\s\S]*gcloud auth login/);
+  const missing = collect();
+  assert.equal(await runSetupCommand(['drive', '--gcloud'], { dir, out: missing.out, exec: noTools }), 1);
+  assert.match(missing.lines.join('\n'), /gcloud CLI is not installed/);
+});
+
+test('setup drive --gcloud --yes: runs the three steps and saves the key path', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const cli = fakeCli();
+  const o = collect();
+  assert.equal(await runSetupCommand(['drive', '--gcloud', '--yes'], { dir, out: o.out, exec: cli.exec, retryDelayMs: 0 }), 0);
+  const made = cli.calls.filter((c) => /services enable|service-accounts create|keys create/.test(c));
+  assert.equal(made.length, 3);
+  assert.ok(made.every((c) => c.includes('--project=acme-lab')), 'uses the project gcloud is set to');
+  assert.match(readFileSync(join(dir, '.env'), 'utf8'), /GOOGLE_APPLICATION_CREDENTIALS=.*drive-service-account\.json/);
+  assert.match(o.lines.join('\n'), /Created knowledge-mcp-drive@acme-lab\.iam\.gserviceaccount\.com[\s\S]*share a Drive folder or document with/);
+});
+
+test('setup github --from-gh and setup embeddings: saved only after the live check passes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const o = collect();
+  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir, out: o.out, exec: fakeCli({ gh: 'good-gh' }).exec, endpoints: { github: `${base}/github` } }), 0);
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3'], { dir, out: o.out, env: {} }), 0);
+  const env = readFileSync(join(dir, '.env'), 'utf8');
+  assert.match(env, /GITHUB_PAT=good-gh\n/);
+  assert.match(env, /EMBEDDING_MODEL=bge-m3\nEMBEDDING_DIM=1024\n/);
+  assert.ok(!o.lines.join('\n').includes('good-gh'), 'the token is not printed');
+  const dir2 = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const bad = collect();
+  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir: dir2, out: bad.out, exec: fakeCli({ gh: 'expired' }).exec, endpoints: { github: `${base}/github` } }), 1);
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/nowhere`, '--model', 'x'], { dir: dir2, out: bad.out, env: {} }), 1);
+  assert.equal(await runSetupCommand(['nope'], { dir: dir2, out: bad.out }), 2);
+  assert.throws(() => readFileSync(join(dir2, '.env'), 'utf8'), /ENOENT/);
 });

@@ -11,7 +11,19 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checkDrive, checkEmbedding, checkGithub, checkRailway, checkSlack } from './checks.js';
+import { checkDrive, checkEmbedding, checkGithub, checkRailway, checkSlack, type DriveCheck } from './checks.js';
+import {
+  createDriveServiceAccount,
+  gcloudAccount,
+  gcloudDefaultProject,
+  gcloudProjects,
+  ghToken,
+  hasTool,
+  serviceAccountCommands,
+  serviceAccountEmail,
+  systemExec,
+  type Exec,
+} from './auto.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
 
 export interface SetupIO {
@@ -33,6 +45,10 @@ export interface SetupOptions {
   serveCommand?: string[];
   /** Run `claude mcp add` when the user agrees. Tests turn this off. */
   canRunClient?: boolean;
+  /** Runs the gcloud and gh CLIs. Tests pass a fake. */
+  exec?: Exec;
+  /** Pause between attempts while a new key becomes valid. Tests set 0. */
+  retryDelayMs?: number;
 }
 
 export interface SetupResult {
@@ -100,6 +116,58 @@ function readConfig(path: string): Record<string, any> {
   }
 }
 
+/**
+ * Create the Drive service account and key with the signed-in gcloud CLI. Shows the exact commands and asks before
+ * anything is created in the user's cloud project. Returns the key path, or null when the user backs out or a step
+ * fails (the caller then falls back to asking for a key file).
+ */
+async function driveKeyWithGcloud(io: SetupIO, exec: Exec, dir: string): Promise<string | null> {
+  let account = gcloudAccount(exec);
+  if (!account) {
+    io.say('  gcloud is not signed in. In another terminal run:  gcloud auth login');
+    await io.ask('  Press Enter when you are signed in (or Enter now to use a key file instead):', '');
+    account = gcloudAccount(exec);
+    if (!account) return null;
+  }
+  io.say(`  Signed in to Google Cloud as ${account}.`);
+  let projects;
+  try {
+    projects = gcloudProjects(exec);
+  } catch (e) {
+    io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+  if (projects.length === 0) {
+    io.say('  This account has no Google Cloud project. Create one first:  gcloud projects create <id>');
+    return null;
+  }
+  const preset = gcloudDefaultProject(exec);
+  const shown = projects.slice(0, 15);
+  io.say('  Which project should hold the service account?');
+  shown.forEach((p, i) => io.say(`    ${i + 1}. ${p.id}${p.name !== p.id ? `  (${p.name})` : ''}${p.id === preset ? '  [current]' : ''}`));
+  if (projects.length > shown.length) io.say(`    … ${projects.length - shown.length} more: type the project id`);
+  const fallback = preset && projects.some((p) => p.id === preset) ? preset : shown[0].id;
+  const answer = await io.ask(`  Number or project id (Enter for ${fallback}):`, fallback);
+  const project = /^\d+$/.test(answer) ? shown[Number(answer) - 1]?.id : projects.find((p) => p.id === answer)?.id;
+  if (!project) {
+    io.say('  ✗ That is not one of the projects.');
+    return null;
+  }
+  const plan = { project, name: 'knowledge-mcp-drive', keyPath: join(dir, 'drive-service-account.json') };
+  io.say('  This will run:');
+  for (const c of serviceAccountCommands(plan)) io.say(`    ${c.join(' ')}`);
+  io.say(`  The account ${serviceAccountEmail(plan)} gets no project role. It can only read what you share with it in Drive.`);
+  if (!yes(await io.ask('  Create it now? (y/N)', 'n'))) return null;
+  try {
+    const r = createDriveServiceAccount(exec, plan);
+    io.say(`  ✓ ${r.created ? 'Created' : 'Reused'} ${r.email}, key saved to ${plan.keyPath}`);
+    return plan.keyPath;
+  } catch (e) {
+    io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
+
 export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<SetupResult> {
   const dir = resolve(opts.dir ?? process.cwd());
   const envPath = join(dir, '.env');
@@ -126,16 +194,52 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     io.say('Google Drive');
     io.say('  You need a service account key file (JSON). In Google Cloud: IAM & Admin → Service Accounts → create one →');
     io.say('  Keys → Add key → JSON. Also enable the "Google Drive API" for that project.');
-    const got = await askChecked(
-      io,
-      () => io.ask('  Path to the key file (you can drag the file into the terminal):', ''),
-      (p) => checkDrive(resolve(dir, p.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ')), { apiBase: opts.endpoints?.drive }),
-      (d) => (d.email ? `signed in as ${d.email}` : 'signed in with a refresh token'),
-    );
-    if (got) {
-      env.GOOGLE_APPLICATION_CREDENTIALS = resolve(dir, got.value.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' '));
+    const exec = opts.exec ?? systemExec;
+    let keyPath: string | null = null;
+    let found: DriveCheck | null = null;
+    if (hasTool(exec, 'gcloud')) {
+      io.say('  The gcloud CLI is installed, so this can be done for you:');
+      io.say('    1. Create the service account and key with gcloud (you only sign in)');
+      io.say('    2. I already have a key file');
+      if ((await io.ask('  Choose 1 or 2:', '1')) === '1') keyPath = await driveKeyWithGcloud(io, exec, dir);
+    } else {
+      io.say('  Tip: with the gcloud CLI installed (cloud.google.com/sdk), setup can create the key for you.');
+    }
+    if (keyPath) {
+      // A key that was created a moment ago can be refused for a few seconds.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          found = await checkDrive(keyPath, { apiBase: opts.endpoints?.drive });
+          io.say(`  ✓ signed in as ${found.email}`);
+          break;
+        } catch (e) {
+          if (attempt >= 6) {
+            io.say(`  ✗ The new key does not work yet: ${e instanceof Error ? e.message : String(e)}`);
+            io.say('    It is saved. Run `knowledge-mcp setup check` in a minute.');
+            break;
+          }
+          await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 4000));
+        }
+      }
+    } else {
+      const cleanPath = (p: string) => resolve(dir, p.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' '));
+      const got = await askChecked(
+        io,
+        () => io.ask('  Path to the key file (you can drag the file into the terminal):', ''),
+        (p) => checkDrive(cleanPath(p), { apiBase: opts.endpoints?.drive }),
+        (d) => (d.email ? `signed in as ${d.email}` : 'signed in with a refresh token'),
+      );
+      if (got) {
+        keyPath = cleanPath(got.value);
+        found = got.found;
+      }
+    }
+    if (keyPath) {
+      env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
       connected.push('drive');
-      const { shared, more, email } = got.found;
+    }
+    if (keyPath && found) {
+      const { shared, more, email } = found;
       if (shared.length === 0) {
         io.say('  Nothing is shared with this account yet.');
         if (email) io.say(`  Share a folder or a document with ${email} (Viewer) and it becomes searchable. No restart needed.`);
@@ -226,8 +330,24 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   if (picked.includes('github')) {
     io.say();
     io.say('GitHub');
-    io.say('  You need a token with read access to the repositories (fine-grained: Contents → Read-only).');
-    const got = await askChecked(
+    const exec = opts.exec ?? systemExec;
+    let fromGh: string | null = null;
+    const gh = hasTool(exec, 'gh') ? ghToken(exec) : null;
+    if (gh) {
+      io.say('  The gh CLI is signed in. Its token can be reused, but it can do everything your gh login can (including');
+      io.say('  writing). This server only reads, yet a fine-grained read-only token is the safer choice.');
+      if (yes(await io.ask('  Use the gh login? (y/N)', 'n'))) {
+        try {
+          const r = await checkGithub(gh, { apiBase: opts.endpoints?.github });
+          io.say(`  ✓ signed in as ${r.login}`);
+          fromGh = gh;
+        } catch (e) {
+          io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+    if (!fromGh) io.say('  You need a token with read access to the repositories (fine-grained: Contents → Read-only).');
+    const got = fromGh ? { value: fromGh } : await askChecked(
       io,
       () => io.secret('  Token:'),
       (t) => checkGithub(t, { apiBase: opts.endpoints?.github }),

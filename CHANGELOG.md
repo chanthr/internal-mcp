@@ -27,6 +27,12 @@ Changes that affect people who run or extend the server. Dates are release dates
   service as it is entered (Drive shows what is shared with the account, the embedding size is read from the
   endpoint), writes `.env` and `mcp.config.json`, creates the admin key and offers to add the server to Claude
   Code. `create-knowledge-mcp` runs it after install. No file has to be edited by hand.
+- **Sign in instead of clicking through consoles.** With the gcloud CLI, setup creates the Drive service account,
+  enables the Drive API and downloads the key (it shows the commands and asks first). With the gh CLI signed in,
+  it can reuse that login.
+- **Setup for scripts and AI agents.** `setup check` verifies every configured service live. `setup drive --gcloud`,
+  `setup drive --key`, `setup github --from-gh` and `setup embeddings` ask nothing and never take a secret as an
+  argument. A generated project includes `AGENTS.md`, a setup guide an agent can follow.
 - **Semantic search without a vector database.** Vectors are stored in `<data dir>/vectors.db` when `QDRANT_URL`
   is not set, so an embedding key is the only thing to supply. Qdrant stays available for larger indexes.
 - **The first index builds itself.** The server indexes Drive the first time it starts with an empty index.

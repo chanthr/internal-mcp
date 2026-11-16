@@ -54,6 +54,10 @@ to Claude Code. Nothing is edited by hand, and you can run it again any time:
 npm run setup
 ```
 
+Or let an AI agent do it. The project includes [`AGENTS.md`](packages/create-knowledge-mcp/template/AGENTS.md), a setup
+guide for agents: open the folder in Claude Code and say "set this server up, follow AGENTS.md". The agent runs the
+setup commands, asks before creating anything in your accounts, and never handles your secrets.
+
 The project comes with an example plugin, `src/plugins/notes.ts`. Point a client at
 `http://localhost:8080/mcp` with `Authorization: Bearer <key>` and you will see `notes_add` and `notes_list`.
 
@@ -223,7 +227,10 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 
 | Command | What it does |
 | --- | --- |
-| `setup` | Guided setup: connect Drive, Slack, GitHub and Railway, check every value live, write `.env` and the config, create the admin key. Safe to run again |
+| `setup` | Guided setup: connect Drive, Slack, GitHub and Railway, check every value live, write `.env` and the config, create the admin key. With gcloud installed it creates the Drive service account for you; with gh signed in it can reuse that login. Safe to run again |
+| `setup check` | Verifies every configured service against the real thing. Exit code 1 on a failure |
+| `setup drive --gcloud [--project ID] [--yes]` | Creates the Drive service account and key with the gcloud CLI. Prints its plan and creates nothing without `--yes` |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |

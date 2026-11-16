@@ -54,6 +54,10 @@ npm run dev                                                   # http://localhost
 npm run setup
 ```
 
+AI 에이전트에게 맡겨도 됩니다. 프로젝트에 에이전트용 설정 안내서 [`AGENTS.md`](packages/create-knowledge-mcp/template/AGENTS.md)가
+들어 있습니다. 폴더를 Claude Code로 열고 "AGENTS.md를 따라 이 서버를 설정해 줘"라고 하면 됩니다. 에이전트는 설정 명령을
+실행하고, 계정에 무언가를 만들기 전에 묻고, 비밀값은 다루지 않습니다.
+
 프로젝트에는 예시 플러그인 `src/plugins/notes.ts`가 들어 있습니다. 클라이언트를 `http://localhost:8080/mcp`에
 `Authorization: Bearer <키>`로 연결하면 `notes_add`와 `notes_list`가 보입니다.
 
@@ -223,7 +227,10 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 명령 | 하는 일 |
 | --- | --- |
-| `setup` | 안내형 설정. Drive, Slack, GitHub, Railway를 연결하고, 값마다 바로 확인하고, `.env`와 설정 파일을 쓰고, 관리자 키를 만듭니다. 다시 실행해도 안전합니다 |
+| `setup` | 안내형 설정. Drive, Slack, GitHub, Railway를 연결하고, 값마다 바로 확인하고, `.env`와 설정 파일을 쓰고, 관리자 키를 만듭니다. gcloud가 있으면 Drive 서비스 계정을 대신 만들고, gh에 로그인돼 있으면 그 로그인을 쓸 수 있습니다. 다시 실행해도 안전합니다 |
+| `setup check` | 설정된 서비스마다 실제로 붙어 확인합니다. 실패가 있으면 종료 코드 1 |
+| `setup drive --gcloud [--project ID] [--yes]` | gcloud로 Drive 서비스 계정과 키를 만듭니다. 계획을 먼저 보여 주고, `--yes` 없이는 아무것도 만들지 않습니다 |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다 |
 | `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
 | `keys list` / `keys revoke <id>` | 키 목록을 봅니다(키 값은 나오지 않음). 또는 키 하나를 끕니다 |

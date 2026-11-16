@@ -47,7 +47,12 @@ export async function checkDrive(credentialsPath: string, opts: { apiBase?: stri
   } catch (e) {
     throw new Error(`Drive: cannot read ${credentialsPath} (${e instanceof Error ? e.message : String(e)})`);
   }
-  const creds = credentialsFromJson(raw, credentialsPath);
+  return checkDriveCredentials(raw, credentialsPath, opts);
+}
+
+/** The same check for credentials that are already in memory (an inline GOOGLE_SERVICE_ACCOUNT_KEY). */
+export async function checkDriveCredentials(raw: string, source: string, opts: { apiBase?: string; limit?: number } = {}): Promise<DriveCheck> {
+  const creds = credentialsFromJson(raw, source);
   const drive = opts.apiBase ? createDriveClient(creds, opts.apiBase) : createDriveClient(creds);
   const limit = opts.limit ?? 20;
   const res = await drive.files.list({

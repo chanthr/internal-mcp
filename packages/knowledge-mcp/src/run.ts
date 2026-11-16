@@ -47,6 +47,10 @@ const HELP = `Knowledge MCP ${VERSION}
 Usage: knowledge-mcp <command> [options]
 
   setup                               Guided setup: connect services, check them, write .env and the config
+  setup check                         Verify every configured service live (exit 1 on a failure)
+  setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
+  setup github --from-gh | setup embeddings --base-url URL --model NAME
+                                      Setup steps that ask nothing (for scripts and AI agents)
   serve [--stdio]                     Start the server (HTTP on $PORT, default 8080)
   keys create [--email E] [--role R] [--label L] [--expires 90d]
                                       Create an API key and print it once
@@ -249,9 +253,18 @@ function stdioCommand(dir: string): string[] {
   return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
 }
 
-async function cmdSetup(): Promise<void> {
+async function cmdSetup(argv: string[]): Promise<void> {
+  if (argv.length > 0) {
+    // Commands that ask nothing: for scripts and for AI agents (see AGENTS.md in a generated project).
+    const { runSetupCommand } = await import('./setup/commands.js');
+    process.exitCode = await runSetupCommand(argv, { dir: process.cwd(), out });
+    return;
+  }
   if (!process.stdin.isTTY) {
-    throw new UsageError('setup asks questions, so it needs a terminal. In CI or Docker set the env vars instead (see .env.example).');
+    throw new UsageError(
+      'setup asks questions, so it needs a terminal. Without one use the commands that ask nothing: ' +
+        'setup check | setup drive --gcloud | setup drive --key <file> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
+    );
   }
   const { runSetup } = await import('./setup/wizard.js');
   const { terminalIO } = await import('./setup/terminal.js');
@@ -293,7 +306,7 @@ export async function run(opts: RunOptions = {}): Promise<void> {
   try {
     if (cmd === 'help' || cmd === '--help' || cmd === '-h') return out(HELP);
     if (cmd === 'version' || cmd === '--version' || cmd === '-v') return out(VERSION);
-    if (cmd === 'setup') return await cmdSetup();
+    if (cmd === 'setup') return await cmdSetup(rest);
     if (cmd === 'keys') return await cmdKeys(rest);
     if (cmd === 'users') return await cmdUsers(rest);
     const registry = new Registry(opts.plugins ?? builtinPlugins);
