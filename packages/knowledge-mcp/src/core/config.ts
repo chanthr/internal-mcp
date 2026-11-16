@@ -23,15 +23,19 @@ import { candidates } from './paths.js';
 export const BASE_INSTRUCTIONS = 'Knowledge MCP — tools over your team\'s data. Answer only from tool results; do not speculate.';
 
 /**
- * A Drive folder to index. `source` is an indexing hint:
- *   - "dev": structured knowledge docs (Markdown with frontmatter)
- *   - "biz": general documents (PDF/DOCX/etc.)
- * If you have one kind of content, just use "dev" for everything.
+ * A Drive folder to index.
+ *   - `source` is a label of your choice ("handbook", "sales", "wiki", …). It is stored with every chunk and is the
+ *     `source` filter of semantic_search_drive. Default "docs".
+ *   - `metadata` says where document metadata comes from: "frontmatter" (Markdown with a YAML header: status, tags,
+ *     type, date) or "path" (category, customer and tags derived from folder and file names — for PDFs, Office and
+ *     Google files). Default "path". The label "dev" defaults to "frontmatter" so configs written for 0.3 keep working.
  */
+const SOURCE_LABEL = /^[a-z][a-z0-9_-]{0,31}$/;
 const DriveRootSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
-  source: z.enum(['dev', 'biz']),
+  source: z.string().regex(SOURCE_LABEL).default('docs'),
+  metadata: z.enum(['frontmatter', 'path']).optional(),
 });
 
 const UpstreamConfigSchema = z
@@ -45,7 +49,7 @@ const UpstreamConfigSchema = z
     /** Name of the env var holding the bearer token (the token itself never goes in this file). */
     tokenEnv: z.string().optional(),
     /** Extra request headers (no secrets — use tokenEnv). */
-    headers: z.record(z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
     /** "read" (default): only read-verb tools. "all": everything. Or an explicit list of remote tool names. */
     expose: z.union([z.enum(['read', 'all']), z.array(z.string())]).default('read'),
   })
@@ -61,11 +65,21 @@ const ConfigSchema = z
         /** Replaces the generated instructions (base line + each enabled plugin's notes) when set. */
         instructions: z.string().optional(),
       })
-      .default({}),
+      .prefault({}),
     drive: z
       .object({
         /** SSOT for index/search scope. Empty = Drive indexing disabled (tools still gated by credentials). */
         roots: z.array(DriveRootSchema).default([]),
+        /**
+         * Which Drive documents the tools and the index cover.
+         *   - "shared" (default): everything shared with the service account. That is the roots plus any file or
+         *     folder shared with it separately. Sharing a document with the account is all it takes to make it searchable.
+         *   - "roots": only files under `roots` (the behaviour up to 0.3.x).
+         * Excluded folders stay hidden either way. env DRIVE_SCOPE takes precedence.
+         */
+        scope: z.enum(['shared', 'roots']).default('shared'),
+        /** `source` label for documents shared outside the roots (drive.scope "shared"). */
+        sharedSource: z.string().regex(SOURCE_LABEL).default('shared'),
         /** Folder names to exclude from the search index (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */
         excludeFolders: z.array(z.string()).default([]),
         /**
@@ -81,19 +95,19 @@ const ConfigSchema = z
           .array(z.object({ prefix: z.string().min(1), label: z.string().min(1), weight: z.number().positive().max(10) }).strict())
           .default([]),
       })
-      .default({}),
+      .prefault({}),
     qdrant: z
       .object({
         /** Vector collection name. If env QDRANT_COLLECTION is set, it takes precedence (zero-downtime swap). */
         collection: z.string().default('knowledge_v1'),
       })
-      .default({}),
+      .prefault({}),
     data: z
       .object({
         /** Supabase schema holding the server's own tables (oauth clients, refresh tokens, sync_state, tool_calls, app_users). */
         schema: z.string().default('public'),
       })
-      .default({}),
+      .prefault({}),
     /** Unused. Still accepted so config files written for 0.3.0 and 0.3.1 keep loading (the schema is strict). */
     selfDomains: z.array(z.string()).optional(),
     oauth: z
@@ -110,7 +124,7 @@ const ConfigSchema = z
          */
         allowedEmails: z.array(z.string()).default([]),
       })
-      .default({}),
+      .prefault({}),
     access: z
       .object({
         /**
@@ -120,9 +134,9 @@ const ConfigSchema = z
          */
         viewerTools: z.array(z.string()).default([]),
       })
-      .default({}),
+      .prefault({}),
     /** Per-plugin settings: `plugins.<id>` is passed to that plugin as ctx.config. */
-    plugins: z.record(z.unknown()).default({}),
+    plugins: z.record(z.string(), z.unknown()).default({}),
     /** Remote MCP servers to proxy. Their tools are listed as `<prefix><name>` in the group `name`. */
     upstreams: z.array(UpstreamConfigSchema).default([]),
   })

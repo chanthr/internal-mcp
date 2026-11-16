@@ -1,18 +1,20 @@
 /**
- * Drive 증분 sync 의 pageToken 영속화 — 저장소 plugin state (namespace "drive", key "pageToken").
+ * Persists the pageToken of the Drive incremental sync in the store plugin state (namespace "drive", key "pageToken").
  *
- * 로컬 파일은 컨테이너 재배포마다 사라져(ephemeral) 재배포~다음 전체 reindex 사이의 Drive 변경분이
- * 인덱스에 영구 누락됐다. 그래서 저장소(SQLite 파일은 볼륨, 또는 Supabase)에 둔다.
+ * A local file disappears on every container redeploy (ephemeral), so the Drive changes between a redeploy and the
+ * next full reindex were permanently missing from the index. The token is therefore kept in the store (the SQLite
+ * file on a volume, or Supabase).
  *
- * 읽기 실패는 throw 한다. 예전엔 null(= 첫 실행)로 취급해 "지금부터" 토큰으로 덮어써,
- * 일시 장애 한 번에 그 사이 변경분을 영구히 놓쳤다. 이제 그 주기만 건너뛰고 다음 주기에 다시 읽는다.
+ * A failed read throws. It used to be treated as null (= first run) and overwritten with a "from now on" token, so a
+ * single temporary outage permanently lost the changes in between. Now only that cycle is skipped and the next cycle
+ * reads again.
  */
 import { getStore } from '../../store/index.js';
 
 const NS = 'drive';
 const KEY = 'pageToken';
 
-/** 저장된 토큰. 없으면 null(첫 실행). 저장소 오류는 throw. */
+/** The stored token. null if there is none (first run). Store errors throw. */
 export async function getSyncToken(): Promise<string | null> {
   const v = await (await getStore()).getState(NS, KEY);
   return typeof v === 'string' && v ? v : null;
@@ -26,15 +28,15 @@ export async function setSyncToken(token: string): Promise<void> {
   }
 }
 
-// ── 실패한 파일 다시 시도 목록 ──
-// 파일 하나가 실패해도(OpenAI 할당량 소진, Qdrant timeout) pageToken 은 전진한다(안 그러면 깨진 파일 하나에 동기화가
-// 영원히 멈춘다). 그 대신 실패한 fileId 를 여기 쌓아 다음 주기에 다시 시도한다. 열 번 실패하면 버리고 로그를 남긴다
-// (다음 전체 재색인이 줍는다).
+// ── Retry list for failed files ──
+// When one file fails (OpenAI quota exhausted, Qdrant timeout) the pageToken still advances (otherwise one broken file
+// would stall the sync forever). Instead the failed fileId is added here and retried in the next cycle. After ten
+// failures it is dropped and logged (the next full reindex picks it up).
 const RETRY_KEY = 'retry';
 export const MAX_RETRY_ATTEMPTS = 10;
 const MAX_RETRY_FILES = 1000;
 
-/** fileId → 지금까지 실패한 횟수. */
+/** fileId → number of failures so far. */
 export async function getRetryList(): Promise<Record<string, number>> {
   const v = await (await getStore()).getState(NS, RETRY_KEY);
   return v && typeof v === 'object' ? (v as Record<string, number>) : {};
@@ -47,4 +49,23 @@ export async function setRetryList(list: Record<string, number>): Promise<void> 
   } catch (e) {
     console.error('[sync_state] setRetryList failed:', e instanceof Error ? e.message : e);
   }
+}
+
+// ── First index marker ──
+// The server builds the index by itself the first time it sees an empty collection (sync.ts). The marker records
+// that this was done for a collection, so a Drive with nothing indexable is not listed again on every cycle.
+const AUTO_INDEX_KEY = 'autoIndexed';
+
+/** Has the automatic first index already run for this collection? Store errors throw. */
+export async function wasAutoIndexed(collection: string): Promise<boolean> {
+  const v = await (await getStore()).getState(NS, AUTO_INDEX_KEY);
+  return !!v && typeof v === 'object' && (v as Record<string, unknown>)[collection] !== undefined;
+}
+
+export async function markAutoIndexed(collection: string): Promise<void> {
+  const store = await getStore();
+  const v = await store.getState(NS, AUTO_INDEX_KEY);
+  const map = v && typeof v === 'object' ? { ...(v as Record<string, string>) } : {};
+  map[collection] = new Date().toISOString();
+  await store.setState(NS, AUTO_INDEX_KEY, map);
 }

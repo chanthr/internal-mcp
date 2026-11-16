@@ -44,8 +44,19 @@ SQLite file. You need Node 22.13 or later, or Docker.
 npx create-knowledge-mcp my-mcp
 cd my-mcp
 npm run dev                                                   # http://localhost:8080/mcp, reloads on save
-npm run keys -- create --email you@example.com --role admin   # prints an API key once
 ```
+
+The generator ends with a guided setup. It asks which services to connect, checks each key against the real
+service as you enter it, writes `.env` and `mcp.config.json`, creates the admin key and offers to add the server
+to Claude Code. Nothing is edited by hand, and you can run it again any time:
+
+```bash
+npm run setup
+```
+
+Or let an AI agent do it. The project includes [`AGENTS.md`](packages/create-knowledge-mcp/template/AGENTS.md), a setup
+guide for agents: open the folder in Claude Code and say "set this server up, follow AGENTS.md". The agent runs the
+setup commands, asks before creating anything in your accounts, and never handles your secrets.
 
 The project comes with an example plugin, `src/plugins/notes.ts`. Point a client at
 `http://localhost:8080/mcp` with `Authorization: Bearer <key>` and you will see `notes_add` and `notes_list`.
@@ -216,6 +227,10 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 
 | Command | What it does |
 | --- | --- |
+| `setup` | Guided setup: connect Drive, Slack, GitHub and Railway, check every value live, write `.env` and the config, create the admin key. With gcloud installed it creates the Drive service account for you; with gh signed in it can reuse that login. Safe to run again |
+| `setup check` | Verifies every configured service against the real thing. Exit code 1 on a failure |
+| `setup drive --gcloud [--project ID] [--yes]` | Creates the Drive service account and key with the gcloud CLI. Prints its plan and creates nothing without `--yes` |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |
@@ -239,8 +254,8 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Plugin | Tools | Needs |
 | --- | --- | --- |
-| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token, and `drive.roots` in the config |
-| `drive` | `semantic_search_drive` | `QDRANT_URL`, `OPENAI_API_KEY` and an index (`knowledge-mcp drive reindex`) |
+| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token. Share a folder or a document with that account and it is searchable |
+| `drive` | `semantic_search_drive` | An embedding key (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`). Nothing else: vectors are stored in a local file and the server builds the index on first start. Set `QDRANT_URL` to use Qdrant instead |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
@@ -255,8 +270,9 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Task | How |
 | --- | --- |
-| First full index | `knowledge-mcp drive reindex` (`docker compose run --rm knowledge-mcp drive reindex`) |
-| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`). Do the full index first |
+| First full index | Automatic: the server builds it the first time it starts with an empty index (`DRIVE_AUTO_INDEX=false` turns that off). By hand: `knowledge-mcp drive reindex` |
+| Where vectors live | `<data dir>/vectors.db` by default, good for tens of thousands of chunks. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
+| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`) |
 | Clean up | A full run deletes vectors of files no longer listed, such as files moved into an excluded folder |
 | Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks. It skips OCR, so it never charges Mathpix |
 
@@ -264,12 +280,13 @@ Each turns on when its env vars are set. All built-in tools only read.
 | --- | --- |
 | Markdown, plain text | As is |
 | Google Docs, Slides | Drive export |
-| Google Sheets | Drive export as CSV. Only the first sheet |
+| Google Sheets | Drive export, every tab as its own section |
 | Word, PowerPoint, Excel, PDF with text | Local parsers |
 | Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, only when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
 
 Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or indexed. Embeddings use OpenAI
-`text-embedding-3-small`.
+`text-embedding-3-small` by default. Any OpenAI-compatible `/embeddings` endpoint works: set `EMBEDDING_BASE_URL`,
+`EMBEDDING_MODEL` and `EMBEDDING_DIM` (for example a local `bge-m3` behind Ollama), then reindex into a new collection.
 
 </details>
 
@@ -305,9 +322,11 @@ it, the sign-in allowlist included.
 | --- | --- |
 | `orgId` | Organization identifier carried in the auth context |
 | `branding.name` / `branding.instructions` | Name shown on the sign-in consent page and in OAuth metadata. `instructions` replaces the guide the client receives (base line plus each plugin's notes) |
-| `drive.roots[]` | `{ id, name, source }` folders to index and search. `source` is `dev` (Markdown with frontmatter) or `biz` (PDF, Office and Google files) |
+| `drive.roots[]` | `{ id, name, source, metadata }` folders to index and search. `source` is a label you choose (`handbook`, `sales`, …; default `docs`) and becomes the `source` search filter. `metadata` is `path` (default: category, customer and tags from folder and file names) or `frontmatter` (Markdown with a YAML header) |
+| `drive.scope` | `shared` (default): everything shared with the service account is in scope, the roots plus any folder or document shared with it separately. `roots`: only files under `drive.roots`. env `DRIVE_SCOPE` overrides |
+| `drive.sharedSource` | `source` label for documents shared outside the roots. Default `shared` |
 | `drive.excludeFolders[]` | Folder names skipped everywhere: index, search, read and list. Case and spacing are ignored |
-| `drive.customerFolders[]` | Top-level `biz` folders with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
+| `drive.customerFolders[]` | Top-level folders (in `path` metadata sources) with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
 | `drive.rank[]` | Optional `{ prefix, label, weight }` rules for `semantic_search_drive`, e.g. prefer `Current/` (weight 1.1) over `Archive/` (0.9). Default: none |
 | `qdrant.collection` | Vector collection name (env `QDRANT_COLLECTION` overrides) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Who may sign in with Google |
@@ -416,6 +435,16 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | Claude web and desktop | Turn on OAuth, then add a custom connector with `https://<host>/mcp` |
 | Any MCP client | URL `https://<host>/mcp` with header `Authorization: Bearer <key>` |
 
+## Upgrading from 0.3
+
+| Change | What to do |
+| --- | --- |
+| Drive scope is `shared` by default | Documents shared with the service account outside `drive.roots` are now searchable, readable and indexed. Excluded folders stay hidden. To keep the 0.3 behaviour set `drive.scope` to `roots` (or env `DRIVE_SCOPE=roots`) |
+| zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
+| `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |
+| Google Sheets are read tab by tab | Indexed sheets change on their next modification. Run `knowledge-mcp drive reindex` to refresh them all now |
+| Semantic search shows at most 2 chunks per document | Set `SEMANTIC_MAX_PER_DOC` to change it |
+
 ## Upgrading from 0.2
 
 | Change | What to do |
@@ -431,8 +460,9 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 1. Never commit `.env`, service-account JSON, `mcp.config.json` or `data/`. All are gitignored and kept out of the image.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
-4. Drive indexing sends document text to OpenAI for embeddings, and scanned files to Mathpix when OCR is on.
-5. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
+4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
+5. With `drive.scope` `shared`, sharing a document with the service account makes it visible to every user of the server who may use the `drive` tools. List sensitive folder names in `drive.excludeFolders`.
+6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 
 ## File map
 
@@ -454,7 +484,7 @@ Develop with `npm install`, `npm test` (unit and end-to-end), `npm run typecheck
 
 ## Contributing
 
-Please open an issue for problems and ideas.
+Please open an issue for problems and ideas. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, the checks to run and how to add a plugin. Changes per version are in [`CHANGELOG.md`](CHANGELOG.md).
 
 | Template | Use it when |
 | --- | --- |

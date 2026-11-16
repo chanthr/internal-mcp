@@ -1,6 +1,6 @@
 {
   "name": "@chnxthr/knowledge-mcp",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Build your own MCP server from plugins. Auth (API keys, OAuth), per-user permissions, audit log, SQLite or Supabase state, and built-in Google Drive, Slack, GitHub and Railway connectors.",
   "type": "module",
   "license": "MIT",
@@ -52,7 +52,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@supabase/supabase-js": "^2.45.0",
     "@types/express": "^5.0.6",
     "dotenv": "^16.6.1",
@@ -64,7 +64,7 @@
     "ws": "^8.21.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

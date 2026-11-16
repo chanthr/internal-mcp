@@ -5,7 +5,7 @@
   },
   "drive": {
     "roots": [
-      { "id": "PASTE_YOUR_DRIVE_FOLDER_ID", "name": "Docs", "source": "dev" }
+      { "id": "PASTE_YOUR_DRIVE_FOLDER_ID", "name": "Docs", "source": "docs" }
     ],
     "excludeFolders": ["Private", "HR", "Contracts"],
     "customerFolders": ["Clients"],

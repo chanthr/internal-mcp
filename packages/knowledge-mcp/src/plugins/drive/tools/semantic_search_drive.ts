@@ -1,16 +1,17 @@
 /**
- * semantic_search_drive — 자연어 질의 → Qdrant vector search → top-K chunks.
+ * semantic_search_drive: natural-language query → Qdrant vector search → top-K chunks.
  *
  * Pipeline:
  *   1. embed query (OpenAI text-embedding-3-small, 1536d)
  *   2. Qdrant search (Cosine, optional payload filter)
- *   3. rerank: config drive.rank 규칙(경로 접두별 가중치)과 frontmatter status(superseded, parked 강등)
- *   4. 제외 폴더와 직원별 폴더 범위로 거른 뒤 markdown 으로 포맷 (Drive 링크 포함)
+ *   3. rerank: config drive.rank rules (weights per path prefix) and frontmatter status (superseded and parked are demoted)
+ *   4. filter by excluded folders and the per-user folder scope, then format as markdown (with Drive links)
  *
- * 예전엔 한 회사의 위키 구조(특정 폴더 이름별 "현황, 결정, 이력" 가중치)와 그 회사 예시가 코드에 박혀 있었다.
- * 이제 가중치는 설정(drive.rank)으로만 주고, 없으면 의미 점수 그대로 정렬한다.
+ * Formerly one company's wiki structure (weights for "status, decision, history" keyed by specific folder names) and that
+ * company's examples were hard-coded here. Now weights come only from config (drive.rank). Without them, results are
+ * sorted by the semantic score as is.
  *
- * Indexing 안 됐으면 `knowledge-mcp drive reindex` 안내.
+ * If nothing is indexed yet, the tool points to `knowledge-mcp drive reindex`.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -19,9 +20,9 @@ import { getConfig } from '../../../core/config.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
 import { isExcludedPath } from '../exclude.js';
 import { embedQuery } from '../embeddings.js';
+import { sourceLabels } from '../settings.js';
 import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from '../qdrant.js';
 
-const SOURCES = ['dev', 'biz'] as const;
 const RANK_RULES = getConfig().drive.rank;
 
 /** First rank rule whose prefix the path starts with. */
@@ -36,19 +37,19 @@ const DESCRIPTION =
   'for file names or exact keywords use search_drive. ' +
   'Each result has a score, path, heading, File ID, Drive link and the chunk text. ' +
   'Two-step search: when a chunk lacks context, call read_drive_file with its File ID to read the whole document. ' +
-  'source="dev" searches structured docs (Markdown), source="biz" searches general documents (PDF, Office, Google files).';
+  (sourceLabels().length > 1 ? `Narrow with source: ${sourceLabels().map((l) => `"${l}"`).join(', ')}.` : '');
 
 const inputSchema = z.object({
   query: z.string().min(1).max(500).describe('Natural-language question, in any language. e.g. "How do we rotate API keys?"'),
   topK: z.number().int().min(1).max(20).optional().default(5).describe('Number of chunks to return (1-20, default 5)'),
-  source: z.enum(SOURCES).optional().describe('Optional: "dev" (structured Markdown docs) or "biz" (general documents)'),
+  source: z.string().optional().describe(`Optional: only documents with this source label${sourceLabels().length ? ` (${sourceLabels().join(', ')})` : ''}`),
   cluster: z.string().optional().describe('Optional: top-level folder under a Drive root, e.g. "Engineering"'),
   hasImage: z.boolean().optional().describe('Optional: only chunks that contain images (screenshots, diagrams)'),
   docStatus: z.string().optional().describe('Optional: the `status` from Markdown frontmatter, e.g. "draft" or "superseded"'),
-  tags: z.string().optional().describe('Optional: one tag. dev = frontmatter `tags`; biz = folder and file-name words'),
+  tags: z.string().optional().describe('Optional: one tag. From frontmatter `tags`, or for path-metadata sources from folder and file-name words'),
   docType: z.string().optional().describe('Optional: the `type` from Markdown frontmatter, e.g. "guide"'),
-  category: z.string().optional().describe('Optional (biz): top-level folder name without a leading number, e.g. "Sales"'),
-  customer: z.string().optional().describe('Optional (biz): customer name, from folders listed in config drive.customerFolders, e.g. "Acme"'),
+  category: z.string().optional().describe('Optional (path-metadata sources): top-level folder name without a leading number, e.g. "Sales"'),
+  customer: z.string().optional().describe('Optional (path-metadata sources): customer name, from folders listed in config drive.customerFolders, e.g. "Acme"'),
 });
 
 export const semanticSearchDriveTool = defineTool({
@@ -59,8 +60,12 @@ export const semanticSearchDriveTool = defineTool({
   run: (args) => handleSemanticSearchDrive(args),
 });
 
+/** Chunks shown per document (env SEMANTIC_MAX_PER_DOC). */
+const MAX_PER_DOC = Math.max(1, Number(process.env.SEMANTIC_MAX_PER_DOC ?? 2));
+
 export async function handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
-  // 외부 의존(OpenAI 임베딩·Qdrant) 실패를 도구 특화 graceful 에러로 — 예전엔 [fatal] 로만 떴다.
+  // Turn failures of external dependencies (OpenAI embeddings, Qdrant) into a tool-specific graceful error. Previously they
+  // only showed up as [fatal].
   try {
     return await _handleSemanticSearchDrive(args);
   } catch (e: unknown) {
@@ -99,7 +104,7 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
   //    when relevant documents exist in their folders.
   const folderScope = allowedDriveFolders(auth);
   const client = await getQdrantClient();
-  const searchLimit = folderScope ? 200 : Math.min(50, Math.max(topK * 3, 18));
+  const searchLimit = folderScope ? 200 : Math.min(80, Math.max(topK * 5, 30));
   const results = await client.search(DRIVE_COLLECTION, {
     vector: queryVector,
     limit: searchLimit,
@@ -138,10 +143,25 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
     .sort((a, b) => b.adj - a.adj);
 
   // 3c. Re-check excluded folders (chunks indexed before a folder was excluded) and the caller's folder scope.
-  const ranked = reranked
+  const allowed = reranked
     .filter((x) => !isExcludedPath(x.p.file_path ?? ''))
-    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope))
-    .slice(0, topK);
+    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope));
+
+  // 3d. At most MAX_PER_DOC chunks per document. Without this one long document fills every slot with its own
+  //     neighbouring chunks and the answer rests on a single source. The rest is one read_drive_file call away.
+  const perDoc = new Map<string, number>();
+  const more = new Map<string, number>();
+  const ranked: typeof allowed = [];
+  for (const x of allowed) {
+    const id = x.p.file_id;
+    const n = perDoc.get(id) ?? 0;
+    if (n >= MAX_PER_DOC || ranked.length >= topK) {
+      if (perDoc.has(id)) more.set(id, (more.get(id) ?? 0) + 1);
+      continue;
+    }
+    perDoc.set(id, n + 1);
+    ranked.push(x);
+  }
 
   // 4. Markdown output (readable for people and models)
   const lines: string[] = [];
@@ -177,7 +197,10 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
     );
     lines.push(`**Path:** \`${p.file_path}\``);
     if (p.heading) lines.push(`**Heading:** ${p.heading}`);
-    lines.push(`**File ID:** \`${p.file_id}\` — pass to read_drive_file for the whole document`);
+    lines.push(
+      `**File ID:** \`${p.file_id}\` — pass to read_drive_file for the whole document` +
+        (more.get(p.file_id) ? ` (${more.get(p.file_id)} more matching chunks in it)` : ''),
+    );
     lines.push(`**Drive:** [open](${driveLink})`);
     if (p.image_urls && p.image_urls.length > 0) {
       lines.push(`**Images:** ${p.image_urls.length} — ${p.image_urls.join(' · ')}`);

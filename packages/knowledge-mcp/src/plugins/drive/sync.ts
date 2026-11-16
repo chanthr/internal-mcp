@@ -1,18 +1,19 @@
 /**
- * Drive → Qdrant 증분 sync (polling).
+ * Drive → Qdrant incremental sync (polling).
  *
- * Drive Changes API 로 마지막 sync 이후 변경·추가·삭제된 .md 파일만 반영.
- * - 변경/추가: re-chunk + embed + upsert (idempotent — 같은 chunk_id)
- * - 삭제/trashed: Qdrant 에서 해당 file 의 chunk 전부 delete
- * - pageToken 영속화 (sync_state) → 다음 sync 기준
+ * Uses the Drive Changes API to apply only the files changed, added or deleted since the last sync.
+ * - changed/added: re-chunk + embed + upsert (idempotent, same chunk_id)
+ * - deleted/trashed: delete every chunk of that file from Qdrant
+ * - the pageToken is persisted (sync_state) and is the starting point of the next sync
  *
- * startup 1회 (첫 실행 = token 초기화만) + setInterval(기본 30분).
- * graceful: 오류 시 로그만, server 영향 X.
+ * Runs once at startup (the first run only initializes the token), then on a timer (default 30 minutes).
+ * Graceful: errors are only logged and do not affect the server.
  */
 import type { DriveChangeList, DriveClient } from './client.js';
 import { DriveApiError, getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
-import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS } from './sync_state.js';
+import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
+import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS, wasAutoIndexed, markAutoIndexed } from './sync_state.js';
 import { isExcludedPath } from './exclude.js';
 import { clearFolderMetaCache, getFolderMeta } from './path.js';
 import { DRIVE_COLLECTION, getQdrantClient, type PointId } from './qdrant.js';
@@ -20,15 +21,16 @@ import { DRIVE_COLLECTION, getQdrantClient, type PointId } from './qdrant.js';
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
 /**
- * parents 를 root 까지 추적해 path + source 복원. root 밖이면 null.
- * 폴더 hop 은 getFolderMeta(프로세스 캐시·10분 TTL) — 변경 파일들이 조상 폴더를 공유해 warmup 후 캐시 hit.
- * 폴더 조회 실패는 throw 한다. 호출부가 그 파일만 errored 로 두고 벡터는 지우지 않는다.
+ * Follows parents up to a root to rebuild path + source. Returns null when outside the roots.
+ * Folder hops use getFolderMeta (process cache, 10 minute TTL). Changed files share ancestor folders, so the cache
+ * hits after warmup.
+ * A failed folder lookup throws. The caller marks only that file as errored and does not delete its vectors.
  */
 async function resolveFromParents(
   drive: DriveClient,
   firstParents: string[] | null | undefined,
   fileName: string,
-): Promise<{ path: string; source: 'dev' | 'biz' } | null> {
+): Promise<{ path: string; source: string } | null> {
   const folders: string[] = [];
   let parents: string[] | undefined = firstParents ?? undefined;
   for (let hop = 0; hop < 12 && parents && parents.length > 0; hop++) {
@@ -39,7 +41,12 @@ async function resolveFromParents(
     if (meta.name) folders.unshift(meta.name);
     parents = meta.parent ? [meta.parent] : undefined;
   }
-  return null; // root 하위 아님 → skip
+  // Nothing further up: this is the top of what was shared with the service account. With drive.scope "shared"
+  // such a file is indexed with its path starting at the top shared folder. A chain deeper than 12 hops stays out.
+  if ((!parents || parents.length === 0) && sharedScopeEnabled()) {
+    return { path: [...folders, fileName].join('/'), source: SHARED_SOURCE };
+  }
+  return null;
 }
 
 async function resolvePathAndSource(drive: DriveClient, fileId: string, fileName: string) {
@@ -48,11 +55,13 @@ async function resolvePathAndSource(drive: DriveClient, fileId: string, fileName
 }
 
 /**
- * 폴더를 옮기거나 이름을 바꾸면 Drive 변경 목록에는 그 폴더 한 건만 온다. 안의 파일은 변경으로 오지 않아
- * payload 의 file_path 가 옛 경로로 남고, 의미 검색의 폴더 권한과 제외 폴더 판정이 옛 경로로 이뤄진다.
- * 그래서 폴더 변경을 보면 색인된 파일마다 지금 경로를 다시 계산한다:
- *   지운 파일, 휴지통, root 밖, 제외 폴더 → 벡터 삭제. 경로나 이름이 바뀜 → 다시 색인. 그대로 → 그대로.
- * 파일 하나의 조회 실패는 errored 로 세고 넘어간다(지우지 않는다).
+ * When a folder is moved or renamed, the Drive change list contains only that one folder. The files inside do not
+ * arrive as changes, so the payload file_path keeps the old path, and the folder permission and excluded-folder checks
+ * of semantic search run on the old path. So when a folder change is seen, the current path of every indexed file is
+ * computed again:
+ *   deleted, trashed, outside the roots or in an excluded folder → delete vectors. Path or name changed → reindex.
+ *   Unchanged → left as is.
+ * A failed lookup for one file is counted as errored and skipped (nothing is deleted).
  */
 export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked: number; reindexed: number; deleted: number; errored: number }> {
   const client = await getQdrantClient();
@@ -115,7 +124,10 @@ export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked
   return r;
 }
 
-/** 한 파일을 지금 상태로 맞춘다(다시 시도 목록용): 없거나 휴지통, root 밖, 제외 폴더 → 벡터 삭제, 그 밖 → 색인. */
+/**
+ * Brings one file to its current state (for the retry list): missing, trashed, outside the roots or in an excluded
+ * folder → delete vectors, anything else → index.
+ */
 async function syncOneFile(drive: DriveClient, fileId: string): Promise<'indexed' | 'deleted' | 'skipped'> {
   let f;
   try {
@@ -155,16 +167,38 @@ export interface SyncResult {
   pathRefresh?: { checked: number; reindexed: number; deleted: number; errored: number };
 }
 
+/** True when the collection holds nothing and the automatic first index has not run for it yet. */
+async function firstIndexNeeded(): Promise<boolean> {
+  if (process.env.DRIVE_AUTO_INDEX === 'false') return false;
+  if (await wasAutoIndexed(DRIVE_COLLECTION)) return false;
+  const page = await (await getQdrantClient()).scroll(DRIVE_COLLECTION, { limit: 1, with_payload: false, with_vector: false });
+  if (page.points.length > 0) {
+    await markAutoIndexed(DRIVE_COLLECTION); // indexed by hand before this feature existed, or by another process
+    return false;
+  }
+  return true;
+}
+
 export async function runIncrementalSync(): Promise<SyncResult> {
   const drive = await getDriveClient();
   const token = await getSyncToken();
 
-  // 첫 실행 — startPageToken 저장만 (이후 변경부터 추적). 전체 색인은 knowledge-mcp drive reindex.
+  // First run: store the startPageToken, so changes are tracked from now on.
   if (!token) {
     const { data } = await drive.changes.getStartPageToken({ supportsAllDrives: true });
     if (data.startPageToken) await setSyncToken(data.startPageToken);
-    return { status: 'initialized', changed: 0, deleted: 0, skipped: 0 };
   }
+  // An empty collection that was never indexed is indexed now, so nobody has to run `drive reindex` by hand after
+  // setup. The token above is stored first: documents edited while the index is being built are picked up by the
+  // next cycle. DRIVE_AUTO_INDEX=false leaves the first index to the command.
+  if (await firstIndexNeeded()) {
+    console.error('[drive-sync] the index is empty: building it now (this can take a while; search fills in as files are indexed)');
+    const { runReindex } = await import('./reindex.js');
+    await runReindex([]);
+    await markAutoIndexed(DRIVE_COLLECTION);
+    return { status: 'first index built', changed: 0, deleted: 0, skipped: 0 };
+  }
+  if (!token) return { status: 'initialized', changed: 0, deleted: 0, skipped: 0 };
 
   let changed = 0;
   let deleted = 0;
@@ -189,13 +223,14 @@ export async function runIncrementalSync(): Promise<SyncResult> {
     ).data;
 
     for (const ch of data.changes ?? []) {
-      // 파일 1건 실패(Mathpix timeout·OpenAI 5xx 소진·깨진 docx 등)가 throw 하면 루프를 탈출해
-      // runIncrementalSync 가 전체 throw → 그 tick 의 setSyncToken 이 호출 안 돼 pageToken 이
-      // 전진 못 하고, 다음 tick 에 같은 깨진 파일에서 또 멈춘다(sync 영구 정체). per-file 격리로
-      // 실패 파일만 errored 처리하고 나머지·토큰 전진은 계속한다.
+      // If one failing file (Mathpix timeout, OpenAI 5xx retries exhausted, a broken docx, etc.) throws, the loop exits
+      // and runIncrementalSync throws as a whole. setSyncToken is then not called for that tick, the pageToken cannot
+      // advance, and the next tick stops at the same broken file again (sync stuck forever). Per-file isolation marks
+      // only the failing file as errored, and the rest of the files and the token keep moving.
       try {
         const f = ch.file;
-        // 폴더 이동, 이름 변경, 휴지통, 영구 삭제(종류를 모름)는 안의 파일 경로를 바꾸지만 그 파일들은 변경으로 오지 않는다.
+        // A folder move, rename, trash or permanent delete (the type is unknown) changes the paths of the files
+        // inside, but those files do not arrive as changes.
         if (f?.mimeType === FOLDER_MIME || (ch.removed && !f)) foldersChanged = true;
         if (f?.mimeType === FOLDER_MIME) {
           skipped++;
@@ -213,9 +248,10 @@ export async function runIncrementalSync(): Promise<SyncResult> {
           continue;
         }
         const resolved = await resolvePathAndSource(drive, f.id, f.name);
-        // 제외: dev/biz 외 폴더 + 민감(PII/계약/HR/deprecated) + 개발 아티팩트(node_modules 등). SSOT: exclude.ts
-        // 색인 대상 밖으로 옮겨졌거나 제외 폴더로 들어간 파일은 남아 있던 벡터를 지운다
-        // (건너뛰기만 하면 옛 청크 본문이 semantic_search_drive 에 계속 나온다).
+        // Excluded: folders outside dev/biz, sensitive ones (PII/contracts/HR/deprecated) and development artifacts
+        // (node_modules etc.), see exclude.ts. For a file moved out of the indexed area or into an excluded folder,
+        // the vectors left behind are deleted (only skipping it would keep the old chunk text showing up in
+        // semantic_search_drive).
         if (!resolved || isExcludedPath(resolved.path)) {
           await deleteFileVectors(f.id);
           skipped++;
@@ -247,7 +283,8 @@ export async function runIncrementalSync(): Promise<SyncResult> {
     cursor = data.nextPageToken ?? undefined;
   }
 
-  // 지난 주기에 실패한 파일을 다시 시도한다. 이번 주기에 변경으로 이미 다룬 파일은 그 결과를 따른다.
+  // Retry the files that failed in the previous cycle. A file already handled as a change in this cycle keeps that
+  // result.
   for (const id of Object.keys(retry)) {
     if (failedNow.has(id)) continue;
     try {
@@ -281,11 +318,11 @@ let _started = false;
 let _running = false;
 
 /**
- * startup 호출 — 1회 실행(첫 실행은 token init) + 주기 polling.
+ * Called at startup: one run (the first run initializes the token) plus periodic polling.
  *
- * setInterval 대신 **자기재귀 setTimeout** — 다음 tick 을 이전 sync 가 끝난 뒤에만 예약해
- * 한 주기가 간격을 초과해도 sync 가 겹치지 않게 한다(중복 임베딩·토큰 되감김 방지).
- * `_running` 재진입 가드는 이중 안전장치.
+ * Uses a self-rescheduling setTimeout instead of setInterval. The next tick is scheduled only after the previous sync
+ * finishes, so syncs never overlap even when one cycle takes longer than the interval (prevents duplicate embedding
+ * and a token rewind). The `_running` reentry guard is a second safety net.
  */
 export function startDriveSyncScheduler(intervalMin = 30): void {
   if (_started) return;
@@ -313,6 +350,6 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
     setTimeout(() => void run().finally(scheduleNext), intervalMin * 60_000);
   };
 
-  void run().finally(scheduleNext); // startup 1회 후 주기 시작
+  void run().finally(scheduleNext); // one run at startup, then the periodic schedule
   console.error(`[drive-sync] scheduler started — every ${intervalMin} min (self-rescheduling setTimeout + reentry guard)`);
 }

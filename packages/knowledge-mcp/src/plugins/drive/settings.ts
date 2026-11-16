@@ -1,6 +1,6 @@
 /**
- * Drive 색인 범위와 한도 — 가벼운 상수만 둔다. 도구들이 이 값 때문에 색인기(indexer.ts, 토크나이저·Qdrant)를
- * 통째로 불러오지 않게 따로 뺐다.
+ * Drive indexing scope and limits. Only lightweight constants live here. They are kept separate so the tools do not
+ * load the whole indexer (indexer.ts, tokenizer, Qdrant) just for these values.
  */
 import { getConfig } from '../../core/config.js';
 
@@ -8,7 +8,39 @@ import { getConfig } from '../../core/config.js';
 export const DRIVE_ROOTS = getConfig().drive.roots;
 
 /**
- * 색인·읽기 파일 크기 상한(바이트). 파일을 통째로 메모리에 올리므로, 거대한 파일 하나가 서버를 죽이지 않게 막는다.
- * Google 문서·시트·슬라이드는 Drive 메타에 size 가 없어(export) 이 검사를 받지 않는다.
+ * Whether documents shared with the service account outside the roots are visible (config drive.scope, env DRIVE_SCOPE).
+ * Read on every call so an env change needs no code change to roll back.
+ */
+export function sharedScopeEnabled(): boolean {
+  const v = process.env.DRIVE_SCOPE?.trim().toLowerCase();
+  if (v === 'roots' || v === 'shared') return v === 'shared';
+  return getConfig().drive.scope === 'shared';
+}
+
+/** `source` label for documents shared outside the roots (config drive.sharedSource). */
+export const SHARED_SOURCE = getConfig().drive.sharedSource;
+
+/** Every `source` label an indexed chunk can carry: the roots' labels, plus the shared label when it is in scope. */
+export function sourceLabels(): string[] {
+  const labels = new Set(DRIVE_ROOTS.map((r) => r.source));
+  if (sharedScopeEnabled()) labels.add(SHARED_SOURCE);
+  return [...labels];
+}
+
+/**
+ * Does this source take its metadata from the path (category, customer, tags from folder and file names) rather
+ * than from Markdown frontmatter? Set per root with `metadata`. Without it: "dev" means frontmatter (the 0.3
+ * meaning), anything else means path.
+ */
+export function usesPathMetadata(source: string): boolean {
+  const root = DRIVE_ROOTS.find((r) => r.source === source && r.metadata);
+  if (root?.metadata) return root.metadata === 'path';
+  return source !== 'dev';
+}
+
+/**
+ * File size cap (bytes) for indexing and reading. A file is loaded into memory whole, so this stops one huge file from
+ * crashing the server. Google Docs, Sheets and Slides have no size in the Drive metadata (they are exported), so they
+ * are not subject to this check.
  */
 export const MAX_FILE_BYTES = Number(process.env.DRIVE_MAX_FILE_BYTES ?? 50_000_000);

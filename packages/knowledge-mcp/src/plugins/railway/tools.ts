@@ -1,13 +1,13 @@
 /**
- * Railway 자체 GraphQL 툴 — backboard.railway.app/graphql/v2 직접 호출.
+ * Our own Railway GraphQL tools: they call backboard.railway.app/graphql/v2 directly.
  *
- * 왜 자체 툴: Railway remote MCP(mcp.railway.com)는 OAuth 전용(Project token 거부)이라
- * 무인 서버에서 못 씀. Public GraphQL API 는 token 인증을 지원하므로 이걸 직접 호출.
+ * Why our own tools: the Railway remote MCP (mcp.railway.com) is OAuth-only (it rejects project tokens), so it
+ * cannot be used on an unattended server. The public GraphQL API supports token auth, so it is called directly.
  *
- * RAILWAY_TOKEN: 전체 프로젝트 조회는 team/account token 필요.
- *   project token 은 me/projects 가 막혀 한 프로젝트(project(id))만 가능.
+ * RAILWAY_TOKEN: listing every project needs a team/account token.
+ *   A project token is blocked from me/projects, so it can only read one project (project(id)).
  *
- * 3 툴: railway_services(목록) → railway_deployments(배포상태) → railway_logs(로그)
+ * 3 tools: railway_services (list) -> railway_deployments (deploy status) -> railway_logs (logs)
  */
 import { z } from 'zod';
 import { defineTool } from '../../plugin/define.js';
@@ -53,7 +53,7 @@ function errOut(e: unknown) {
   return { content: [{ type: 'text' as const, text: `[error] ${msg}` }], isError: true };
 }
 
-// ── 1. railway_services — 전체 프로젝트·서비스·환경 목록 ──
+// ── 1. railway_services: list of all projects, services and environments ──
 export const railwayServicesTool = defineTool({
   name: 'railway_services',
   description:
@@ -89,7 +89,7 @@ export async function handleRailwayServices() {
   }
 }
 
-// ── 2. railway_deployments — 서비스 최근 배포 상태 ──
+// ── 2. railway_deployments: recent deploy status of a service ──
 const depSchema = z.object({
   projectId: z.string().min(1),
   serviceId: z.string().min(1),
@@ -133,7 +133,7 @@ export async function handleRailwayDeployments(args: z.infer<typeof depSchema>) 
   }
 }
 
-// ── 3. railway_logs — 배포/빌드 로그 ──
+// ── 3. railway_logs: deploy/build logs ──
 const logSchema = z.object({
   deploymentId: z.string().min(1),
   type: z.enum(['deploy', 'build']).default('deploy').describe('Default deploy'),
@@ -168,7 +168,8 @@ export async function handleRailwayLogs(args: z.infer<typeof logSchema>) {
         {
           type: 'text' as const,
           text: JSON.stringify(
-            // 로그 본문의 토큰·키는 응답 전에 가린다 — 로그를 읽는 사람이 그 서비스의 비밀값까지 보지 않게.
+            // Tokens and keys in the log body are masked before responding, so a person reading the logs does not
+            // also see that service's secrets.
             { type, count: logs.length, logs: logs.map((l) => ({ ts: l.timestamp, sev: l.severity, msg: maskString(l.message ?? '') })) },
             null,
             2,

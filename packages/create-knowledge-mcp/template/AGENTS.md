@@ -1,0 +1,137 @@
+# Setup guide for AI agents
+
+You are helping a person set up this Knowledge MCP server. They want to use it, not configure it. Do the setup
+for them with the commands below, and stop only where a person has to act (a browser sign-in, a secret only
+they hold, a choice about their cloud account).
+
+All commands run in this folder. `npm run setup -- <args>` passes arguments to the setup command.
+
+## Rules
+
+1. **Never ask the person to paste a secret into the chat, and never put one on a command line.** Tokens and keys
+   reach `.env` through the setup commands, or the person types them into `npm run setup` in their own terminal.
+2. **Never print a secret.** Do not `cat .env` or a key file. To see what is configured, run `npm run setup -- check`.
+3. **Ask before anything is created in their accounts.** `setup drive --gcloud` prints its plan first and creates
+   nothing without `--yes`. Show the plan, wait for a yes, then add `--yes`.
+4. **Do not edit `.env` or `mcp.config.json` by hand for credentials.** Use the commands. Editing
+   `mcp.config.json` for non-secret settings (excluded folder names) is fine.
+5. After every step, run `npm run setup -- check` and report what it says.
+
+## Step 1: see where things stand
+
+```bash
+npm run setup -- check
+```
+
+Each line is one service: `✓` works, `✗` is configured but failing (the message says why), `·` is not configured.
+Ask the person which services they want. They do not need all of them.
+
+## Step 2: Google Drive
+
+This needs the gcloud CLI and a Google Cloud project.
+
+```bash
+gcloud --version                 # installed?
+gcloud auth list                 # signed in?
+gcloud projects list             # which projects exist
+```
+
+| Situation | What to do |
+| --- | --- |
+| gcloud is missing | Install it by following https://cloud.google.com/sdk/docs/install for their system. Ask before installing |
+| Not signed in | The person runs `gcloud auth login` in their own terminal. It opens a browser. You cannot do this for them |
+| No project | Ask which name to use, then `gcloud projects create <id>` |
+| Signed in, project known | Continue below |
+
+Show the plan (creates nothing):
+
+```bash
+npm run setup -- drive --gcloud --project <project-id>
+```
+
+Read the output to the person: which account, which project, the three commands, and that the service account
+gets no project role. When they agree:
+
+```bash
+npm run setup -- drive --gcloud --project <project-id> --yes
+```
+
+This enables the Drive API, creates a read-only service account, saves its key to
+`drive-service-account.json` (git-ignored) and writes the path to `.env`.
+
+Then tell the person the service account address from the output and ask them to **share the Drive folders or
+documents they want searchable with that address, as Viewer**. Nothing is visible until they do. Shared items
+become searchable without a restart. Run `npm run setup -- check` to confirm: it shows how many items are shared.
+
+If the person already has a key file: `npm run setup -- drive --key /path/to/key.json`.
+
+| Error | Meaning | What to do |
+| --- | --- | --- |
+| organization blocks service account keys | An org policy forbids key creation | The person asks their Google Workspace admin to allow it for that project, or uses a project outside the organization |
+| no billing account | The project cannot enable APIs | Pick another project, or the person links billing |
+| lacks permission | Their account cannot manage that project | Pick a project they own |
+| needs a fresh sign-in | The gcloud login expired | The person runs `gcloud auth login` again |
+
+## Step 3: semantic search (optional)
+
+Keyword search and reading work without this. Search by meaning needs an embedding model. Vectors are stored in a
+local file, and the server builds the index by itself the first time it starts.
+
+| The person has | What to do |
+| --- | --- |
+| A local model server (Ollama, LM Studio) | `npm run setup -- embeddings --base-url http://localhost:11434/v1 --model bge-m3`. The vector size is detected |
+| An OpenAI API key | They run `npm run setup` in their terminal, pick Google Drive, and enter the key at the semantic search question |
+| Neither | Skip it. It can be added later |
+
+## Step 4: GitHub (optional)
+
+```bash
+gh auth status                   # signed in?
+npm run setup -- github --from-gh
+```
+
+This reuses the gh CLI login. Tell the person that this token can do everything their gh login can, and that a
+fine-grained read-only token is safer for a server other people use. If they prefer that, or gh is not signed
+in, they run `npm run setup` in their terminal and enter a token there.
+
+## Step 5: Slack and Railway (optional)
+
+These need a token the person creates in a web console, so they run `npm run setup` in their own terminal and
+pick the service. The wizard says where to get the token and checks it as they enter it.
+
+| Service | Where the token comes from |
+| --- | --- |
+| Slack | api.slack.com/apps → their app → OAuth & Permissions → Bot User OAuth Token (`xoxb-`). Scopes: `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `files:read`. Message search also needs a user token (`xoxp-`) with `search:read` |
+| Railway | railway.com → Account Settings → Tokens |
+
+## Step 6: keep sensitive folders out (optional)
+
+Ask whether any Drive folders must stay out of search (HR, contracts, personal data). Put the folder names in
+`mcp.config.json`. This file has no secrets and you may edit it:
+
+```json
+{ "drive": { "excludeFolders": ["HR", "Contracts"] } }
+```
+
+## Step 7: connect and verify
+
+```bash
+npm run setup -- check           # every configured line should be ✓
+npm run doctor                   # which tools are on
+```
+
+Connect it to the person's AI client. For Claude Code on this machine, no key is needed:
+
+```bash
+claude mcp add __NAME__ -- "$PWD/node_modules/.bin/tsx" "$PWD/src/server.ts" serve --stdio
+```
+
+For other people or remote clients, start the server with `npm run dev` and create a key. The key is printed
+once, so have the person run this themselves:
+
+```bash
+npm run keys -- create --email them@example.com --role admin
+```
+
+Finish by telling the person, in a few lines: which services are connected, the service account address to
+share Drive documents with, and anything they still have to do.

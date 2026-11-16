@@ -1,14 +1,14 @@
 /**
- * Markdown chunking — heading 기반 분할 + token-aware sub-split + overlap.
+ * Markdown chunking: split by heading, then a token-aware sub-split, then overlap.
  *
- * 전략:
- * 1. Front-matter (---...---) 분리 → metadata 추출 (검색 payload 승격)
- * 2. heading (^#{1,6} ) 위치마다 split → section. 코드블록 안의 "# 주석" 줄은 heading 이 아니다
- * 3. 각 section 이 MAX_TOKENS 넘으면 paragraph (\n\n) 단위로 sub-split
- *    - 표(|...|)·코드블록(```) 은 fence-aware (행/블록 중간에서 안 잘림)
- * 4. MIN_TOKENS 미만은 다음 청크와 merge
- * 5. 청크 시작에 OVERLAP_TOKENS 만큼 이전 청크 끝 prepend
- * 6. 이미지 markdown(![alt](url)) → URL 은 image_urls 로 분리, content 엔 alt 만 (임베딩 노이즈 방지)
+ * Strategy:
+ * 1. Split off the front matter (---...---) and extract metadata (promoted to the search payload)
+ * 2. Split at each heading (^#{1,6} ) into sections. A "# comment" line inside a code block is not a heading
+ * 3. If a section exceeds MAX_TOKENS, sub-split it by paragraph (\n\n)
+ *    - Tables (|...|) and code blocks (```) are fence-aware (never cut in the middle of a row or block)
+ * 4. Chunks under MIN_TOKENS are merged with a neighbouring chunk
+ * 5. The last OVERLAP_TOKENS of the previous chunk are prepended to the start of each chunk
+ * 6. Image markdown (![alt](url)): the URL moves to image_urls and only alt stays in content (avoids embedding noise)
  */
 import { encode } from 'gpt-tokenizer';
 import { parse as parseYaml } from 'yaml';
@@ -16,23 +16,23 @@ import { parse as parseYaml } from 'yaml';
 const MAX_TOKENS = 800;
 const MIN_TOKENS = 50;
 const OVERLAP_TOKENS = 100;
-// 단일 unit(문단/문장)의 절대 상한 — 초과 시 강제 분할. 임베딩 API 입력 초과(Bad Request) 방지.
+// Hard cap for one unit (paragraph or sentence). Larger units are force-split to avoid an embedding API Bad Request.
 const HARD_MAX_TOKENS = MAX_TOKENS;
 
 export interface RawChunk {
   heading: string;
   content: string;
   tokens: number;
-  // ── 이미지·구조 메타 (2026-05-27 RAG 개선) ──
+  // ── Image and structure metadata ──
   image_urls: string[];
   table_count: number;
   has_code_block: boolean;
-  // ── frontmatter 승격 (문서 단위 — 모든 청크 동일) ──
+  // ── Front matter fields (per document, identical on every chunk) ──
   doc_status: string | null;
   doc_date: string | null;
   doc_authors: string[];
   doc_related: string[];
-  // ── frontmatter 승격 (신규: 검색 연결·필터) ──
+  // ── Front matter fields (search links and filters) ──
   doc_tags: string[];
   doc_source_refs: string[];
   doc_affects: string[];
@@ -48,7 +48,7 @@ export interface ParsedDoc {
 
 const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n+/;
 
-/** CRLF·CR → LF. Windows 에서 만든 파일은 frontmatter 와 heading 정규식에 걸리지 않았다. */
+/** CRLF and CR to LF. Files created on Windows did not match the front matter and heading regexes. */
 function normalizeNewlines(text: string): string {
   return text.replace(/\r\n?/g, '\n');
 }
@@ -58,8 +58,8 @@ export function parseFrontmatter(input: string): ParsedDoc {
   const m = markdown.match(FRONTMATTER_RE);
   if (!m) return { frontmatter: {}, body: markdown };
 
-  // 정식 YAML 파싱 — multi-line list(related/source_refs/affects)·inline 배열·따옴표를 문법대로.
-  // (구 단일라인 정규식은 multi-line list 를 빈 값으로 버려 related 의 ~89% 유실 → yaml 파서로 교체)
+  // Proper YAML parsing: multi-line lists (related/source_refs/affects), inline arrays and quotes follow the grammar.
+  // The old single-line regex read multi-line lists as empty and lost about 89% of related, hence the YAML parser.
   let fm: Record<string, unknown> = {};
   try {
     const parsed = parseYaml(m[1]);
@@ -67,7 +67,7 @@ export function parseFrontmatter(input: string): ParsedDoc {
       fm = parsed as Record<string, unknown>;
     }
   } catch {
-    // 깨진 YAML frontmatter — 본문은 보존, 메타만 빈값 (fail-safe: 한 문서가 색인 전체를 멈추지 않게)
+    // Broken YAML front matter: keep the body, leave metadata empty. One document must not stop the whole indexing run.
     fm = {};
   }
   return { frontmatter: fm, body: markdown.slice(m[0].length) };
@@ -86,7 +86,7 @@ interface DocMeta {
   doc_confidence: string | null;
 }
 
-/** unknown → 정규화 문자열 (Date·number·bool 방어). 빈 문자열은 null. */
+/** unknown to a normalized string (guards against Date, number, boolean). An empty string becomes null. */
 function asString(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   if (typeof v === 'string') return v.trim() || null;
@@ -95,7 +95,7 @@ function asString(v: unknown): string | null {
   return null;
 }
 
-/** unknown → string[]. yaml 배열 그대로 / "[a,b]"·"a,b" 문자열 / 단일값 모두 흡수. */
+/** unknown to string[]. Accepts a YAML array as is, a "[a,b]" or "a,b" string, and a single value. */
 function asArray(v: unknown): string[] {
   if (v === null || v === undefined) return [];
   if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
@@ -110,7 +110,7 @@ function asArray(v: unknown): string[] {
   return [];
 }
 
-/** frontmatter(yaml 파싱 결과) → 검색 payload 메타. */
+/** Front matter (parsed YAML) to search payload metadata. */
 function parseDocMeta(fm: Record<string, unknown>): DocMeta {
   return {
     doc_status: asString(fm.status),
@@ -127,19 +127,19 @@ function parseDocMeta(fm: Record<string, unknown>): DocMeta {
 }
 
 function countTokens(text: string): number {
-  // gpt-tokenizer 는 cl100k_base (text-embedding-3 호환) 기본
+  // gpt-tokenizer defaults to cl100k_base (compatible with text-embedding-3)
   return encode(text).length;
 }
 
-// lone surrogate (짝 안 맞는 UTF-16 surrogate) 제거 — 토큰 경계 cut 이 이모지(surrogate pair)를
-// 중간에 쪼개 반쪽만 남으면 임베딩 API 가 invalid 로 400 Bad Request.
+// Removes lone surrogates (unpaired UTF-16 surrogates). A cut on a token boundary can split an emoji (surrogate pair)
+// and leave one half behind, which the embedding API rejects as invalid with 400 Bad Request.
 const LONE_SURROGATE_RE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 function stripLoneSurrogates(text: string): string {
   return text.replace(LONE_SURROGATE_RE, '');
 }
 
-// ![alt](url) — 이미지 markdown. URL 은 image_urls 로 분리, content 엔 alt 만 (영문 URL 토큰이
-// 한국어 임베딩 벡터를 흔드는 것 방지). alt 가 비면 자리 제거.
+// ![alt](url) is image markdown. The URL moves to image_urls and only alt stays in content, so English URL tokens
+// do not skew the embedding vector of Korean text. If alt is empty, the image is removed entirely.
 const IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 function extractImages(content: string): { content: string; image_urls: string[] } {
   const urls: string[] = [];
@@ -150,12 +150,12 @@ function extractImages(content: string): { content: string; image_urls: string[]
   return { content: cleaned, image_urls: urls };
 }
 
-/** 청크 내 markdown table 개수 (separator 행 `|---|` 수로 근사). */
+/** Number of markdown tables in the chunk (approximated by counting `|---|` separator rows). */
 function countTables(content: string): number {
   return (content.match(/^\s*\|[\s:|-]+\|\s*$/gm) ?? []).length;
 }
 
-/** markdown table block 인지 (행 70%+ 가 |...| 형태). */
+/** Whether the text is a markdown table block (70% or more of the rows have the |...| form). */
 function isTableBlock(text: string): boolean {
   const lines = text.trim().split('\n');
   if (lines.length < 2) return false;
@@ -163,7 +163,7 @@ function isTableBlock(text: string): boolean {
   return pipeLines >= lines.length * 0.7;
 }
 
-/** 큰 표를 행 단위로 분할 + 각 조각에 header(첫 행 + separator) prepend (컬럼명 보존). */
+/** Splits a large table by row and prepends the header (first row + separator) to each piece (keeps column names). */
 function splitTable(table: string, maxTokens: number): string[] {
   const lines = table.trim().split('\n');
   const sepIdx = lines.findIndex((l) => /^\s*\|[\s:|-]+\|\s*$/.test(l));
@@ -189,7 +189,7 @@ function splitTable(table: string, maxTokens: number): string[] {
   return out.length > 0 ? out : [table];
 }
 
-/** 코드블록(```) 보호하며 \n\n paragraph split. 코드블록은 통째 1 unit. */
+/** Splits into paragraphs on \n\n while protecting code blocks (```). A code block stays whole as one unit. */
 function splitParagraphs(text: string): string[] {
   const out: string[] = [];
   for (const seg of text.split(/(```[\s\S]*?```)/g)) {
@@ -205,7 +205,8 @@ function splitParagraphs(text: string): string[] {
 }
 
 /**
- * 한국어·영어 문장 분리 (보수적). 종결부호/개행 기준. 분리 실패 시 원문 1개 (손실 X).
+ * Conservative sentence split for Korean and English, based on terminal punctuation and newlines.
+ * If the split fails, the original text is returned as one item (nothing is lost).
  */
 function splitSentences(text: string): string[] {
   const parts = text
@@ -216,7 +217,8 @@ function splitSentences(text: string): string[] {
 }
 
 /**
- * 문자 단위 hard cut (문장조차 상한 초과 시 최후 수단). 이진탐색으로 maxTokens 이하 최대 prefix.
+ * Hard cut by characters (last resort when even a sentence exceeds the cap).
+ * A binary search finds the longest prefix within maxTokens.
  */
 function hardCutByChars(text: string, maxTokens: number): string[] {
   if (countTokens(text) <= maxTokens) return [text];
@@ -245,7 +247,7 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
   return out;
 }
 
-/** text 의 마지막 maxTokens 토큰에 해당하는 suffix (overlap 용, 이진탐색). */
+/** The suffix of text that fits in the last maxTokens tokens (for the overlap, binary search). */
 function tailByTokens(text: string, maxTokens: number): string {
   if (countTokens(text) <= maxTokens) return text;
   let lo = 0;
@@ -264,12 +266,13 @@ function tailByTokens(text: string, maxTokens: number): string {
 }
 
 /**
- * MAX 초과 unit 강제 분할. 표면 행 단위(header 반복), 아니면 문장 budget → 문자 hard cut.
- * 모든 반환 unit 은 maxTokens 이하 보장.
+ * Force-splits a unit over the maximum. A table is split by row (header repeated). Other text is packed by sentence
+ * within the budget, with a hard cut by characters as the fallback.
+ * Every returned unit is guaranteed to be within maxTokens.
  */
 function splitLongText(text: string, maxTokens: number): string[] {
   if (countTokens(text) <= maxTokens) return [text];
-  // 표는 행 단위 분리 (각 조각 header prepend)
+  // Tables are split by row (the header is prepended to each piece)
   if (isTableBlock(text)) return splitTable(text, maxTokens);
 
   const out: string[] = [];
@@ -302,18 +305,18 @@ const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})/;
 
 /**
- * body 를 heading 줄마다 section 으로 자른다. 코드블록(``` 또는 ~~~) 안의 줄은 heading 으로 보지 않는다 —
- * 셸·파이썬 주석("# install")에서 잘리면 코드가 반으로 나뉘고 주석이 breadcrumb 에 들어갔다.
+ * Cuts body into sections at each heading line. Lines inside a code block (``` or ~~~) are not treated as headings.
+ * Cutting at a shell or Python comment ("# install") split the code in half and put the comment into the breadcrumb.
  */
 function splitSections(body: string): string[] {
   const sections: string[] = [];
   let buf: string[] = [];
-  let fence: string | null = null; // 열린 fence 의 표식 문자열(``` 또는 ~~~)
+  let fence: string | null = null; // marker string of the open fence (``` or ~~~)
   for (const line of body.split('\n')) {
     const f = line.match(FENCE_RE);
     if (f) {
       if (fence === null) fence = f[1];
-      // 닫는 fence = 같은 문자, 같거나 긴 길이, 뒤에 info 문자열 없음(CommonMark)
+      // A closing fence uses the same character, is at least as long, and has no info string after it (CommonMark)
       else if (f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
     } else if (fence === null && HEADING_RE.test(line) && buf.length > 0) {
       sections.push(buf.join('\n'));
@@ -325,7 +328,10 @@ function splitSections(body: string): string[] {
   return sections;
 }
 
-/** section 첫 줄의 heading 레벨(#개수)+텍스트 — breadcrumb(상위 > 하위) 구성용. 첫 줄이 heading 이 아니면 null. */
+/**
+ * Heading level (number of #) and text from the first line of a section, used to build the breadcrumb
+ * (parent > child). Returns null if the first line is not a heading.
+ */
 function extractHeading(section: string): { level: number; text: string } | null {
   const m = section.split('\n', 1)[0].match(HEADING_RE);
   return m ? { level: m[1].length, text: m[2].trim() } : null;
@@ -338,7 +344,7 @@ interface PreChunk {
 }
 
 /**
- * 전체 markdown → 청크 array. heading context + 이미지/표/코드/frontmatter 메타 보존.
+ * Full markdown to an array of chunks. Keeps the heading context and image/table/code/front matter metadata.
  */
 export function chunkMarkdown(markdown: string): RawChunk[] {
   const { frontmatter, body } = parseFrontmatter(markdown);
@@ -347,16 +353,16 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
 
   const sections = splitSections(body);
   const chunks: PreChunk[] = [];
-  const headingStack: string[] = []; // index = (heading level - 1) → breadcrumb 상위>하위 맥락 보존
-  let currentHeading = ''; // 첫 heading 이전 본문은 heading 없음(예전엔 한국어 자리표시 '문서 시작')
+  const headingStack: string[] = []; // index = (heading level - 1), keeps the parent > child breadcrumb context
+  let currentHeading = ''; // body before the first heading has no heading (older versions used a Korean placeholder here)
 
   for (const section of sections) {
     if (section.trim().length === 0) continue;
 
     const h = extractHeading(section);
     if (h) {
-      headingStack.length = h.level - 1; // 같거나 더 깊은 레벨 잘라내고
-      headingStack[h.level - 1] = h.text; // 현재 레벨 갱신
+      headingStack.length = h.level - 1; // drop entries at the same or a deeper level
+      headingStack[h.level - 1] = h.text; // then set the current level
       const crumb = headingStack.filter(Boolean).join(' > ');
       if (crumb) currentHeading = crumb;
     }
@@ -387,7 +393,7 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
     }
   }
 
-  // MIN_TOKENS 미만 청크 merge
+  // Merge chunks under MIN_TOKENS
   const merged: PreChunk[] = [];
   for (const c of chunks) {
     if (c.tokens < MIN_TOKENS && merged.length > 0) {
@@ -399,8 +405,8 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
     }
   }
 
-  // 1. 이미지 URL 분리 + surrogate strip + 메타 계산 — overlap *전* 고유 content 기준.
-  //    (overlap 후 계산하면 이전 청크의 이미지/코드가 인접 청크 메타에 오염됨)
+  // 1. Separate image URLs, strip surrogates and compute metadata from each chunk's own content, before the overlap.
+  //    (Computing after the overlap would leak the previous chunk's images and code into the next chunk's metadata.)
   const withMeta = merged.map((c) => {
     const tableCount = countTables(c.content);
     const hasCode = /```/.test(c.content);
@@ -414,16 +420,16 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
     };
   });
 
-  // 2. Overlap prepend — 이미지 URL 이 이미 분리된 텍스트 suffix (overlap 에 URL 안 섞임).
-  //    ⚠️ tailByTokens 는 토큰 경계로 자르므로 이모지(surrogate pair)를 반토막 낼 수 있다.
-  //    이 lone surrogate 가 Qdrant payload content 에 들어가면 invalid UTF-8 JSON → upsert 400.
-  //    → 아래 3단계에서 최종 content 에 strip 을 한 번 더 적용해 제거한다.
+  // 2. Prepend the overlap: a text suffix with image URLs already removed (no URL gets into the overlap).
+  //    Warning: tailByTokens cuts on a token boundary, so it can cut an emoji (surrogate pair) in half.
+  //    If that lone surrogate reaches the Qdrant payload content, the JSON is invalid UTF-8 and the upsert returns 400.
+  //    Step 3 below strips the final content once more to remove it.
   for (let i = 1; i < withMeta.length; i++) {
     const overlap = tailByTokens(withMeta[i - 1].content, OVERLAP_TOKENS);
     if (overlap) withMeta[i].content = `…${overlap}\n\n${withMeta[i].content}`;
   }
 
-  // 3. 최종 RawChunk — overlap 후 재생성된 lone surrogate 재제거(Qdrant 400 방지) + frontmatter 동봉.
+  // 3. Final RawChunk: strip lone surrogates created by the overlap again (prevents Qdrant 400), attach front matter.
   return withMeta.map((c) => {
     const content = stripLoneSurrogates(c.content);
     return {

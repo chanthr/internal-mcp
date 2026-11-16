@@ -1,13 +1,14 @@
 /**
- * Qdrant REST client + collection 관리.
+ * Qdrant REST client and collection management.
  *
  * Collection: config.qdrant.collection (default knowledge_v1), or env QDRANT_COLLECTION.
  * Vector size: 1536 (text-embedding-3-small)
  * Distance: Cosine
  *
- * @qdrant/js-client-rest 대신 Node 내장 fetch 로 REST API 를 부른다. 그 라이브러리는 최신판(1.19)도 취약한
- * undici 7.29 를 고정 의존성으로 끌어와, 이 패키지를 설치하는 모든 사람에게 npm audit 경고를 남겼다.
- * 쓰는 엔드포인트가 9개뿐이라 직접 부르는 편이 가볍다. 메서드 이름과 반환 모양은 그 라이브러리와 같게 뒀다.
+ * Calls the REST API with Node's built-in fetch instead of @qdrant/js-client-rest. Even the latest release (1.19) of
+ * that library pins a vulnerable undici 7.29 as a dependency, which left an npm audit warning for everyone who installs
+ * this package. Only nine endpoints are used, so calling them directly is lighter. Method names and return shapes
+ * are kept the same as that library.
  */
 import { EMBEDDING_DIM } from './embeddings.js';
 import { getConfig } from '../../core/config.js';
@@ -24,7 +25,7 @@ export interface ScoredPoint extends QdrantPoint {
   version?: number;
 }
 
-const QDRANT_TIMEOUT_MS = 10_000; // 짧은 timeout 으로 cold-start hang 회피
+const QDRANT_TIMEOUT_MS = 10_000; // short timeout to avoid hanging on a cold start
 
 export class QdrantError extends Error {
   constructor(
@@ -84,6 +85,11 @@ export class QdrantClient {
     return this.call('GET', '/collections');
   }
 
+  /** Collection info. Only the vector size is read here (single unnamed vector). */
+  getCollection(name: string): Promise<{ config?: { params?: { vectors?: { size?: number } } } }> {
+    return this.call('GET', this.col(name));
+  }
+
   createCollection(name: string, body: Record<string, unknown>): Promise<boolean> {
     return this.call('PUT', this.col(name), body);
   }
@@ -132,46 +138,70 @@ let _client: QdrantClient | null = null;
 // Zero-downtime reindex: env QDRANT_COLLECTION overrides (index into a new collection, then swap the
 // env var -> 0 downtime; remove it to roll back). Falls back to config.qdrant.collection.
 export const DRIVE_COLLECTION = process.env.QDRANT_COLLECTION || getConfig().qdrant.collection;
-// 차원 SSOT = embeddings.ts (모델 출력 차원). collection size 가 임베딩 차원과 항상 일치하도록 재노출.
+// The dimension is defined in embeddings.ts (the model output dimension). Re-exported so the collection size always
+// matches the embedding dimension.
 export { EMBEDDING_DIM };
 
-/** Qdrant 클라이언트(프로세스당 하나). */
-export async function getQdrantClient(): Promise<QdrantClient> {
+/** The vector store the Drive plugin talks to: Qdrant, or the built-in SQLite store with the same methods. */
+export type VectorClient = Pick<
+  QdrantClient,
+  'getCollections' | 'getCollection' | 'createCollection' | 'deleteCollection' | 'createPayloadIndex' | 'upsert' | 'delete' | 'retrieve' | 'scroll' | 'search'
+>;
+
+/** Which store is in use: Qdrant when QDRANT_URL is set, otherwise the built-in file (local_vectors.ts). */
+export function vectorStoreKind(): 'qdrant' | 'built-in' {
+  return process.env.QDRANT_URL?.trim() ? 'qdrant' : 'built-in';
+}
+
+/** The vector store (one per process). The name is kept from when Qdrant was the only store. */
+export async function getQdrantClient(): Promise<VectorClient> {
+  const url = process.env.QDRANT_URL?.trim();
+  if (!url) return (await import('./local_vectors.js')).getLocalVectorClient();
   if (_client) return _client;
-  const url = process.env.QDRANT_URL;
-  if (!url) throw new Error('[qdrant] QDRANT_URL env missing');
   _client = new QdrantClient(url, process.env.QDRANT_API_KEY || undefined);
   return _client;
 }
 
 /**
- * Collection 이 없으면 생성. Idempotent.
- * Payload field 중 자주 filter 하는 것은 indexed payload 로 등록.
+ * Creates the collection if it does not exist. Idempotent.
+ * Payload fields that are filtered often are registered as indexed payload.
  */
 export async function ensureCollection(): Promise<void> {
   const client = await getQdrantClient();
   const collections = await client.getCollections();
   const exists = collections.collections.some((c) => c.name === DRIVE_COLLECTION);
 
-  if (exists) return;
+  if (exists) {
+    // A collection built with another embedding model has a different vector size. Writing to it would fail on
+    // every point with an unclear error, so stop here and say how to fix it.
+    const size = (await client.getCollection(DRIVE_COLLECTION)).config?.params?.vectors?.size;
+    if (typeof size === 'number' && size !== EMBEDDING_DIM) {
+      throw new Error(
+        `[qdrant] collection '${DRIVE_COLLECTION}' holds ${size}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. ` +
+          'After changing the embedding model, reindex into a new collection: set QDRANT_COLLECTION to a new name, ' +
+          'or run "knowledge-mcp drive reindex --recreate".',
+      );
+    }
+    return;
+  }
 
   await client.createCollection(DRIVE_COLLECTION, {
     vectors: {
       size: EMBEDDING_DIM,
       distance: 'Cosine',
     },
-    // HNSW 기본 (m=16, ef_construct=100) — 1만 vec 까지 충분
+    // HNSW defaults (m=16, ef_construct=100), enough up to 10,000 vectors
     optimizers_config: {
       default_segment_number: 2,
     },
   });
 
-  // 자주 filter 하는 payload field 에 index (검색 빠름)
+  // Index the payload fields that are filtered often (faster search)
   for (const fieldName of [
     'file_type', 'cluster', 'file_id', 'source',
-    // 이미지 유무 / frontmatter 메타 filter
+    // filters on image presence and front matter metadata
     'has_image', 'doc_status',
-    // 신규 — 태그·모드·경로 파생 filter (배열 doc_tags 는 원소 단위 keyword 매칭)
+    // filters on tags, mode and path-derived fields (the doc_tags array matches by keyword per element)
     'doc_tags', 'doc_type', 'doc_category', 'doc_customer',
   ] as const) {
     await client.createPayloadIndex(DRIVE_COLLECTION, {
@@ -181,8 +211,8 @@ export async function ensureCollection(): Promise<void> {
   }
 }
 
-// interface 가 아니라 type 별칭 — Qdrant upsert 의 payload(Record<string, unknown>) 에 할당 가능해야 함
-// (interface 는 declaration merging 때문에 index-signature 타입에 비할당. type 별칭은 가능).
+// A type alias, not an interface: it must be assignable to the Qdrant upsert payload (Record<string, unknown>).
+// (An interface is not assignable to an index-signature type because of declaration merging. A type alias is.)
 export type ChunkPayload = {
   chunk_id: string;
   file_id: string;
@@ -190,33 +220,33 @@ export type ChunkPayload = {
   file_path: string;
   heading: string;
   chunk_index: number;
-  chunk_count: number; // 이 파일의 총 청크 수 — 재색인 시 줄어든 orphan 청크 삭제(B-1) 판정용.
+  chunk_count: number; // total chunks of this file, used to delete orphan chunks when a reindex produces fewer.
   content: string;
   modified_time: string;
-  content_hash: string; // 추출 텍스트 sha256 — 무변경 재색인 skip(EFF-1) 판정용. 모든 청크 동일값.
+  content_hash: string; // sha256 of the extracted text, used to skip unchanged reindexing. Same on every chunk.
   file_type: 'dev_log' | 'decision' | 'rule' | 'template' | 'biz' | 'other';
   cluster: string | null;
-  source: 'dev' | 'biz';
+  source: string;
 
-  // ── 신규: 이미지·구조 메타 (2026-05-27 RAG 개선) ──
-  image_urls: string[]; // 청크 내 Mathpix CDN(또는 영구화) 이미지 URL
-  has_image: boolean; // image_urls.length > 0 — payload filter 인덱싱용
-  table_count: number; // 청크 내 markdown table 개수
-  has_code_block: boolean; // ``` fence 존재 여부
+  // ── Image and structure metadata ──
+  image_urls: string[]; // Mathpix CDN (or persisted) image URLs in the chunk
+  has_image: boolean; // image_urls.length > 0, for payload filter indexing
+  table_count: number; // number of markdown tables in the chunk
+  has_code_block: boolean; // whether a ``` fence is present
 
-  // ── frontmatter 승격 (검색 filter·연결) ──
+  // ── Front matter fields (search filters and links) ──
   doc_status: string | null; // frontmatter status (any value; superseded and parked are demoted in search)
   doc_date: string | null; // ISO date
   doc_authors: string[]; // ["alice", "claude"]
-  doc_related: string[]; // 문서↔문서 연결 (related)
-  doc_tags: string[]; // 태그 (dev=frontmatter tags / biz=경로·파일명 파생)
-  doc_source_refs: string[]; // 문서→코드 경로 (source_refs)
-  doc_affects: string[]; // 결정→현황 (affects)
-  doc_products: string[]; // 가로지르는 제품
-  doc_type: string | null; // 현황 | 결정 | 이력 | bug
+  doc_related: string[]; // document-to-document links (related)
+  doc_tags: string[]; // tags (dev = front matter tags / biz = derived from path and file name)
+  doc_source_refs: string[]; // document-to-code paths (source_refs)
+  doc_affects: string[]; // decision → affected status docs (affects)
+  doc_products: string[]; // products the document spans
+  doc_type: string | null; // e.g. status | decision | history | bug
   doc_confidence: string | null; // HIGH | MEDIUM
 
-  // ── 경로 파생 (biz 소스 — frontmatter 없는 PDF/docx) ──
-  doc_category: string | null; // 최상위 폴더(NN_ 제거): 예) Clients, Sales, Finance
-  doc_customer: string | null; // {customerFolders}/{name} → 고객사명(config drive.customerFolders)
+  // ── Path-derived fields (biz sources: PDF/docx with no front matter) ──
+  doc_category: string | null; // top-level folder (NN_ removed), e.g. Clients, Sales, Finance
+  doc_customer: string | null; // {customerFolders}/{name} → customer name (config drive.customerFolders)
 }

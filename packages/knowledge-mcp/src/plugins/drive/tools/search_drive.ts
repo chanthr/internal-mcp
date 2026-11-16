@@ -1,14 +1,14 @@
 /**
- * search_drive(query, mode?, mimeType?, pageSize?) — Google Drive 파일 검색.
+ * search_drive(query, mode?, mimeType?, pageSize?): searches files in Google Drive.
  *
- * 권한 그룹: drive. 폴더 범위는 app_users.allowed_drive_folders. Drive 접근은 서버 자격증명.
+ * Permission group: drive. Folder scope comes from app_users.allowed_drive_folders. Drive access uses the server's credentials.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
-import { classifyAndPath, type SearchClass } from '../path.js';
+import { classifyAndPath, isReadableClass, type SearchClass } from '../path.js';
 import { isExcludedName } from '../exclude.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -52,8 +52,10 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
       fields:
         'files(id, name, mimeType, parents, modifiedTime, size, webViewLink, owners(emailAddress))',
       pageSize,
-      orderBy: 'modifiedTime desc',
-      // 공유 드라이브까지 찾는다. 없으면 root 가 공유 드라이브일 때 결과가 늘 0건이다.
+      // Full-text results come back by relevance when no order is given. Drive rejects or ignores an explicit
+      // order on fullText queries, and newest-first buried the best match. Title search stays newest-first.
+      ...(mode === 'fullText' ? {} : { orderBy: 'modifiedTime desc' }),
+      // Search shared drives too. Without this, results are always 0 when the root is a shared drive.
       corpora: 'allDrives',
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
@@ -70,20 +72,21 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
       owners: (f.owners || []).map((o) => o.emailAddress).filter(Boolean),
     }));
 
-    // 보안: 민감/제외 폴더(PII·계약·HR·deprecated)·색인 대상 밖 제거 + 직원별 Drive 폴더 scope.
-    // 폴더 결과는 그 폴더 자신도 본다. 부모만 보면 제외 폴더(예: HR)가 이름으로 결과에 나오고,
-    // 허용 폴더 자체는 부모 경로가 범위 밖이라 빠진다.
+    // Security: remove sensitive/excluded folders (PII, contracts, HR, deprecated) and anything outside the index, then apply
+    // the per-user Drive folder scope.
+    // For a folder result, the folder itself is checked too. Checking only the parent would let an excluded folder (e.g. HR)
+    // show up by name, and would drop an allowed folder itself because its parent path is outside the scope.
     const folderScope = allowedDriveFolders(auth);
     const cps = await Promise.all(
       raw.map(async (f): Promise<{ cls: SearchClass; path: string }> => {
         const parent = await classifyAndPath(drive, f.parents);
-        if (f.mimeType !== FOLDER_MIME || parent.cls !== 'ok') return parent;
+        if (f.mimeType !== FOLDER_MIME || !isReadableClass(parent.cls)) return parent;
         if (isExcludedName(f.name)) return { cls: 'excluded', path: '' };
-        return { cls: 'ok', path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
+        return { cls: parent.cls, path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
       }),
     );
     const files = raw.filter(
-      (_, i) => cps[i].cls === 'ok' && (!folderScope || isPathInScope(cps[i].path, folderScope)),
+      (_, i) => isReadableClass(cps[i].cls) && (!folderScope || isPathInScope(cps[i].path, folderScope)),
     );
 
     return {
@@ -91,7 +94,8 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
         {
           type: 'text' as const,
           text: JSON.stringify(
-            // 걸러진 건수는 돌려주지 않는다 — 범위 밖 사람이 단어를 넣어 "못 보는 파일에 그 단어가 몇 개 있는지" 알 수 있다.
+            // The number of filtered-out items is not returned: a person outside the scope could enter a word and learn how many
+            // files they cannot see contain it.
             { count: files.length, mode, query, files },
             null,
             2,

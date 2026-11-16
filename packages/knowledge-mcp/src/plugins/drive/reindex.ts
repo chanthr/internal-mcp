@@ -1,30 +1,34 @@
 /**
- * Drive 전체 indexing 스크립트.
+ * Full Drive indexing script.
  *
- * 동작:
- *   1. Drive 의 모든 .md 파일 list (recursive — 폴더 → 폴더)
- *   2. 각 파일 download → markdown 본문
- *   3. heading 기반 chunking + token 카운트
+ * What it does:
+ *   1. List every .md file in Drive (recursive, folder by folder)
+ *   2. Download each file to get the markdown body
+ *   3. Chunk by heading and count tokens
  *   4. OpenAI embedding (batch)
- *   5. Qdrant upsert (idempotent — chunk_id 기반)
+ *   5. Qdrant upsert (idempotent, keyed by chunk_id)
  *
- * 사용 (drive 플러그인 명령):
+ * Usage (drive plugin commands):
  *   knowledge-mcp drive reindex                     # index all configured Drive roots
- *   knowledge-mcp drive reindex --root <folderId>   # 특정 폴더만
- *   knowledge-mcp drive reindex --dry-run           # indexing X, 통계만
- *   knowledge-mcp drive reindex --recreate          # collection 을 비우고 처음부터
+ *   knowledge-mcp drive reindex --root <folderId>   # one folder only
+ *   knowledge-mcp drive reindex --dry-run           # no indexing, statistics only
+ *   knowledge-mcp drive reindex --recreate          # empty the collection and start over
  *
- * 전체 root 로 돌리면(--root/--biz-only/--dev-only 없이) 끝에서 이번 목록에 없는 파일의 벡터를 지운다.
- * 제외 폴더로 옮긴 파일, 나중에 excludeFolders 에 넣은 폴더, config 에서 뺀 root 의 청크가 여기서 정리된다.
+ * A run over all roots (no --root/--source) ends by deleting the vectors of files that are not in this run's listing.
+ * This cleans up chunks of files moved into an excluded folder, of folders added to excludeFolders later, and of
+ * roots removed from the config.
  */
 import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { chunkMarkdown } from './chunker.js';
-import { embedTexts } from './embeddings.js';
+import { embedTexts, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
+import { classifyAndPath } from './path.js';
+import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
 import { ensureCollection, getQdrantClient, DRIVE_COLLECTION } from './qdrant.js';
-// 색인 코어 로직 SSOT — drive_sync(증분)와 공유해 drift 방지(특히 makeChunkId 일치 = orphan 로직 정합).
+// Single source of truth for the core indexing logic, shared with the incremental sync (sync.ts) to prevent drift.
+// In particular makeChunkId must match on both paths for the orphan chunk logic to hold.
 import {
   makeChunkId,
   classifyFile,
@@ -41,13 +45,15 @@ import { join } from 'path';
 import { dataDir } from '../../core/paths.js';
 import { createLimiter } from '../../core/concurrency.js';
 
-// 폴더 목록 호출의 동시 개수 상한. 하위 폴더를 제한 없이 동시에 열면 폴더가 수천 개일 때 Drive 속도 제한(403)이 난다.
+// Cap on concurrent folder listing calls. Opening subfolders with no limit hits the Drive rate limit (403) when there
+// are thousands of folders.
 const listGate = createLimiter(Number(process.env.DRIVE_LIST_CONCURRENCY ?? 8));
 
-// 체크포인트 — 처리 완료 파일을 기록 → 재시작 시 skip (429 중단 후 재개·재실행 비용 절감).
-// 파일마다 modifiedTime 을, 전체에 컬렉션 이름을 함께 둔다. 그래서 그사이 바뀐 파일과 다른 컬렉션(QDRANT_COLLECTION
-// 교체 재색인)으로 도는 실행은 체크포인트를 믿지 않는다. 예전 형식(file_id 배열)은 버리고 처음부터 한다.
-// 데이터 폴더에 둔다(패키지 폴더는 npm 설치본이라 쓰기 불가일 수 있다).
+// Checkpoint: records finished files so a restart skips them (resume after a 429 abort, cheaper reruns).
+// It stores modifiedTime per file and the collection name for the whole run. So a file changed in the meantime, or a
+// run against another collection (a reindex after switching QDRANT_COLLECTION), does not trust the checkpoint. The old
+// format (an array of file_id) is discarded and the run starts from scratch.
+// It is kept in the data folder (the package folder is an npm install and may not be writable).
 const CHECKPOINT_PATH = join(dataDir(), 'drive-reindex-checkpoint.json');
 type Checkpoint = Map<string, string>; // file_id → modifiedTime
 function loadCheckpoint(): Checkpoint {
@@ -71,23 +77,23 @@ function clearCheckpoint(): void {
 interface DriveRoot {
   id: string;
   name: string;
-  source: 'dev' | 'biz';
+  source: string;
 }
 
 interface CliArgs {
   roots: DriveRoot[];
   dryRun: boolean;
   recreate: boolean;
-  /** 일부 root 만 도는 실행인가 — 그때는 다른 root 의 벡터를 지우면 안 되므로 정리를 건너뛴다. */
+  /** True when the run covers only some roots. Cleanup is then skipped so vectors of other roots are not deleted. */
   partial: boolean;
 }
 
 function parseArgs(args: string[]): CliArgs {
   let roots: DriveRoot[] = DRIVE_ROOTS;
-  if (DRIVE_ROOTS.length === 0) {
-    // 빈 목록으로 전체 실행을 하면 "목록에 없는 파일" 정리가 컬렉션을 통째로 지운다.
+  if (DRIVE_ROOTS.length === 0 && !sharedScopeEnabled()) {
+    // A full run with an empty list would make the "files not in the listing" cleanup delete the whole collection.
     throw new Error(
-      'drive.roots is empty, so there is nothing to index. Set drive.roots in mcp.config.json or MCP_CONFIG_JSON ' +
+      'drive.roots is empty and drive.scope is "roots", so there is nothing to index. Set drive.roots in mcp.config.json or MCP_CONFIG_JSON ' +
         '(the Docker image reads /app/mcp.config.json).',
     );
   }
@@ -96,23 +102,27 @@ function parseArgs(args: string[]): CliArgs {
   let partial = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--root' && args[i + 1]) {
-      // 설정한 root 하나만. 아무 폴더나 받으면 그 폴더 기준의 짧은 경로로 색인돼 폴더 권한을 비켜 가거나,
-      // root 밖 내용이 의미 검색에 들어간다.
+      // Only a configured root is accepted. An arbitrary folder would be indexed with short paths relative to that
+      // folder, which bypasses folder permissions, or would bring content outside the roots into semantic search.
       const id = args[++i];
       const root = DRIVE_ROOTS.find((r) => r.id === id);
       if (!root) throw new Error(`--root ${id} is not one of drive.roots (${DRIVE_ROOTS.map((r) => r.id).join(', ')})`);
       roots = [root];
       partial = true;
-    } else if (args[i] === '--biz-only') {
-      roots = DRIVE_ROOTS.filter((r) => r.source === 'biz');
+    } else if (args[i] === '--source' && args[i + 1]) {
+      const label = args[++i];
+      roots = DRIVE_ROOTS.filter((r) => r.source === label);
+      if (roots.length === 0) throw new Error(`--source ${label} matches no root (labels: ${[...new Set(DRIVE_ROOTS.map((r) => r.source))].join(', ')})`);
       partial = true;
-    } else if (args[i] === '--dev-only') {
-      roots = DRIVE_ROOTS.filter((r) => r.source === 'dev');
+    } else if (args[i] === '--biz-only' || args[i] === '--dev-only') {
+      // 0.3 names for --source biz / --source dev.
+      const label = args[i] === '--biz-only' ? 'biz' : 'dev';
+      roots = DRIVE_ROOTS.filter((r) => r.source === label);
       partial = true;
     } else if (args[i] === '--dry-run') {
       dryRun = true;
     } else if (args[i] === '--recreate') {
-      // collection 비우고 새로 (orphan chunk 제거 — 정제·chunk 수 변동 반영)
+      // Empty the collection and rebuild (removes orphan chunks, reflects changes in cleaning and chunk counts)
       recreate = true;
     }
   }
@@ -129,7 +139,7 @@ interface ListedFile {
 }
 
 /**
- * 폴더 ID 의 지원 형식 파일 recursive list (deprecated 제외).
+ * Recursively lists files of supported types under a folder ID (deprecated excluded).
  */
 async function listAllMarkdown(
   drive: DriveClient,
@@ -137,7 +147,7 @@ async function listAllMarkdown(
   pathPrefix: string,
 ): Promise<ListedFile[]> {
   const out: ListedFile[] = [];
-  const subfolderTasks: Promise<ListedFile[]>[] = []; // 하위 폴더 recursion 을 병렬로
+  const subfolderTasks: Promise<ListedFile[]>[] = []; // subfolder recursion runs in parallel
   let pageToken: string | undefined;
 
   do {
@@ -156,7 +166,7 @@ async function listAllMarkdown(
       if (!f.id || !f.name) continue;
       const currentPath = pathPrefix ? `${pathPrefix}/${f.name}` : f.name;
       if (f.mimeType === 'application/vnd.google-apps.folder') {
-        // 제외 폴더 (민감 PII/계약/HR + 개발 아티팩트. SSOT: exclude.ts) skip — recursion 자체 안 함
+        // Skip excluded folders (sensitive PII/contracts/HR and development artifacts, see exclude.ts): no recursion
         if (isExcludedName(f.name)) continue;
         // gather as parallel tasks instead of sequential await (hundreds of folders: minutes -> seconds)
         subfolderTasks.push(listAllMarkdown(drive, f.id, currentPath));
@@ -175,7 +185,7 @@ async function listAllMarkdown(
     pageToken = resp.data.nextPageToken ?? undefined;
   } while (pageToken);
 
-  // 하위 폴더 병렬 recursion 결과 합치기
+  // Merge the results of the parallel subfolder recursion
   const childResults = await Promise.all(subfolderTasks);
   for (const child of childResults) out.push(...child);
 
@@ -183,8 +193,43 @@ async function listAllMarkdown(
 }
 
 /**
- * 이번 목록(keep)에 없는 파일의 벡터를 지운다. 반환 = 지운 파일 수.
- * 목록 단계가 실패하면 main 이 그 전에 FATAL 로 끝나므로, 여기 도달했다면 목록은 완전하다.
+ * Files shared with the service account that are not under any root. `sharedWithMe` returns only the top item of each
+ * share (a shared folder is one entry), so folders are walked. Items under a root are left to the root listing, and
+ * excluded folders are skipped. Paths start at the top shared folder.
+ */
+async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]> {
+  const rootIds = new Set(DRIVE_ROOTS.map((r) => r.id));
+  const out: ListedFile[] = [];
+  let pageToken: string | undefined;
+  do {
+    const resp = await drive.files.list({
+      q: 'sharedWithMe = true and trashed = false',
+      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, size, parents)',
+      pageSize: 200,
+      pageToken,
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    for (const f of resp.data.files ?? []) {
+      if (!f.id || !f.name || rootIds.has(f.id)) continue;
+      const { cls, path: parentPath } = await classifyAndPath(drive, f.parents ?? undefined);
+      if (cls !== 'shared') continue;
+      if (isExcludedName(f.name)) continue;
+      const path = parentPath ? `${parentPath}/${f.name}` : f.name;
+      if (f.mimeType === 'application/vnd.google-apps.folder') {
+        out.push(...(await listAllMarkdown(drive, f.id, path)));
+      } else if (f.mimeType && SUPPORTED_MIMES.has(f.mimeType)) {
+        out.push({ id: f.id, name: f.name, path, modifiedTime: f.modifiedTime ?? '', mimeType: f.mimeType, size: f.size ? Number(f.size) : undefined });
+      }
+    }
+    pageToken = resp.data.nextPageToken ?? undefined;
+  } while (pageToken);
+  return out;
+}
+
+/**
+ * Deletes the vectors of files that are not in this run's listing (keep). Returns the number of files deleted.
+ * If the listing step fails, main exits with FATAL before this point, so reaching here means the listing is complete.
  */
 async function pruneStaleVectors(keep: Set<string>): Promise<number> {
   const qdrant = await getQdrantClient();
@@ -212,7 +257,7 @@ async function pruneStaleVectors(keep: Set<string>): Promise<number> {
   return stale.size;
 }
 
-/** `knowledge-mcp drive reindex [--root ID | --dev-only | --biz-only] [--dry-run] [--recreate]` */
+/** `knowledge-mcp drive reindex [--root ID | --source LABEL] [--dry-run] [--recreate]` */
 export async function runReindex(argv: string[]): Promise<void> {
   const { roots, dryRun, recreate, partial } = parseArgs(argv);
   const startTs = Date.now();
@@ -221,33 +266,40 @@ export async function runReindex(argv: string[]): Promise<void> {
     `[index] start — roots=${roots.map((r) => r.name).join(',')} dryRun=${dryRun} recreate=${recreate}`,
   );
 
-  // 1. Qdrant collection 보장 (--recreate 시 기존 비우고 새로)
+  // 1. Ensure the Qdrant collection exists (with --recreate, drop the existing one and create it again)
   if (!dryRun) {
     if (recreate) {
       try {
         await (await getQdrantClient()).deleteCollection(DRIVE_COLLECTION);
         console.log(`[index] collection '${DRIVE_COLLECTION}' deleted (recreate)`);
       } catch {
-        /* 없으면 무시 */
+        /* ignore if it does not exist */
       }
     }
     await ensureCollection();
     console.log(`[index] collection '${DRIVE_COLLECTION}' ready`);
   }
 
-  // 2. Drive 모든 markdown list (root 별)
+  // 2. List all markdown in Drive (per root)
   const drive = await getDriveClient();
-  const allFiles: Array<ListedFile & { source: 'dev' | 'biz' }> = [];
+  const allFiles: Array<ListedFile & { source: string }> = [];
 
   for (const root of roots) {
     const files = await listAllMarkdown(drive, root.id, '');
     console.log(`[index] '${root.name}' (${root.source}) — ${files.length} files`);
     for (const f of files) allFiles.push({ ...f, source: root.source });
   }
+  // Documents shared with the service account outside the roots (drive.scope "shared"). Skipped on a partial run.
+  if (!partial && sharedScopeEnabled()) {
+    const seen = new Set(allFiles.map((f) => f.id));
+    const shared = (await listSharedOutsideRoots(drive)).filter((f) => !seen.has(f.id) && !!seen.add(f.id));
+    console.log(`[index] shared outside the roots (${SHARED_SOURCE}) — ${shared.length} files`);
+    for (const f of shared) allFiles.push({ ...f, source: SHARED_SOURCE });
+  }
   console.log(`[index] total ${allFiles.length} files`);
 
-  // 3. 파일별 download + chunk + embed + upsert
-  //    체크포인트 — recreate 면 초기화, 아니면 이전 진행분 skip (429 중단 후 재개)
+  // 3. Per file: download + chunk + embed + upsert
+  //    Checkpoint: reset on recreate, otherwise skip earlier progress (resume after a 429 abort)
   if (recreate) clearCheckpoint();
   const done: Checkpoint = dryRun ? new Map() : loadCheckpoint();
   if (done.size > 0) console.log(`[index] checkpoint — skipping ${done.size} already processed files`);
@@ -258,7 +310,7 @@ export async function runReindex(argv: string[]): Promise<void> {
 
   for (const file of allFiles) {
     processed++;
-    if (done.get(file.id) === file.modifiedTime) continue; // 체크포인트 — 이미 처리됨(그 뒤 바뀌지 않음)
+    if (done.get(file.id) === file.modifiedTime) continue; // checkpoint: already processed (and unchanged since)
     if (file.size && file.size > MAX_FILE_BYTES) {
       console.log(`[index] skip (too large: ${file.size}B > ${MAX_FILE_BYTES}B): [${file.source}] ${file.path}`);
       done.set(file.id, file.modifiedTime);
@@ -266,7 +318,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       continue;
     }
     try {
-      // dry-run 은 OCR 을 부르지 않는다(Mathpix 는 쪽마다 과금).
+      // A dry run does not call OCR (Mathpix charges per page).
       const { text, needsOcr } = await extractText(drive, file.id, file.mimeType, { ocr: !dryRun });
       if (needsOcr || text.trim().length === 0) {
         console.log(`[index] skip (ocr/empty): [${file.source}] ${file.path}`);
@@ -277,7 +329,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       const chunks = chunkMarkdown(text);
       if (chunks.length === 0) {
         console.log(`[index] skip empty: [${file.source}] ${file.path}`);
-        // 처리 완료로 기록 — 빠뜨리면 체크포인트가 영구히 남아 다음 재색인이 바뀐 파일을 건너뛴다.
+        // Record as done. Otherwise the checkpoint stays forever and the next reindex skips changed files.
         done.set(file.id, file.modifiedTime);
         if (!dryRun) saveCheckpoint(done);
         continue;
@@ -285,7 +337,7 @@ export async function runReindex(argv: string[]): Promise<void> {
 
       const classification = classifyFile(file.path, file.source);
       const bizMeta = deriveBizMeta(file.path, file.source);
-      const hash = contentHash(text); // 무변경 skip(EFF-1) 판정용 — payload 동봉 (SSOT: drive_indexer)
+      const hash = contentHash(text); // used to skip unchanged files, stored in the payload (defined in indexer.ts)
       const fileTokens = chunks.reduce((s, c) => s + c.tokens, 0);
       totalChunks += chunks.length;
       totalTokens += fileTokens;
@@ -297,10 +349,10 @@ export async function runReindex(argv: string[]): Promise<void> {
         continue;
       }
 
-      // Embed — heading breadcrumb 포함(embedInputForChunk). 증분 경로(drive_indexer.indexFile)와 동일 입력.
+      // Embed with the heading breadcrumb (embedInputForChunk), the same input as the incremental path (indexFile).
       const vectors = await embedTexts(chunks.map(embedInputForChunk));
 
-      // Qdrant upsert — payload 구성은 buildChunkPayload SSOT (drive_indexer) 공유
+      // Qdrant upsert: the payload is built by buildChunkPayload, shared with indexer.ts
       const points = chunks.map((c, idx) => ({
         id: makeChunkId(file.id, idx),
         vector: vectors[idx],
@@ -308,9 +360,9 @@ export async function runReindex(argv: string[]): Promise<void> {
       }));
 
       const qdrant = await getQdrantClient();
-      // B-1: 이 파일의 기존 청크를 전부 제거한 뒤 새로 upsert (줄어든 경우 유령 청크 잔류 방지).
-      // 검증된 match 필터만 사용(range 필터는 비인덱싱 payload 에서 400). --recreate 면 매칭 0건(no-op).
-      // 풀 reindex 는 배치 작업이라 delete~upsert 사이의 짧은 공백 허용.
+      // Delete all existing chunks of this file, then upsert the new ones (no ghost chunks left when the count shrinks).
+      // Only the verified match filter is used (a range filter returns 400 on a non-indexed payload). With --recreate
+      // it matches nothing (no-op). A full reindex is a batch job, so the short gap between delete and upsert is fine.
       await qdrant.delete(DRIVE_COLLECTION, {
         wait: false,
         filter: { must: [{ key: 'file_id', match: { value: file.id } }] },
@@ -320,14 +372,14 @@ export async function runReindex(argv: string[]): Promise<void> {
         points,
       });
 
-      done.set(file.id, file.modifiedTime); // 체크포인트 기록 (upsert 성공)
+      done.set(file.id, file.modifiedTime); // record in the checkpoint (upsert succeeded)
       saveCheckpoint(done);
 
       console.log(
         `[index] [${processed}/${allFiles.length}] [${file.source}] ${file.path} — ${chunks.length} chunks upserted (${fileTokens} tok)`,
       );
     } catch (err) {
-      // 실패 파일은 체크포인트에 기록 안 함 → 재실행 시 재시도
+      // Failed files are not recorded in the checkpoint, so a rerun retries them
       console.error(
         `[index] ERROR [${file.source}] ${file.path}:`,
         err instanceof Error ? err.message : err,
@@ -335,10 +387,10 @@ export async function runReindex(argv: string[]): Promise<void> {
     }
   }
 
-  // 4. 이번 목록에 없는 파일의 벡터 정리 (전체 root 실행일 때만)
+  // 4. Clean up vectors of files not in this run's listing (only for a run over all roots)
   if (!dryRun && !partial) {
     if (allFiles.length === 0) {
-      // 목록이 비면(권한 문제, 잘못된 root id) 정리가 컬렉션 전체를 지운다. 이때는 건너뛴다.
+      // An empty listing (permission problem, wrong root id) would make cleanup delete the whole collection. Skip it.
       console.error('[index] listed 0 files — skipping cleanup so the existing index is not wiped. Check drive.roots and sharing.');
     } else {
       const pruned = await pruneStaleVectors(new Set(allFiles.map((f) => f.id)));
@@ -347,13 +399,13 @@ export async function runReindex(argv: string[]): Promise<void> {
   }
 
   const elapsedSec = ((Date.now() - startTs) / 1000).toFixed(1);
-  // OpenAI text-embedding-3-small: $0.02/1M tokens.
-  const costUsd = ((totalTokens / 1_000_000) * 0.02).toFixed(4);
+  // Cost is only known for the default model (OpenAI text-embedding-3-small: $0.02 per 1M tokens).
+  const cost = EMBEDDING_MODEL === 'text-embedding-3-small' ? `, ~$${((totalTokens / 1_000_000) * 0.02).toFixed(4)}` : '';
   console.log(
     `\n[index] DONE — ${totalChunks} chunks, ${totalTokens} tokens, ` +
-      `~$${costUsd} (OpenAI text-embedding-3-small), ${elapsedSec}s`,
+      `model ${EMBEDDING_MODEL}${cost}, ${elapsedSec}s`,
   );
-  // 전부 성공적으로 끝났으면 체크포인트 정리 (실패가 남아있으면 보존)
+  // If everything succeeded, clear the checkpoint (keep it if failures remain)
   if (!dryRun && done.size >= allFiles.length) clearCheckpoint();
 }
 

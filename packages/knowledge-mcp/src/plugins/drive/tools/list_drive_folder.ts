@@ -1,19 +1,21 @@
 /**
- * list_drive_folder — Drive 폴더 자식 list (배치 + 재귀 depth).
+ * list_drive_folder: lists the children of a Drive folder (batch + recursive depth).
  *
- * 배치/재귀: 폴더 N개·하위 트리를 1회 호출로. 에이전트가 폴더마다 순차 호출(= per-call
- *   네트워크 floor + 그 사이 LLM 추론 턴 ×N)하던 것을 1회로 접어 체감 지연을 N→1 로 줄인다.
- *   read_drive_file 의 fileIds 배치와 같은 패턴(서버가 Drive I/O 를 자기↔구글 빠른 망에서 병렬).
+ * Batch/recursion: N folders or a subtree in one call. An agent used to call once per folder in sequence (= the per-call
+ *   network floor plus an LLM reasoning turn in between, ×N). Folding that into one call cuts perceived latency from N to 1.
+ *   Same pattern as the fileIds batch of read_drive_file (the server runs Drive I/O in parallel over its fast link to Google).
  *
- *   - folderNames[] / folderIds[] : 서로 다른 위치의 폴더 여러 개를 병렬 list.
- *   - depth (1~3)                 : 한 폴더의 하위 트리를 N단계까지 한 번에.
- *     예) 고객사 폴더 10곳 + 각 폴더 문서 → list_drive_folder({ folderName: "Clients", depth: 2 }).
+ *   - folderNames[] / folderIds[] : lists several folders in different locations in parallel.
+ *   - depth (1~3)                 : walks one folder's subtree down to N levels in one call.
+ *     e.g. 10 customer folders plus the documents in each → list_drive_folder({ folderName: "Clients", depth: 2 }).
  *
- * 보안: 시작 폴더는 색인 root 하위이고 제외 폴더(PII·계약·HR 등)를 거치지 않을 때만 연다(read_drive_file 과 동일 가드).
- *   이름으로 찾을 때도 root 하위 후보만 고른다. 재귀 walk 는 제외 폴더로 확산하지 않는다
- *   (해당 폴더는 이름만 표기하고 자식 미전개 — excluded:true).
+ * Security: the start folder is opened only when it is under the indexed root and its path does not pass through an
+ *   excluded folder (PII, contracts, HR etc.), the same guard as read_drive_file.
+ *   Lookup by name also picks only candidates under the root. The recursive walk does not spread into excluded folders
+ *   (such a folder is listed by name only and its children are not expanded: excluded:true).
  *
- * 안전장치: 총 폴더 방문(=Drive list 호출) 상한 MAX_FOLDER_VISITS — 깊고 넓은 트리의 호출 폭발 방지.
+ * Safety limit: MAX_FOLDER_VISITS caps the total folder visits (= Drive list calls), which prevents a call explosion on
+ * deep and wide trees.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -21,10 +23,10 @@ import { getDriveClient, escapeDriveQuery } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { isExcludedName } from '../exclude.js';
 import { allowedDriveFolders, isPathInScope, isScopeAncestor } from '../../../core/scope.js';
-import { classifyFolder } from '../path.js';
+import { classifyFolder, isReadableClass } from '../path.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
-const MAX_FOLDER_VISITS = 120; // 재귀 폭발 방지 — 총 폴더 방문(list 호출) 상한
+const MAX_FOLDER_VISITS = 120; // prevents recursion blow-up: cap on total folder visits (list calls)
 
 const DESCRIPTION =
   'Lists the child files and folders of a Google Drive folder. Use folderId/folderName (one) or folderIds/folderNames (several at once). ' +
@@ -82,17 +84,18 @@ type TreeNode = {
   isFolder: boolean;
   modifiedTime?: string | null;
   size?: string | null;
-  excluded?: true; // EXCLUDED 폴더 — 자식 미전개(보안)
-  truncated?: true; // 방문 cap 도달로 자식 생략
-  childrenTruncated?: true; // pageSize 초과 자식이 더 있음(전수 아님 — pageSize 늘리거나 드릴다운)
+  excluded?: true; // EXCLUDED folder: children not expanded (security)
+  truncated?: true; // children omitted because the visit cap was reached
+  childrenTruncated?: true; // more children exist beyond pageSize (not a full list: raise pageSize or drill down)
   children?: TreeNode[];
 };
 
 type Budget = { visits: number };
 
 /**
- * folderName → 색인 root 하위의 열 수 있는 폴더 (Shared Drive 포함). 못 찾으면 null.
- * 같은 이름 폴더가 여럿이면 root 밖·제외 경로 후보를 건너뛰고 처음 'ok' 인 것을 고른다.
+ * folderName → an openable folder under the indexed root (Shared Drives included). null if not found.
+ * When several folders share the name, candidates outside the root or on an excluded path are skipped and the first
+ * 'ok' one is picked.
  */
 async function resolveFolderId(drive: DriveClient, name: string): Promise<{ id: string; path: string } | null> {
   const res = await drive.files.list({
@@ -104,14 +107,15 @@ async function resolveFolderId(drive: DriveClient, name: string): Promise<{ id: 
   for (const f of res.data.files ?? []) {
     if (!f.id) continue;
     const c = await classifyFolder(drive, f.id);
-    if (c.cls === 'ok') return { id: f.id, path: c.path };
+    if (isReadableClass(c.cls)) return { id: f.id, path: c.path };
   }
   return null;
 }
 
 /**
- * 폴더 fid 의 자식을 list 하고, depthLeft 가 남으면 (제외 폴더를 제외하고) 자식 폴더를 병렬 재귀.
- * 같은 레벨 폴더는 Promise.all 로 동시에 펼친다. budget 으로 총 방문 수를 캡.
+ * Lists the children of folder fid and, while depthLeft remains, recurses into the child folders in parallel (excluded
+ * folders are skipped).
+ * Folders on the same level are expanded concurrently with Promise.all. budget caps the total number of visits.
  */
 async function walkFolder(
   drive: DriveClient,
@@ -128,7 +132,8 @@ async function walkFolder(
     ...ALL_DRIVES,
   });
 
-  // pageSize 초과 자식이 더 있으면 hasMore — 예전엔 조용히 잘려 "전수 목록" 을 오인할 수 있었다.
+  // hasMore when more children exist beyond pageSize. Previously the list was cut silently and could be mistaken for a
+  // full list.
   const hasMore = !!res.data.nextPageToken;
   const nodes: TreeNode[] = (res.data.files || []).map((f) => ({
     id: f.id,
@@ -141,7 +146,8 @@ async function walkFolder(
 
   if (depthLeft <= 1) return { children: nodes, hasMore };
 
-  // 자식 폴더 중 제외(PII/계약/HR/deprecated 등) 아닌 것만 재귀. 제외 폴더는 이름만 남기고 미전개.
+  // Recurse only into child folders that are not excluded (PII, contracts, HR, deprecated etc.). Excluded folders keep
+  // their name only and are not expanded.
   const toRecurse = nodes.filter((n) => {
     if (!n.isFolder) return false;
     if (isExcludedName(n.name)) {
@@ -153,7 +159,7 @@ async function walkFolder(
 
   await Promise.all(
     toRecurse.map(async (n) => {
-      // check + increment 는 동기(중간 await 없음) → 병렬 콜백 간에도 cap 정확.
+      // check + increment is synchronous (no await in between) → the cap stays exact across parallel callbacks.
       if (budget.visits >= MAX_FOLDER_VISITS) {
         n.truncated = true;
         return;
@@ -169,8 +175,9 @@ async function walkFolder(
 }
 
 /**
- * 재귀 트리를 직원별 Drive 폴더 scope 로 후처리 필터. 폴더는 자식이 scope 에 걸리거나, 허용 폴더의 상위면 유지한다.
- * 상위 폴더를 남겨야 depth=1 로 한 단계씩 내려가도 허용 폴더에 닿는다.
+ * Post-filters the recursive tree by the per-user Drive folder scope. A folder is kept when a child falls in the scope or
+ * when it is an ancestor of an allowed folder.
+ * Ancestors must stay so that walking down one level at a time with depth=1 still reaches the allowed folder.
  */
 function filterTreeByScope(nodes: TreeNode[], parentPath: string, scope: string[]): TreeNode[] {
   return nodes.filter((n) => {
@@ -189,14 +196,14 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
   const drive = await getDriveClient();
   const folderScope = allowedDriveFolders(auth);
 
-  // 단수 + 배치 입력을 루트 명세로 통합.
+  // Merge the single and batch inputs into one list of root specs.
   const rootSpecs: Array<{ id?: string; name?: string }> = [];
   if (folderId) rootSpecs.push({ id: folderId });
   if (folderName) rootSpecs.push({ name: folderName });
   for (const id of folderIds ?? []) rootSpecs.push({ id });
   for (const name of folderNames ?? []) rootSpecs.push({ name });
 
-  const budget: Budget = { visits: rootSpecs.length }; // 루트도 방문 1회로 카운트
+  const budget: Budget = { visits: rootSpecs.length }; // each root also counts as one visit
 
   try {
     const roots = await Promise.all(
@@ -204,10 +211,10 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
         let fid: string;
         let rootPath: string;
         if (spec.id) {
-          // 시작 폴더 가드 — 색인 root 하위 + 제외 폴더 미경유일 때만 연다.
+          // Start folder guard: open only when under the indexed root and not passing through an excluded folder.
           const c = await classifyFolder(drive, spec.id);
-          if (c.cls !== 'ok') {
-            return { folderId: spec.id, folderName: null, error: '[forbidden] This folder is outside the allowed scope (outside the indexed roots / sensitive folder).' };
+          if (!isReadableClass(c.cls)) {
+            return { folderId: spec.id, folderName: null, error: '[forbidden] This folder is outside the allowed scope (not shared with this server, or a sensitive folder).' };
           }
           fid = spec.id;
           rootPath = c.path;
@@ -221,7 +228,7 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
         }
         const rootWalk = await walkFolder(drive, fid, depth, pageSize, budget);
         let items = rootWalk.children;
-        // 직원별 Drive 폴더 scope 후처리 (admin·미설정 = 전체). root 기준 경로로 트리 필터.
+        // Per-user Drive folder scope post-filter (admin or unset = all). Filters the tree by root-relative paths.
         if (folderScope) items = filterTreeByScope(items, rootPath, folderScope);
         return {
           folderId: fid,
@@ -235,7 +242,7 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
 
     const truncated = budget.visits >= MAX_FOLDER_VISITS;
 
-    // 하위호환: 단일 루트 + depth=1 + 배치 미사용 → 기존 응답 형식 그대로(기존 호출자 무손상).
+    // Backward compatibility: single root + depth=1 + no batch → same response format as before (existing callers unaffected).
     const isLegacy = !folderIds && !folderNames && depth === 1 && rootSpecs.length === 1;
     if (isLegacy) {
       const r = roots[0];

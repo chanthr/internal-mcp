@@ -1,15 +1,15 @@
 /**
- * Google OAuth Refresh Token 발급 자동화.
+ * Automates issuing a Google OAuth refresh token.
  *
- * 사용법:
- *   1. .env 에 GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET 채워둠
- *   2. (OAuth Client type 이 Web 이면) Cloud Console → Credentials →
- *      OAuth Client → Authorized redirect URIs 에 추가:
+ * Usage:
+ *   1. Fill in GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET in .env
+ *   2. (If the OAuth client type is Web) In Cloud Console → Credentials →
+ *      OAuth Client → Authorized redirect URIs, add:
  *      http://localhost:3500/callback
  *   3. knowledge-mcp drive get-token
  *   4. browser opens -> sign in with your Google account + allow
- *   5. callback 받으면 콘솔에 refresh token 출력
- *   6. .env 에 GOOGLE_OAUTH_REFRESH_TOKEN= 라인 추가
+ *   5. when the callback arrives, the refresh token is printed to the console
+ *   6. add a GOOGLE_OAUTH_REFRESH_TOKEN= line to .env
  */
 import http from 'http';
 import { URL } from 'url';
@@ -40,7 +40,7 @@ export async function runGetToken(): Promise<void> {
       response_type: 'code',
       scope: SCOPE,
       access_type: 'offline',
-      prompt: 'consent', // refresh_token 강제 발급
+      prompt: 'consent', // forces a refresh_token to be issued
     }).toString();
 
   console.log('\n========================================');
@@ -129,7 +129,7 @@ export async function runGetToken(): Promise<void> {
 
   server.listen(PORT, () => {
     console.log(`✓ Server listening on :${PORT}\n`);
-    // 브라우저 자동 열기 (macOS open, Linux xdg-open, Windows start)
+    // Open the browser automatically (macOS open, Linux xdg-open, Windows start)
     const opener = process.platform === 'darwin' ? ['open', [authUrl]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', authUrl]] : ['xdg-open', [authUrl]];
     execFile(opener[0] as string, opener[1] as string[], (err) => {
       if (err) {
@@ -137,5 +137,5 @@ export async function runGetToken(): Promise<void> {
       }
     });
   });
-  await new Promise<never>(() => {}); // 콜백이 process.exit 로 끝낸다
+  await new Promise<never>(() => {}); // the callback ends the process with process.exit
 }

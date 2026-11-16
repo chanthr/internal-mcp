@@ -73,7 +73,7 @@ test('input is validated, results and errors are normalized', async () => {
   assert.equal(text(await r.call('n_text', { a: 'b' }, admin)), 'got b');
   const bad = await r.call('n_text', { a: 1 }, admin);
   assert.equal(bad.isError, true);
-  assert.match(text(bad), /^\[invalid_input\] .*a: Expected string/);
+  assert.match(text(bad), /^\[invalid_input\] .*a: Invalid input: expected string/);
   assert.deepEqual(JSON.parse(text(await r.call('n_json', {}, admin))), { k: 1 });
   assert.equal(text(await r.call('n_mcp', {}, admin)), 'raw');
   assert.equal(text(await r.call('n_toolerr', {}, admin)), '[error] nope');
@@ -162,9 +162,14 @@ test('loadPlugins loads every plugin file and skips _ files', async () => {
   assert.deepEqual(await loadPlugins('/nonexistent-dir-for-test'), []);
 });
 
-test('drive reindex refuses to run without drive.roots (a full run would wipe the index)', async () => {
+test('drive reindex with scope "roots" refuses to run without drive.roots (a full run would wipe the index)', async () => {
   const { runReindex } = await import('../src/plugins/drive/reindex.js');
-  await assert.rejects(runReindex([]), /drive\.roots is empty/);
+  process.env.DRIVE_SCOPE = 'roots';
+  try {
+    await assert.rejects(runReindex([]), /drive\.roots is empty/);
+  } finally {
+    delete process.env.DRIVE_SCOPE;
+  }
 });
 
 test('.env.example has no trailing comments (docker --env-file keeps them in the value)', async () => {

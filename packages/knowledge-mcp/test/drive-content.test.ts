@@ -64,3 +64,14 @@ test('sync retry list: round-trips and keeps at most 1000 files', async () => {
   assert.equal('f1004' in kept, true); // the newest stay
   assert.equal('f0' in kept, false);
 });
+
+test('workbook: every tab is read, empty tabs are left out', async () => {
+  const XLSX = await import('xlsx');
+  const { workbookText } = await import('../src/plugins/drive/extract_text.js');
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['name', 'qty'], ['apple', 3]]), 'Stock');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([]), 'Empty');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['month', 'sales'], ['Jan', 10]]), 'Sales');
+  const text = await workbookText(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
+  assert.equal(text, '## Stock\nname,qty\napple,3\n\n## Sales\nmonth,sales\nJan,10');
+});

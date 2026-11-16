@@ -1,35 +1,37 @@
 /**
- * 직원별 권한 판정 — 도구군(= 플러그인 id)과 AuthContext.scopes(app_users allowed_*)로 도구·채널·폴더를 거른다.
+ * Per-user permission checks: filters tools, channels and folders by tool group (= plugin id) and
+ * AuthContext.scopes (app_users allowed_*).
  *
- * 원칙:
- *   - admin 은 모든 scope 무시(전체 허용) — 운영 잠금 방지.
- *   - member(app_users 에 등록된 사용자): 각 차원 scope 가 null/undefined/빈배열이면 그 차원은 전체 허용
- *     (미설정 = 점진 도입). 명시 배열이 있으면 그 안의 것만 허용.
- *   - viewer(app_users 에 없음, 또는 조회 실패): 기본 거부. config access.viewerTools 에 적은 도구군만 허용.
- *     로그인만 통과한 계정이 Drive·Slack·로그 전체를 읽는 것을 막는다.
- *   - 도구군이 없는 도구는 ping 만 허용한다. 플러그인에 속하지 않는 도구가 생겨도 기본 거부.
- * Drive 제외 폴더(PII·계약·HR)는 이 scope 와 별개로 항상 적용된다.
+ * Principles:
+ *   - admin ignores every scope (everything allowed), so operators cannot lock themselves out.
+ *   - member (a user registered in app_users): if a dimension's scope is null/undefined/an empty array, that dimension
+ *     is fully allowed (unset = gradual rollout). If an explicit array is set, only its entries are allowed.
+ *   - viewer (not in app_users, or the lookup failed): denied by default. Only tool groups listed in config
+ *     access.viewerTools are allowed.
+ *     This keeps an account that merely passed sign-in from reading all of Drive, Slack and the logs.
+ *   - A tool without a tool group is allowed only if it is ping. A new tool outside any plugin is denied by default.
+ * Drive excluded folders (PII, contracts, HR) always apply, independently of these scopes.
  */
 import type { AuthContext } from './auth.js';
 import { getConfig } from './config.js';
 
-// 도구군 없이도 항상 허용하는 안전 도구(health check). 명시 화이트리스트.
+// Safe tools that are always allowed even without a tool group (health check). Explicit whitelist.
 const NO_SCOPE_TOOLS = new Set<string>(['ping']);
 
 /**
- * 이 도구를 노출·호출해도 되는가. group = 도구가 속한 플러그인 id(registry.groupOf), 없으면 null.
- * admin = 전체, member = allowed_tools(미설정=전체), viewer = config access.viewerTools 로 연 것만.
+ * Whether this tool may be listed and called. group = id of the plugin the tool belongs to (registry.groupOf), or null.
+ * admin = everything, member = allowed_tools (unset = everything), viewer = only what config access.viewerTools opens.
  */
 export function isToolAllowed(auth: AuthContext, name: string, group: string | null): boolean {
   if (auth.role === 'admin') return true;
   if (group === null) return NO_SCOPE_TOOLS.has(name);
   if (auth.role !== 'member') return getConfig().access.viewerTools.includes(group);
   const tools = auth.scopes?.tools;
-  if (!tools || tools.length === 0) return true; // 미설정 = 모든 도구군
+  if (!tools || tools.length === 0) return true; // unset = every tool group
   return tools.includes(group);
 }
 
-/** 허용 Slack 채널 id Set. null = 전체 허용(admin·미설정). */
+/** Set of allowed Slack channel ids. null = everything allowed (admin, or unset). */
 export function allowedSlackChannels(auth: AuthContext): Set<string> | null {
   if (auth.role === 'admin') return null;
   const ch = auth.scopes?.slackChannels;
@@ -37,7 +39,7 @@ export function allowedSlackChannels(auth: AuthContext): Set<string> | null {
   return new Set(ch);
 }
 
-/** 허용 Drive 폴더 path prefix 배열. null = 전체 허용(admin·미설정). */
+/** Array of allowed Drive folder path prefixes. null = everything allowed (admin, or unset). */
 export function allowedDriveFolders(auth: AuthContext): string[] | null {
   if (auth.role === 'admin') return null;
   const f = auth.scopes?.driveFolders;
@@ -46,10 +48,11 @@ export function allowedDriveFolders(auth: AuthContext): string[] | null {
 }
 
 /**
- * path 가 허용 폴더 prefix 하위인가. prefixes null = 전체 허용.
- * path 예: "Engineering/backend/..." · "Clients/Acme/proposal.pptx".
- * prefix 예: "Clients" → 그 하위 전부 허용. 정확 일치 또는 "prefix/" 로 시작.
- * 양쪽 모두 NFC 로 맞춘다 — macOS 에서 올린 한글 이름은 NFD(자모 분리)로 와서, 같은 글자인데 비교가 어긋난다.
+ * Whether path is under an allowed folder prefix. prefixes null = everything allowed.
+ * path examples: "Engineering/backend/...", "Clients/Acme/proposal.pptx".
+ * prefix example: "Clients" allows everything under it. Exact match, or starts with "prefix/".
+ * Both sides are normalized to NFC: Korean names uploaded from macOS arrive in NFD (decomposed jamo), so the same
+ * characters would otherwise compare as different.
  */
 export function isPathInScope(path: string, prefixes: string[] | null): boolean {
   if (!prefixes || prefixes.length === 0) return true;
@@ -62,8 +65,9 @@ export function isPathInScope(path: string, prefixes: string[] | null): boolean 
 }
 
 /**
- * path 가 허용 폴더의 상위 폴더인가 — "Clients" 는 prefix "Clients/Acme" 의 상위.
- * 폴더 목록에서 허용 폴더까지 내려가는 길을 남기는 데 쓴다(상위 폴더 이름만 보이고 다른 내용은 걸러진다).
+ * Whether path is an ancestor of an allowed folder: "Clients" is an ancestor of the prefix "Clients/Acme".
+ * Used to keep a way down to the allowed folder in folder listings (only the ancestor folder name shows; other
+ * contents are filtered out).
  */
 export function isScopeAncestor(path: string, prefixes: string[] | null): boolean {
   if (!prefixes || prefixes.length === 0) return false;

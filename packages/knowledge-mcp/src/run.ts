@@ -9,6 +9,8 @@
  *   <plugin> <command> [args]       commands a plugin adds, e.g. `drive reindex --dry-run`
  */
 import { parseArgs } from 'node:util';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { configSource, getConfig } from './core/config.js';
 import { isOAuthConfigured, oauthAttempted, oauthConfigProblems, OAUTH_ISSUER_URL } from './core/oauth.js';
 import { parseExpiry } from './store/keys.js';
@@ -44,6 +46,11 @@ const HELP = `Knowledge MCP ${VERSION}
 
 Usage: knowledge-mcp <command> [options]
 
+  setup                               Guided setup: connect services, check them, write .env and the config
+  setup check                         Verify every configured service live (exit 1 on a failure)
+  setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
+  setup github --from-gh | setup embeddings --base-url URL --model NAME
+                                      Setup steps that ask nothing (for scripts and AI agents)
   serve [--stdio]                     Start the server (HTTP on $PORT, default 8080)
   keys create [--email E] [--role R] [--label L] [--expires 90d]
                                       Create an API key and print it once
@@ -206,6 +213,7 @@ async function cmdDoctor(registry: Registry): Promise<void> {
     out(`store     ${storeKind()} — FAILED: ${e instanceof Error ? e.message : String(e)}`);
     process.exitCode = 1;
   }
+  out(`vectors   ${process.env.QDRANT_URL?.trim() ? `qdrant — ${new URL(process.env.QDRANT_URL).host}` : 'built-in file (set QDRANT_URL to use Qdrant)'}`);
   if (isOAuthConfigured()) out(`oauth     on — issuer ${OAUTH_ISSUER_URL}`);
   else if (oauthAttempted()) out(`oauth     off — missing ${oauthConfigProblems().join(', ')}`);
   else out('oauth     off (API keys only)');
@@ -235,6 +243,50 @@ async function cmdDoctor(registry: Registry): Promise<void> {
   }
 }
 
+/** How an AI client should start this server over stdio: the project's own server when there is one. */
+function stdioCommand(dir: string): string[] {
+  const tsx = join(dir, 'node_modules', '.bin', 'tsx');
+  const own = join(dir, 'src', 'server.ts');
+  if (existsSync(own) && existsSync(tsx)) return [tsx, own, 'serve', '--stdio'];
+  const built = join(dir, 'dist', 'server.js');
+  if (existsSync(built)) return ['node', built, 'serve', '--stdio'];
+  return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
+}
+
+async function cmdSetup(argv: string[]): Promise<void> {
+  if (argv.length > 0) {
+    // Commands that ask nothing: for scripts and for AI agents (see AGENTS.md in a generated project).
+    const { runSetupCommand } = await import('./setup/commands.js');
+    process.exitCode = await runSetupCommand(argv, { dir: process.cwd(), out });
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    throw new UsageError(
+      'setup asks questions, so it needs a terminal. Without one use the commands that ask nothing: ' +
+        'setup check | setup drive --gcloud | setup drive --key <file> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
+    );
+  }
+  const { runSetup } = await import('./setup/wizard.js');
+  const { terminalIO } = await import('./setup/terminal.js');
+  const io = terminalIO();
+  const dir = process.cwd();
+  try {
+    await runSetup(io, {
+      dir,
+      serveCommand: stdioCommand(dir),
+      createAdmin: async (email) => {
+        const store = await getStore();
+        const existing = await store.getUser(email);
+        if (!existing) await store.upsertUser({ email, role: 'admin' });
+        const created = await store.createKey({ email, role: 'member', orgId: getConfig().orgId, label: 'setup', expiresAt: null });
+        return { key: created.key, existed: !!existing };
+      },
+    });
+  } finally {
+    io.close();
+  }
+}
+
 async function cmdPlugin(registry: Registry, pluginId: string, argv: string[]): Promise<boolean> {
   const plugin = registry.plugins.find((p) => p.id === pluginId);
   if (!plugin) return false;
@@ -254,6 +306,7 @@ export async function run(opts: RunOptions = {}): Promise<void> {
   try {
     if (cmd === 'help' || cmd === '--help' || cmd === '-h') return out(HELP);
     if (cmd === 'version' || cmd === '--version' || cmd === '-v') return out(VERSION);
+    if (cmd === 'setup') return await cmdSetup(rest);
     if (cmd === 'keys') return await cmdKeys(rest);
     if (cmd === 'users') return await cmdUsers(rest);
     const registry = new Registry(opts.plugins ?? builtinPlugins);

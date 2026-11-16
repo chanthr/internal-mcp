@@ -1,11 +1,11 @@
 /**
- * slack_read_channel(channel, limit?, oldest?, includeThreads?) — 채널 대화 읽기.
+ * slack_read_channel(channel, limit?, oldest?, includeThreads?): reads a channel's conversation.
  *
- * conversations.history 로 최근 메시지, 옵션으로 thread replies 까지.
- * channel 은 이름(#dev / dev) 또는 ID(C…/G…) 허용 — 이름이면 conversations.list 로 resolve.
- * Bot token 사용. 신뢰 경계 = "봇이 멤버인 채널"(slack_search 와 동일). DM(D…)·그룹 DM 은 읽지 않는다
- * (봇에게 보낸 개인 DM 이 다른 사용자에게 열리는 것 방지).
- * 권한 그룹: slack. 채널 범위는 app_users.allowed_slack_channels.
+ * Recent messages via conversations.history, optionally with thread replies.
+ * channel accepts a name (#dev / dev) or an ID (C…/G…). A name is resolved with conversations.list.
+ * Uses the Bot token. Trust boundary = "channels the bot is a member of" (same as slack_search). DMs (D…) and group DMs
+ * are not read (so a personal DM sent to the bot is not opened to other users).
+ * Permission group: slack. Channel scope comes from app_users.allowed_slack_channels.
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
@@ -55,7 +55,7 @@ interface SlackMessage {
   reply_count?: number;
 }
 
-/** YYYY-MM-DD → Unix epoch 초. 이미 ts(숫자.숫자)면 그대로. */
+/** YYYY-MM-DD → Unix epoch seconds. A value that is already a ts (digits.digits) is returned as is. */
 function toOldestTs(oldest: string | undefined): string | undefined {
   if (!oldest) return undefined;
   if (/^\d+(\.\d+)?$/.test(oldest)) return oldest;
@@ -65,19 +65,21 @@ function toOldestTs(oldest: string | undefined): string | undefined {
 }
 
 async function resolveChannelId(input: string): Promise<{ id: string; name: string | null }> {
-  // 이미 ID 형태 (공개 C… / 비공개 G…). DM(D…)은 받지 않는다.
+  // Already in ID form (public C… / private G…). DMs (D…) are not accepted.
   if (/^D[A-Z0-9]{6,}$/.test(input)) throw new SlackError('DMs cannot be read.');
   if (/^[CG][A-Z0-9]{6,}$/.test(input)) return { id: input, name: null };
   const cleaned = input.replace(/^#/, '');
-  // 공용 채널명 캐시(TTL) 조회 — 매 호출 conversations.list 순차 순회를 warmup 후 0콜로.
+  // Look up the shared channel-name cache (TTL). Replaces the sequential conversations.list paging on every call with
+  // 0 calls after warmup.
   const byName = await loadChannelNameMap();
   const found = byName.get(cleaned);
   if (found) return { id: found.id, name: found.name };
   throw new SlackError(`Channel "${input}" not found (the bot is not a member, or the name has a typo).`);
 }
 
-// user-map·mapLimit 은 slack.ts 공용 버전(loadSlackUserMap·mapLimit) 사용 — 도구별 중복 구현·캐시
-// 분절을 제거해, search 가 데운 캐시를 read_channel 이 재사용(반대도)하고 users.list 왕복이 실질 제거.
+// user-map and mapLimit use the shared versions in api.ts (loadSlackUserMap, mapLimit). This removes per-tool duplicate
+// implementations and split caches: read_channel reuses the cache warmed by search (and vice versa), and users.list round
+// trips are effectively gone.
 
 export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) {
   const auth = getAuth();
@@ -85,7 +87,8 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
 
   try {
     const { id: channelId, name: channelName } = await resolveChannelId(channel);
-    // 신뢰 경계: 봇이 멤버인 (공개+비공개) 채널만. 그룹 DM(G…)·DM 은 conversations.list 에 없어 여기서 걸린다.
+    // Trust boundary: only (public + private) channels the bot is a member of. Group DMs (G…) and DMs are not in
+    // conversations.list, so they are caught here.
     const botMemberIds = await loadBotMemberChannelIds();
     if (!botMemberIds.has(channelId)) {
       return {
@@ -95,7 +98,7 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
         isError: true,
       };
     }
-    // 직원별 Slack 채널 scope 체크 (admin·미설정 = 전체)
+    // Per-user Slack channel scope check (admin or unset = all)
     const channelScope = allowedSlackChannels(auth);
     if (channelScope && !channelScope.has(channelId)) {
       return {
@@ -105,7 +108,8 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
         isError: true,
       };
     }
-    // user map(캐시)과 채널 history 를 병렬 — 서로 독립. (예전엔 userMap 직렬 후 history)
+    // The user map (cached) and the channel history run in parallel, since they are independent. (Previously userMap ran
+    // first, then history.)
     const [userMap, hist] = await Promise.all([
       loadSlackUserMap(),
       slackApi<{ messages?: SlackMessage[] }>(
@@ -117,7 +121,8 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
     const nameOf = (m: SlackMessage) =>
       m.user ? (userMap[m.user] ?? m.user) : (m.bot_id ? `bot:${m.bot_id}` : null);
 
-    // thread replies 를 동시성 6 으로 병렬(순차 N+1 제거). thread 하나 실패가 전체를 안 깨게 격리.
+    // Thread replies run in parallel with concurrency 6 (removes the sequential N+1). One failed thread is isolated so it
+    // does not break the whole result.
     const messages = await mapLimit(hist.messages ?? [], 6, async (m) => {
       const hasThread = !!m.thread_ts && (m.reply_count ?? 0) > 0;
       const entry: any = {
@@ -126,7 +131,8 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
         user: nameOf(m),
         text: m.text ?? '',
       };
-      // 부모 메시지면 답글 수를 항상 노출 — 확장이 꺼지거나 실패해도 "답글이 더 있다"는 신호는 남긴다.
+      // For a parent message, always expose the reply count. Even when expansion is off or fails, the "there are more replies"
+      // signal remains.
       if (hasThread) entry.reply_count = m.reply_count;
       if (includeThreads && hasThread) {
         try {
@@ -135,7 +141,7 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
             { channel: channelId, ts: m.thread_ts, limit: 100 },
             'bot',
           );
-          // replies[0] == 부모 메시지 → 제외
+          // replies[0] == the parent message → excluded
           entry.replies = (rep.messages ?? []).slice(1).map((r) => ({
             ts: r.ts,
             datetime: r.ts ? new Date(Number(r.ts) * 1000).toISOString() : null,
@@ -143,8 +149,8 @@ export async function handleSlackReadChannel(args: z.infer<typeof inputSchema>) 
             text: r.text ?? '',
           }));
         } catch {
-          // 한 thread 실패가 채널 읽기 전체를 깨지 않게. 단 빈 []로 숨기지 않고 명시 —
-          // rate-limit 등으로 답글을 못 가져온 경우 "답글 0개"로 오인되지 않게 신호를 남긴다.
+          // One failed thread must not break the whole channel read. But do not hide it as an empty []: say so explicitly.
+          // When replies could not be fetched (rate limit etc.), leave a signal so it is not mistaken for "0 replies".
           entry.replies = [];
           entry.replies_error = true;
         }

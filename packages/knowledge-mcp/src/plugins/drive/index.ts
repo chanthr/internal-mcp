@@ -9,6 +9,7 @@
  */
 import { definePlugin } from '../../plugin/define.js';
 import { isSet as has } from '../../core/env.js';
+import { embeddingsConfigured } from './embeddings.js';
 import { searchDriveTool } from './tools/search_drive.js';
 import { readDriveFileTool } from './tools/read_drive_file.js';
 import { listDriveFolderTool } from './tools/list_drive_folder.js';
@@ -24,9 +25,12 @@ export function driveConfigured(): boolean {
   return has(id) && has(secret) && has(refresh);
 }
 
-/** semantic_search_drive — Qdrant (vectors) and OpenAI (embeddings). Independent of the Drive API credentials. */
+/**
+ * semantic_search_drive needs an embedding endpoint. Vectors go to Qdrant when QDRANT_URL is set, otherwise to the
+ * built-in SQLite store, so there is nothing else to set up. Independent of the Drive API credentials.
+ */
 export function semanticConfigured(): boolean {
-  return has(process.env.QDRANT_URL) && has(process.env.OPENAI_API_KEY);
+  return embeddingsConfigured();
 }
 
 const DRIVE_CREDS = 'set GOOGLE_SERVICE_ACCOUNT_KEY, GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN';
@@ -36,20 +40,21 @@ export const drivePlugin = definePlugin({
   id: 'drive',
   description: 'Google Drive search, read and semantic search',
   // On when either half works: the Drive API tools, or semantic search over an existing index.
-  enabled: () => driveConfigured() || semanticConfigured() || `${DRIVE_CREDS} (or QDRANT_URL + OPENAI_API_KEY)`,
+  enabled: () => driveConfigured() || semanticConfigured() || `${DRIVE_CREDS} (or an embedding key for semantic search over an existing index)`,
   tools: [
     { ...searchDriveTool, enabled: driveOnly },
     { ...readDriveFileTool, enabled: driveOnly },
     { ...listDriveFolderTool, enabled: driveOnly },
-    { ...semanticSearchDriveTool, enabled: () => semanticConfigured() || 'missing env QDRANT_URL, OPENAI_API_KEY' },
+    { ...semanticSearchDriveTool, enabled: () => semanticConfigured() || 'missing an embedding key: set OPENAI_API_KEY, or EMBEDDING_BASE_URL for another provider' },
   ],
   instructions:
     'Drive: meaning/concept questions → semantic_search_drive; keyword or file name → search_drive; ' +
     '"list all" / folder contents → list_drive_folder(folderName). When a chunk lacks context, read_drive_file with the File ID ' +
     '(fileIds=[...] reads several at once).',
   async start({ log }) {
-    // Incremental Drive → Qdrant sync. Needs Drive credentials, Qdrant and an embedding key; DRIVE_SYNC_ENABLED=false turns it off.
-    // (Without OPENAI_API_KEY every changed file would fail and be dropped.)
+    // Keeps the index in step with Drive: builds it on the first run, then applies changes on a timer. Needs Drive
+    // credentials and an embedding key (without one every changed file would fail and be dropped).
+    // DRIVE_SYNC_ENABLED=false turns it off.
     if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !semanticConfigured()) return;
     const { ensureCollection } = await import('./qdrant.js');
     const { startDriveSyncScheduler } = await import('./sync.js');
@@ -62,7 +67,7 @@ export const drivePlugin = definePlugin({
   },
   commands: {
     reindex: {
-      description: 'full Drive → Qdrant index (--dry-run, --recreate, --root <id>, --dev-only, --biz-only)',
+      description: 'rebuild the whole search index (--dry-run, --recreate, --root <id>, --source <label>). The server builds the first one itself',
       run: async (args) => (await import('./reindex.js')).runReindex(args),
     },
     'get-token': {

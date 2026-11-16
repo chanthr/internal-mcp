@@ -1,12 +1,14 @@
 /**
- * repo_tree(owner, repo, ref?, filterExt?) — GitHub repo 전체 파일 트리(경로 목록).
+ * repo_tree(owner, repo, ref?, filterExt?): the full file tree (list of paths) of a GitHub repo.
  *
- * search_code 는 private repo 를 인덱싱하지 않으므로, 사내 코드 질문은
- * "이 트리로 구조 파악 → 필요 파일만 github_get_file_contents 로 조회" 패턴을 쓴다.
- * git/trees?recursive=1 로 한 번에 전체 경로를 받고, node_modules·dist 등 아티팩트는 제외.
+ * search_code does not index private repos, so questions about private code follow the pattern
+ * "learn the structure from this tree, then fetch only the files needed with github_get_file_contents".
+ * git/trees?recursive=1 returns every path in one call, and artifacts such as node_modules and dist are excluded.
  *
- * 토큰: GITHUB_PAT, 없으면 GITHUB_TOKEN (원격 GitHub MCP 와 같은 키, index.ts githubToken). Contents read 권한이면 private 도 트리 조회 가능.
- * 이름에 github_ prefix 를 안 쓰는 이유: github_ 는 원격 GitHub MCP 도구의 prefix 라 이름이 겹칠 수 있다(겹치면 로컬이 이기고 원격 도구가 가려진다).
+ * Token: GITHUB_PAT, or GITHUB_TOKEN if absent (same key as the remote GitHub MCP, see githubToken in index.ts).
+ * With Contents read permission, the tree of a private repo can be read too.
+ * Why the name has no github_ prefix: github_ is the prefix of the remote GitHub MCP tools, so names could clash
+ * (on a clash the local tool wins and the remote tool is hidden).
  */
 import { z } from 'zod';
 import { defineTool } from '../../plugin/define.js';
@@ -17,7 +19,7 @@ const GITHUB_API = 'https://api.github.com';
 const MAX_FILES = 600;
 const GH_TIMEOUT_MS = 20_000;
 
-/** AbortController timeout 을 건 fetch (hang 방지). */
+/** fetch with an AbortController timeout (prevents hangs). */
 async function ghFetch(url: string, headers: Record<string, string>): Promise<Response> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), GH_TIMEOUT_MS);
@@ -60,7 +62,7 @@ function ghHeaders(): Record<string, string> {
 
 const ARTIFACT_RE = /(^|\/)(node_modules|dist|build|\.next|\.nuxt|coverage|\.git|__pycache__|\.venv|venv)\//;
 
-// GitHub 이름 규칙(영숫자, '.', '_', '-'). 경로 조작('..', '/')으로 다른 API 경로를 부르지 못하게 막는다.
+// GitHub naming rule (alphanumerics, '.', '_', '-'). Blocks path tricks ('..', '/') from reaching other API paths.
 const GH_NAME_RE = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
 
 export async function handleRepoTree(args: z.infer<typeof inputSchema>) {

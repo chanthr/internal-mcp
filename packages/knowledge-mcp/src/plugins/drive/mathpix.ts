@@ -1,16 +1,16 @@
 /**
- * Mathpix OCR — 스캔 PDF / 이미지 → markdown.
+ * Mathpix OCR: scanned PDF or image → markdown.
  *
- * 키: MATHPIX_APP_ID / MATHPIX_APP_KEY.
+ * Keys: MATHPIX_APP_ID / MATHPIX_APP_KEY.
  *
- * - PDF (스캔본): v3/pdf (async) — upload → poll → /pdf/{id}.md
- * - 이미지: v3/text (즉시)
+ * - PDF (scanned): v3/pdf (async), upload → poll → /pdf/{id}.md
+ * - Image: v3/text (immediate)
  *
- * 수식·표 구조 보존 (Mathpix Markdown) → chunk 시 표 안 깨짐 → 검색 품질 ↑.
+ * Formula and table structure is kept (Mathpix Markdown), so tables survive chunking and search quality improves.
  */
 const MATHPIX_API = 'https://api.mathpix.com/v3';
 
-/** OCR 은 두 키가 모두 있을 때만 쓴다(README: 스캔 PDF·이미지는 키가 있을 때만 OCR). */
+/** OCR is used only when both keys are set (README: scanned PDFs and images are OCRed only when the keys exist). */
 export function mathpixConfigured(): boolean {
   return !!process.env.MATHPIX_APP_ID && !!process.env.MATHPIX_APP_KEY;
 }
@@ -25,9 +25,9 @@ function mathpixHeaders(): Record<string, string> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * timeout·재시도 감싼 fetch. 예전엔 어떤 fetch 도 timeout·재시도가 없어, status 폴링이 네트워크
- * 정체 시 deadline 까지 매달리고 일시 5xx 에 전체 OCR 이 실패했다. AbortSignal.timeout + 5xx/네트워크
- * 짧은 재시도로 안정화(OCR 은 유저 대기 경로).
+ * fetch wrapped with a timeout and retries. Previously no fetch had either, so status polling hung until the deadline
+ * when the network stalled, and one transient 5xx failed the whole OCR. AbortSignal.timeout plus a short retry on
+ * 5xx/network errors makes it stable (OCR is on a path where the user is waiting).
  */
 async function mpFetch(
   url: string,
@@ -44,7 +44,7 @@ async function mpFetch(
       }
       return resp;
     } catch (e) {
-      // timeout(TimeoutError)·네트워크 오류 — 재시도, 소진 시 throw
+      // timeout (TimeoutError) or network error: retry, throw when retries run out
       if (attempt < retries) {
         await sleep(1000 * (attempt + 1));
         continue;
@@ -56,7 +56,7 @@ async function mpFetch(
   }
 }
 
-/** PDF (스캔본) → markdown. async upload + poll + .md 다운로드. */
+/** PDF (scanned) → markdown. Async upload + poll + .md download. */
 export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Promise<string> {
   const headers = mathpixHeaders();
 
@@ -70,7 +70,7 @@ export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Pr
       math_inline_delimiters: ['$', '$'],
       rm_spaces: false,
       enable_tables_fallback: true,
-      include_diagram_text: true, // 다이어그램 내부 텍스트도 OCR (figure URL 은 .md 에 기본 포함)
+      include_diagram_text: true, // also OCR the text inside diagrams (figure URLs are included in the .md by default)
     }),
   );
 
@@ -79,14 +79,14 @@ export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Pr
   const { pdf_id } = (await upResp.json()) as { pdf_id?: string };
   if (!pdf_id) throw new Error('[mathpix] missing pdf_id');
 
-  // 2. Poll (2s 간격)
+  // 2. Poll (every 2s)
   const deadline = Date.now() + maxWaitSec * 1000;
   while (Date.now() < deadline) {
     await sleep(2000);
     const stResp = await mpFetch(`${MATHPIX_API}/pdf/${pdf_id}`, { headers });
     const stData = (await stResp.json()) as { status?: string };
     if (stData.status === 'completed') {
-      // 3. .md 다운로드
+      // 3. Download the .md
       const mdResp = await mpFetch(`${MATHPIX_API}/pdf/${pdf_id}.md`, { headers });
       const md = await mdResp.text();
       if (!md.trim()) throw new Error('[mathpix] completed but empty markdown');
@@ -97,7 +97,7 @@ export async function mathpixPdfToMarkdown(buffer: Buffer, maxWaitSec = 180): Pr
   throw new Error(`[mathpix] timeout ${maxWaitSec}s (pdf_id=${pdf_id})`);
 }
 
-/** 단일 이미지 → markdown. v3/text (즉시). */
+/** Single image → markdown. v3/text (immediate). */
 export async function mathpixImageToMarkdown(buffer: Buffer, mimeType: string): Promise<string> {
   const headers = { ...mathpixHeaders(), 'Content-Type': 'application/json' };
   const b64 = buffer.toString('base64');

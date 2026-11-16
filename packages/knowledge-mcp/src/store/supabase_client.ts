@@ -1,10 +1,10 @@
 /**
  * Supabase service-role client (singleton).
  *
- * Supabase 저장소(store/supabase.ts)만 쓴다. 도구는 저장소 인터페이스(getStore)를 거친다.
- * .env 의 SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY 로 부트스트랩.
+ * Used only by the Supabase store (store/supabase.ts). Tools go through the store interface (getStore).
+ * Bootstrapped from SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in .env.
  *
- * 첫 호출 시 client 생성, 이후 재사용. 환경변수 누락 시 throw.
+ * The client is created on the first call and reused afterwards. Throws if the environment variables are missing.
  */
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import WebSocket from 'ws';
@@ -24,9 +24,10 @@ export function getSupabase(): SupabaseClient {
     );
   }
 
-  // Node 20 (Railway) 은 native WebSocket 이 없어 supabase realtime init 이 throw 한다.
-  // realtime 을 쓰진 않지만 createClient 가 RealtimeClient 를 자동 생성하므로, ws 를 transport 로 주입해 우회.
-  // (Node 버전 무관 — Railway 가 engines>=22 를 무시하고 Node 20 으로 실행하는 문제를 코드 레벨에서 해결)
+  // Node 20 (Railway) has no native WebSocket, so supabase realtime init throws.
+  // Realtime is not used, but createClient creates a RealtimeClient automatically, so ws is injected as the transport
+  // to get around it.
+  // (Works on any Node version. This fixes at code level the case where Railway ignores engines>=22 and runs Node 20.)
   _client = createClient(url, key, {
     auth: { persistSession: false, autoRefreshToken: false },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

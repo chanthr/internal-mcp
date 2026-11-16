@@ -3,7 +3,7 @@
  * create-knowledge-mcp — scaffolds your own Knowledge MCP server.
  *
  *   npx create-knowledge-mcp my-mcp            # or: npm create knowledge-mcp@latest my-mcp
- *   npx create-knowledge-mcp my-mcp --no-install --no-git
+ *   npx create-knowledge-mcp my-mcp --no-install --no-git --no-setup
  *
  * No dependencies: copies ./template, fills in the project name and the framework version, installs
  * packages with the package manager that ran it (npm, pnpm, yarn or bun), and prints the next steps.
@@ -28,10 +28,11 @@ const dim = (s) => (tty ? `\x1b[2m${s}\x1b[22m` : s);
 const green = (s) => (tty ? `\x1b[32m${s}\x1b[39m` : s);
 
 function parseArgs(argv) {
-  const opts = { dir: undefined, install: true, git: true, help: false };
+  const opts = { dir: undefined, install: true, git: true, setup: true, help: false };
   for (const a of argv) {
     if (a === '--no-install') opts.install = false;
     else if (a === '--no-git') opts.git = false;
+    else if (a === '--no-setup') opts.setup = false;
     else if (a === '-h' || a === '--help') opts.help = true;
     else if (a.startsWith('-')) throw new Error(`unknown option ${a}`);
     else if (!opts.dir) opts.dir = a;
@@ -74,7 +75,7 @@ export function scaffold(target, { name, coreSpec }) {
     if (existsSync(join(target, from))) renameSync(join(target, from), join(target, to));
   }
   const vars = { NAME: name, CORE_SPEC: coreSpec, VERSION };
-  for (const f of ['package.json', 'README.md']) fill(join(target, f), vars);
+  for (const f of ['package.json', 'README.md', 'AGENTS.md', 'CLAUDE.md']) fill(join(target, f), vars);
   if (!existsSync(join(target, '.env'))) cpSync(join(target, '.env.example'), join(target, '.env'));
 }
 
@@ -97,7 +98,7 @@ function run(cmd, args, cwd) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
-    console.log(`Usage: npx create-knowledge-mcp [dir] [--no-install] [--no-git]`);
+    console.log(`Usage: npx create-knowledge-mcp [dir] [--no-install] [--no-git] [--no-setup]`);
     return;
   }
   const dir = opts.dir ?? (await ask('Project folder?', 'my-knowledge-mcp'));
@@ -110,21 +111,36 @@ async function main() {
   console.log(`\n${green('✓')} Created ${bold(name)} in ${target}`);
 
   const pm = detectPackageManager();
+  let installed = false;
   if (opts.install) {
     console.log(dim(`\n${pm} install …`));
-    if (!run(pm, ['install'], target)) console.log(`\n${pm} install failed — run it yourself inside ${dir}.`);
+    installed = run(pm, ['install'], target);
+    if (!installed) console.log(`\n${pm} install failed — run it yourself inside ${dir}.`);
   }
   if (opts.git && !existsSync(join(target, '.git'))) {
     spawnSync('git', ['init', '-q'], { cwd: target, stdio: 'ignore' });
   }
 
   const runScript = pm === 'npm' ? 'npm run' : pm;
+
+  // Go straight into the guided setup, so the project is connected and checked before the first start.
+  // Only in a terminal: the setup asks questions.
+  if (installed && opts.setup && process.stdin.isTTY && process.stdout.isTTY) {
+    const a = (await ask('\nConnect your services now (Drive, Slack, GitHub, Railway)?', 'Y')).toLowerCase();
+    if (a === 'y' || a === 'yes') {
+      console.log('');
+      run(pm, ['run', 'setup'], target);
+    }
+  }
   const tsx = join(target, 'node_modules', '.bin', 'tsx');
   console.log(`
 ${bold('Next')}
   cd ${dir}
+  ${runScript} setup                                ${dim('# connect services: asks, checks, writes .env. Run it again any time')}
   ${runScript} dev                                  ${dim('# http://localhost:8080/mcp, reloads on save')}
-  ${runScript} keys -- create --email you@example.com --role admin   ${dim('# prints an API key once')}
+
+${bold('Let an AI agent set it up')}
+  Open this folder in Claude Code (or another agent) and say: "set this server up, follow AGENTS.md"
 
 ${bold('Add a tool')}
   Copy src/plugins/notes.ts to src/plugins/<name>.ts and edit it. Every file there is loaded.
