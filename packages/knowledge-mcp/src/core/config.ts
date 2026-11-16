@@ -45,7 +45,7 @@ const UpstreamConfigSchema = z
     /** Name of the env var holding the bearer token (the token itself never goes in this file). */
     tokenEnv: z.string().optional(),
     /** Extra request headers (no secrets — use tokenEnv). */
-    headers: z.record(z.string()).optional(),
+    headers: z.record(z.string(), z.string()).optional(),
     /** "read" (default): only read-verb tools. "all": everything. Or an explicit list of remote tool names. */
     expose: z.union([z.enum(['read', 'all']), z.array(z.string())]).default('read'),
   })
@@ -61,7 +61,7 @@ const ConfigSchema = z
         /** Replaces the generated instructions (base line + each enabled plugin's notes) when set. */
         instructions: z.string().optional(),
       })
-      .default({}),
+      .prefault({}),
     drive: z
       .object({
         /** SSOT for index/search scope. Empty = Drive indexing disabled (tools still gated by credentials). */
@@ -81,19 +81,19 @@ const ConfigSchema = z
           .array(z.object({ prefix: z.string().min(1), label: z.string().min(1), weight: z.number().positive().max(10) }).strict())
           .default([]),
       })
-      .default({}),
+      .prefault({}),
     qdrant: z
       .object({
         /** Vector collection name. If env QDRANT_COLLECTION is set, it takes precedence (zero-downtime swap). */
         collection: z.string().default('knowledge_v1'),
       })
-      .default({}),
+      .prefault({}),
     data: z
       .object({
         /** Supabase schema holding the server's own tables (oauth clients, refresh tokens, sync_state, tool_calls, app_users). */
         schema: z.string().default('public'),
       })
-      .default({}),
+      .prefault({}),
     /** Unused. Still accepted so config files written for 0.3.0 and 0.3.1 keep loading (the schema is strict). */
     selfDomains: z.array(z.string()).optional(),
     oauth: z
@@ -110,7 +110,7 @@ const ConfigSchema = z
          */
         allowedEmails: z.array(z.string()).default([]),
       })
-      .default({}),
+      .prefault({}),
     access: z
       .object({
         /**
@@ -120,9 +120,9 @@ const ConfigSchema = z
          */
         viewerTools: z.array(z.string()).default([]),
       })
-      .default({}),
+      .prefault({}),
     /** Per-plugin settings: `plugins.<id>` is passed to that plugin as ctx.config. */
-    plugins: z.record(z.unknown()).default({}),
+    plugins: z.record(z.string(), z.unknown()).default({}),
     /** Remote MCP servers to proxy. Their tools are listed as `<prefix><name>` in the group `name`. */
     upstreams: z.array(UpstreamConfigSchema).default([]),
   })

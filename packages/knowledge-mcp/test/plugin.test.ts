@@ -73,7 +73,7 @@ test('input is validated, results and errors are normalized', async () => {
   assert.equal(text(await r.call('n_text', { a: 'b' }, admin)), 'got b');
   const bad = await r.call('n_text', { a: 1 }, admin);
   assert.equal(bad.isError, true);
-  assert.match(text(bad), /^\[invalid_input\] .*a: Expected string/);
+  assert.match(text(bad), /^\[invalid_input\] .*a: Invalid input: expected string/);
   assert.deepEqual(JSON.parse(text(await r.call('n_json', {}, admin))), { k: 1 });
   assert.equal(text(await r.call('n_mcp', {}, admin)), 'raw');
   assert.equal(text(await r.call('n_toolerr', {}, admin)), '[error] nope');
