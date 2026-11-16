@@ -23,6 +23,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Guided setup: `knowledge-mcp setup`.** Asks which services to connect, checks every key against the real
+  service as it is entered (Drive shows what is shared with the account, the embedding size is read from the
+  endpoint), writes `.env` and `mcp.config.json`, creates the admin key and offers to add the server to Claude
+  Code. `create-knowledge-mcp` runs it after install. No file has to be edited by hand.
+- **Semantic search without a vector database.** Vectors are stored in `<data dir>/vectors.db` when `QDRANT_URL`
+  is not set, so an embedding key is the only thing to supply. Qdrant stays available for larger indexes.
+- **The first index builds itself.** The server indexes Drive the first time it starts with an empty index.
+  `DRIVE_AUTO_INDEX=false` turns that off.
 - **Any OpenAI-compatible embedding endpoint**: `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`,
   `EMBEDDING_API_KEY`. A local server needs no key. The default is still OpenAI `text-embedding-3-small`.
   A collection whose vector size differs from `EMBEDDING_DIM` stops indexing with the fix in the message.

@@ -87,11 +87,11 @@ export class DriveApiError extends Error {
 }
 
 // ── Auth: create an access token and reuse it until 1 minute before it expires ──
-type Credentials =
+export type Credentials =
   | { kind: 'service_account'; clientEmail: string; privateKey: string; tokenUri: string }
   | { kind: 'refresh_token'; clientId: string; clientSecret: string; refreshToken: string; tokenUri: string };
 
-function credentialsFromJson(raw: string, source: string): Credentials {
+export function credentialsFromJson(raw: string, source: string): Credentials {
   let j: Record<string, unknown>;
   try {
     j = JSON.parse(raw);

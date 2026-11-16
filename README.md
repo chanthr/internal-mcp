@@ -44,7 +44,14 @@ SQLite file. You need Node 22.13 or later, or Docker.
 npx create-knowledge-mcp my-mcp
 cd my-mcp
 npm run dev                                                   # http://localhost:8080/mcp, reloads on save
-npm run keys -- create --email you@example.com --role admin   # prints an API key once
+```
+
+The generator ends with a guided setup. It asks which services to connect, checks each key against the real
+service as you enter it, writes `.env` and `mcp.config.json`, creates the admin key and offers to add the server
+to Claude Code. Nothing is edited by hand, and you can run it again any time:
+
+```bash
+npm run setup
 ```
 
 The project comes with an example plugin, `src/plugins/notes.ts`. Point a client at
@@ -216,6 +223,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 
 | Command | What it does |
 | --- | --- |
+| `setup` | Guided setup: connect Drive, Slack, GitHub and Railway, check every value live, write `.env` and the config, create the admin key. Safe to run again |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |
@@ -240,7 +248,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Plugin | Tools | Needs |
 | --- | --- | --- |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token. Share a folder or a document with that account and it is searchable |
-| `drive` | `semantic_search_drive` | `QDRANT_URL`, an embedding key (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) and an index (`knowledge-mcp drive reindex`) |
+| `drive` | `semantic_search_drive` | An embedding key (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`). Nothing else: vectors are stored in a local file and the server builds the index on first start. Set `QDRANT_URL` to use Qdrant instead |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
@@ -255,8 +263,9 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Task | How |
 | --- | --- |
-| First full index | `knowledge-mcp drive reindex` (`docker compose run --rm knowledge-mcp drive reindex`) |
-| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`). Do the full index first |
+| First full index | Automatic: the server builds it the first time it starts with an empty index (`DRIVE_AUTO_INDEX=false` turns that off). By hand: `knowledge-mcp drive reindex` |
+| Where vectors live | `<data dir>/vectors.db` by default, good for tens of thousands of chunks. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
+| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`) |
 | Clean up | A full run deletes vectors of files no longer listed, such as files moved into an excluded folder |
 | Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks. It skips OCR, so it never charges Mathpix |
 

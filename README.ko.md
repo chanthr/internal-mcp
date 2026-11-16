@@ -44,7 +44,14 @@ Node 22.13 이상이나 Docker가 필요합니다.
 npx create-knowledge-mcp my-mcp
 cd my-mcp
 npm run dev                                                   # http://localhost:8080/mcp, 저장하면 다시 뜸
-npm run keys -- create --email you@example.com --role admin   # API 키를 한 번만 보여 줌
+```
+
+생성기는 안내형 설정으로 이어집니다. 어떤 서비스를 연결할지 묻고, 키를 넣는 즉시 실제 서비스에 붙어 확인하고,
+`.env`와 `mcp.config.json`을 쓰고, 관리자 키를 만들고, Claude Code에 서버를 추가해 줍니다. 손으로 고칠 파일이
+없습니다. 언제든 다시 실행할 수 있습니다.
+
+```bash
+npm run setup
 ```
 
 프로젝트에는 예시 플러그인 `src/plugins/notes.ts`가 들어 있습니다. 클라이언트를 `http://localhost:8080/mcp`에
@@ -216,6 +223,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 명령 | 하는 일 |
 | --- | --- |
+| `setup` | 안내형 설정. Drive, Slack, GitHub, Railway를 연결하고, 값마다 바로 확인하고, `.env`와 설정 파일을 쓰고, 관리자 키를 만듭니다. 다시 실행해도 안전합니다 |
 | `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
 | `keys list` / `keys revoke <id>` | 키 목록을 봅니다(키 값은 나오지 않음). 또는 키 하나를 끕니다 |
@@ -240,7 +248,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token. 폴더나 문서를 그 계정에 공유하면 검색됩니다 |
-| `drive` | `semantic_search_drive` | `QDRANT_URL`, 임베딩 키(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자), 색인(`knowledge-mcp drive reindex`) |
+| `drive` | `semantic_search_drive` | 임베딩 키 하나(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자). 그 밖에는 필요 없습니다. 벡터는 로컬 파일에 저장하고, 서버가 처음 뜰 때 색인을 만듭니다. Qdrant를 쓰려면 `QDRANT_URL`을 정하십시오 |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
@@ -255,8 +263,9 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 작업 | 방법 |
 | --- | --- |
-| 처음 전체 색인 | `knowledge-mcp drive reindex` (`docker compose run --rm knowledge-mcp drive reindex`) |
-| 최신 상태 유지 | HTTP 서버가 30분마다 Drive 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`). 전체 색인을 먼저 합니다 |
+| 처음 전체 색인 | 자동입니다. 색인이 빈 채로 서버가 처음 뜨면 스스로 만듭니다(`DRIVE_AUTO_INDEX=false`로 끕니다). 직접 돌리려면 `knowledge-mcp drive reindex` |
+| 벡터 저장 위치 | 기본은 `<data dir>/vectors.db`입니다. 수만 조각까지 충분합니다. 더 큰 색인이나 서버 여러 대는 `QDRANT_URL`을 정하고 다시 색인하십시오 |
+| 최신 상태 유지 | HTTP 서버가 30분마다 Drive 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`) |
 | 정리 | 전체 실행은 목록에서 빠진 파일의 벡터를 지웁니다. 제외 폴더로 옮긴 파일이 여기에 해당합니다 |
 | 처음부터 다시 | `--recreate`는 컬렉션을 비우고 시작합니다. `--dry-run`은 청크 수만 셉니다. OCR을 건너뛰어 Mathpix 요금이 나가지 않습니다 |
 

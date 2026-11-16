@@ -7,8 +7,8 @@ plugins turn on when you set their env vars in `.env`.
 ## Run
 
 ```bash
+npm run setup                                             # connect services: asks, checks each value, writes .env
 npm run dev                                               # http://localhost:8080/mcp, reloads on save
-npm run keys -- create --email you@example.com --role admin   # prints an API key once
 npm run doctor                                            # which plugins are on, and what each one is missing
 ```
 

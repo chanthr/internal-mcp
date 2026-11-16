@@ -7,6 +7,7 @@
     "dev": "tsx watch --include src/plugins src/server.ts serve",
     "build": "tsc",
     "start": "node dist/server.js serve",
+    "setup": "tsx src/server.ts setup",
     "keys": "tsx src/server.ts keys",
     "users": "tsx src/server.ts users",
     "doctor": "tsx src/server.ts doctor",
