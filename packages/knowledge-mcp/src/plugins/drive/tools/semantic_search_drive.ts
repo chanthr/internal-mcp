@@ -59,6 +59,9 @@ export const semanticSearchDriveTool = defineTool({
   run: (args) => handleSemanticSearchDrive(args),
 });
 
+/** Chunks shown per document (env SEMANTIC_MAX_PER_DOC). */
+const MAX_PER_DOC = Math.max(1, Number(process.env.SEMANTIC_MAX_PER_DOC ?? 2));
+
 export async function handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
   // 외부 의존(OpenAI 임베딩·Qdrant) 실패를 도구 특화 graceful 에러로 — 예전엔 [fatal] 로만 떴다.
   try {
@@ -99,7 +102,7 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
   //    when relevant documents exist in their folders.
   const folderScope = allowedDriveFolders(auth);
   const client = await getQdrantClient();
-  const searchLimit = folderScope ? 200 : Math.min(50, Math.max(topK * 3, 18));
+  const searchLimit = folderScope ? 200 : Math.min(80, Math.max(topK * 5, 30));
   const results = await client.search(DRIVE_COLLECTION, {
     vector: queryVector,
     limit: searchLimit,
@@ -138,10 +141,25 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
     .sort((a, b) => b.adj - a.adj);
 
   // 3c. Re-check excluded folders (chunks indexed before a folder was excluded) and the caller's folder scope.
-  const ranked = reranked
+  const allowed = reranked
     .filter((x) => !isExcludedPath(x.p.file_path ?? ''))
-    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope))
-    .slice(0, topK);
+    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope));
+
+  // 3d. At most MAX_PER_DOC chunks per document. Without this one long document fills every slot with its own
+  //     neighbouring chunks and the answer rests on a single source. The rest is one read_drive_file call away.
+  const perDoc = new Map<string, number>();
+  const more = new Map<string, number>();
+  const ranked: typeof allowed = [];
+  for (const x of allowed) {
+    const id = x.p.file_id;
+    const n = perDoc.get(id) ?? 0;
+    if (n >= MAX_PER_DOC || ranked.length >= topK) {
+      if (perDoc.has(id)) more.set(id, (more.get(id) ?? 0) + 1);
+      continue;
+    }
+    perDoc.set(id, n + 1);
+    ranked.push(x);
+  }
 
   // 4. Markdown output (readable for people and models)
   const lines: string[] = [];
@@ -177,7 +195,10 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
     );
     lines.push(`**Path:** \`${p.file_path}\``);
     if (p.heading) lines.push(`**Heading:** ${p.heading}`);
-    lines.push(`**File ID:** \`${p.file_id}\` — pass to read_drive_file for the whole document`);
+    lines.push(
+      `**File ID:** \`${p.file_id}\` — pass to read_drive_file for the whole document` +
+        (more.get(p.file_id) ? ` (${more.get(p.file_id)} more matching chunks in it)` : ''),
+    );
     lines.push(`**Drive:** [open](${driveLink})`);
     if (p.image_urls && p.image_urls.length > 0) {
       lines.push(`**Images:** ${p.image_urls.length} — ${p.image_urls.join(' · ')}`);

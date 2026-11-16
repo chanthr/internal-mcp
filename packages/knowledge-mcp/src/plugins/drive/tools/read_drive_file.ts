@@ -51,7 +51,6 @@ export const readDriveFileTool = defineTool({
 
 const GOOGLE_DOC_EXPORT: Record<string, string> = {
   'application/vnd.google-apps.document': 'text/markdown',
-  'application/vnd.google-apps.spreadsheet': 'text/csv',
   'application/vnd.google-apps.presentation': 'text/plain',
 };
 
@@ -145,7 +144,12 @@ async function readOne(
 
     let body: string;
     let extractMethod: string | undefined;
-    if (GOOGLE_DOC_EXPORT[mimeType]) {
+    if (mimeType === 'application/vnd.google-apps.spreadsheet') {
+      // Every tab, not just the first (see extract_text.ts).
+      const r = await extractText(drive, fileId, mimeType);
+      body = r.text;
+      extractMethod = r.method;
+    } else if (GOOGLE_DOC_EXPORT[mimeType]) {
       const res = await drive.files.export(
         { fileId, mimeType: GOOGLE_DOC_EXPORT[mimeType] },
         { responseType: 'text' }

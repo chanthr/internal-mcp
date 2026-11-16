@@ -44,6 +44,18 @@ async function downloadBuffer(drive: DriveClient, fileId: string): Promise<Buffe
   return Buffer.from(r.data as ArrayBuffer);
 }
 
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/** A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs are left out. */
+export async function workbookText(buffer: Buffer): Promise<string> {
+  const XLSX = await import('xlsx');
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  return wb.SheetNames.map((n) => ({ n, csv: XLSX.utils.sheet_to_csv(wb.Sheets[n]).trim() }))
+    .filter((s) => s.csv)
+    .map((s) => `## ${s.n}\n${s.csv}`)
+    .join('\n\n');
+}
+
 async function exportGoogle(
   drive: DriveClient,
   fileId: string,
@@ -86,7 +98,9 @@ async function extractRaw(
     return { text: stripEmbeddedImages(await exportGoogle(drive, fileId, 'text/markdown')), method: 'gdoc→md' };
   }
   if (mimeType === 'application/vnd.google-apps.spreadsheet') {
-    return { text: await exportGoogle(drive, fileId, 'text/csv'), method: 'gsheet→csv' };
+    // CSV export only carries the first tab. Export the workbook and read every tab, like an uploaded .xlsx.
+    const r = await drive.files.export({ fileId, mimeType: XLSX_MIME }, { responseType: 'arraybuffer' });
+    return { text: await workbookText(Buffer.from(r.data as ArrayBuffer)), method: 'gsheet→xlsx' };
   }
   if (mimeType === 'application/vnd.google-apps.presentation') {
     return { text: await exportGoogle(drive, fileId, 'text/plain'), method: 'gslide→txt' };
@@ -137,13 +151,7 @@ async function extractRaw(
 
   // 6. Excel .xlsx → SheetJS (시트별 csv)
   if (mimeType.includes('spreadsheetml')) {
-    const XLSX = await import('xlsx');
-    const buffer = await downloadBuffer(drive, fileId);
-    const wb = XLSX.read(buffer, { type: 'buffer' });
-    const text = wb.SheetNames.map(
-      (n) => `## ${n}\n${XLSX.utils.sheet_to_csv(wb.Sheets[n])}`,
-    ).join('\n\n');
-    return { text, method: 'xlsx→sheetjs' };
+    return { text: await workbookText(await downloadBuffer(drive, fileId)), method: 'xlsx→sheetjs' };
   }
 
   // 7. 이미지 → Mathpix OCR (v3/text, 즉시)
