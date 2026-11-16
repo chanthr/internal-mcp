@@ -14,7 +14,7 @@
  *   knowledge-mcp drive reindex --dry-run           # indexing X, 통계만
  *   knowledge-mcp drive reindex --recreate          # collection 을 비우고 처음부터
  *
- * 전체 root 로 돌리면(--root/--biz-only/--dev-only 없이) 끝에서 이번 목록에 없는 파일의 벡터를 지운다.
+ * 전체 root 로 돌리면(--root/--source 없이) 끝에서 이번 목록에 없는 파일의 벡터를 지운다.
  * 제외 폴더로 옮긴 파일, 나중에 excludeFolders 에 넣은 폴더, config 에서 뺀 root 의 청크가 여기서 정리된다.
  */
 import type { DriveClient } from './client.js';
@@ -73,7 +73,7 @@ function clearCheckpoint(): void {
 interface DriveRoot {
   id: string;
   name: string;
-  source: 'dev' | 'biz';
+  source: string;
 }
 
 interface CliArgs {
@@ -105,11 +105,15 @@ function parseArgs(args: string[]): CliArgs {
       if (!root) throw new Error(`--root ${id} is not one of drive.roots (${DRIVE_ROOTS.map((r) => r.id).join(', ')})`);
       roots = [root];
       partial = true;
-    } else if (args[i] === '--biz-only') {
-      roots = DRIVE_ROOTS.filter((r) => r.source === 'biz');
+    } else if (args[i] === '--source' && args[i + 1]) {
+      const label = args[++i];
+      roots = DRIVE_ROOTS.filter((r) => r.source === label);
+      if (roots.length === 0) throw new Error(`--source ${label} matches no root (labels: ${[...new Set(DRIVE_ROOTS.map((r) => r.source))].join(', ')})`);
       partial = true;
-    } else if (args[i] === '--dev-only') {
-      roots = DRIVE_ROOTS.filter((r) => r.source === 'dev');
+    } else if (args[i] === '--biz-only' || args[i] === '--dev-only') {
+      // 0.3 names for --source biz / --source dev.
+      const label = args[i] === '--biz-only' ? 'biz' : 'dev';
+      roots = DRIVE_ROOTS.filter((r) => r.source === label);
       partial = true;
     } else if (args[i] === '--dry-run') {
       dryRun = true;
@@ -249,7 +253,7 @@ async function pruneStaleVectors(keep: Set<string>): Promise<number> {
   return stale.size;
 }
 
-/** `knowledge-mcp drive reindex [--root ID | --dev-only | --biz-only] [--dry-run] [--recreate]` */
+/** `knowledge-mcp drive reindex [--root ID | --source LABEL] [--dry-run] [--recreate]` */
 export async function runReindex(argv: string[]): Promise<void> {
   const { roots, dryRun, recreate, partial } = parseArgs(argv);
   const startTs = Date.now();
@@ -274,7 +278,7 @@ export async function runReindex(argv: string[]): Promise<void> {
 
   // 2. Drive 모든 markdown list (root 별)
   const drive = await getDriveClient();
-  const allFiles: Array<ListedFile & { source: 'dev' | 'biz' }> = [];
+  const allFiles: Array<ListedFile & { source: string }> = [];
 
   for (const root of roots) {
     const files = await listAllMarkdown(drive, root.id, '');

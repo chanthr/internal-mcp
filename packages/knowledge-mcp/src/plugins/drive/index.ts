@@ -63,7 +63,7 @@ export const drivePlugin = definePlugin({
   },
   commands: {
     reindex: {
-      description: 'full Drive → Qdrant index (--dry-run, --recreate, --root <id>, --dev-only, --biz-only)',
+      description: 'full Drive → Qdrant index (--dry-run, --recreate, --root <id>, --source <label>)',
       run: async (args) => (await import('./reindex.js')).runReindex(args),
     },
     'get-token': {

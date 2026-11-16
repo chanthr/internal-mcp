@@ -17,8 +17,26 @@ export function sharedScopeEnabled(): boolean {
   return getConfig().drive.scope === 'shared';
 }
 
-/** Index label for documents shared outside the roots (general documents, not structured knowledge docs). */
-export const SHARED_SOURCE = 'biz' as const;
+/** `source` label for documents shared outside the roots (config drive.sharedSource). */
+export const SHARED_SOURCE = getConfig().drive.sharedSource;
+
+/** Every `source` label an indexed chunk can carry: the roots' labels, plus the shared label when it is in scope. */
+export function sourceLabels(): string[] {
+  const labels = new Set(DRIVE_ROOTS.map((r) => r.source));
+  if (sharedScopeEnabled()) labels.add(SHARED_SOURCE);
+  return [...labels];
+}
+
+/**
+ * Does this source take its metadata from the path (category, customer, tags from folder and file names) rather
+ * than from Markdown frontmatter? Set per root with `metadata`. Without it: "dev" means frontmatter (the 0.3
+ * meaning), anything else means path.
+ */
+export function usesPathMetadata(source: string): boolean {
+  const root = DRIVE_ROOTS.find((r) => r.source === source && r.metadata);
+  if (root?.metadata) return root.metadata === 'path';
+  return source !== 'dev';
+}
 
 /**
  * 색인·읽기 파일 크기 상한(바이트). 파일을 통째로 메모리에 올리므로, 거대한 파일 하나가 서버를 죽이지 않게 막는다.

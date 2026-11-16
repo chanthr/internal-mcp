@@ -19,9 +19,9 @@ import { getConfig } from '../../../core/config.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
 import { isExcludedPath } from '../exclude.js';
 import { embedQuery } from '../embeddings.js';
+import { sourceLabels } from '../settings.js';
 import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from '../qdrant.js';
 
-const SOURCES = ['dev', 'biz'] as const;
 const RANK_RULES = getConfig().drive.rank;
 
 /** First rank rule whose prefix the path starts with. */
@@ -36,19 +36,19 @@ const DESCRIPTION =
   'for file names or exact keywords use search_drive. ' +
   'Each result has a score, path, heading, File ID, Drive link and the chunk text. ' +
   'Two-step search: when a chunk lacks context, call read_drive_file with its File ID to read the whole document. ' +
-  'source="dev" searches structured docs (Markdown), source="biz" searches general documents (PDF, Office, Google files).';
+  (sourceLabels().length > 1 ? `Narrow with source: ${sourceLabels().map((l) => `"${l}"`).join(', ')}.` : '');
 
 const inputSchema = z.object({
   query: z.string().min(1).max(500).describe('Natural-language question, in any language. e.g. "How do we rotate API keys?"'),
   topK: z.number().int().min(1).max(20).optional().default(5).describe('Number of chunks to return (1-20, default 5)'),
-  source: z.enum(SOURCES).optional().describe('Optional: "dev" (structured Markdown docs) or "biz" (general documents)'),
+  source: z.string().optional().describe(`Optional: only documents with this source label${sourceLabels().length ? ` (${sourceLabels().join(', ')})` : ''}`),
   cluster: z.string().optional().describe('Optional: top-level folder under a Drive root, e.g. "Engineering"'),
   hasImage: z.boolean().optional().describe('Optional: only chunks that contain images (screenshots, diagrams)'),
   docStatus: z.string().optional().describe('Optional: the `status` from Markdown frontmatter, e.g. "draft" or "superseded"'),
-  tags: z.string().optional().describe('Optional: one tag. dev = frontmatter `tags`; biz = folder and file-name words'),
+  tags: z.string().optional().describe('Optional: one tag. From frontmatter `tags`, or for path-metadata sources from folder and file-name words'),
   docType: z.string().optional().describe('Optional: the `type` from Markdown frontmatter, e.g. "guide"'),
-  category: z.string().optional().describe('Optional (biz): top-level folder name without a leading number, e.g. "Sales"'),
-  customer: z.string().optional().describe('Optional (biz): customer name, from folders listed in config drive.customerFolders, e.g. "Acme"'),
+  category: z.string().optional().describe('Optional (path-metadata sources): top-level folder name without a leading number, e.g. "Sales"'),
+  customer: z.string().optional().describe('Optional (path-metadata sources): customer name, from folders listed in config drive.customerFolders, e.g. "Acme"'),
 });
 
 export const semanticSearchDriveTool = defineTool({

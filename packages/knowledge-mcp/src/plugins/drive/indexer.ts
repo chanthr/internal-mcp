@@ -9,7 +9,7 @@ import { embedTexts } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
 
-import { DRIVE_ROOTS, MAX_FILE_BYTES } from './settings.js';
+import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
 import { normalizeFolderName } from './exclude.js';
 import { getConfig } from '../../core/config.js';
 
@@ -42,11 +42,11 @@ export function makeChunkId(fileId: string, chunkIndex: number): number {
 /** path + source -> file_type / cluster. cluster = top-level folder (generic). */
 export function classifyFile(
   path: string,
-  source: 'dev' | 'biz',
+  source: string,
 ): { type: ChunkPayload['file_type']; cluster: string | null } {
   const m = path.match(/^([^/]+)\//);
   const topFolder = m ? m[1] : null;
-  return { type: source === 'biz' ? 'biz' : 'other', cluster: topFolder };
+  return { type: usesPathMetadata(source) ? 'biz' : 'other', cluster: topFolder };
 }
 
 export interface IndexableFile {
@@ -54,7 +54,7 @@ export interface IndexableFile {
   name: string;
   path: string;
   modifiedTime: string;
-  source: 'dev' | 'biz';
+  source: string;
   mimeType: string;
   /** Drive 메타의 바이트 크기. Google 문서는 없음. */
   size?: number;
@@ -96,8 +96,8 @@ const CUSTOMER_FOLDERS = getConfig().drive.customerFolders.map((n) => normalizeF
  *   doc_customer : {customerFolders}/{name}  예) "01_Clients/Acme/…" → "Acme"
  *   path_tags    : 폴더 세그먼트(NN_ 제거) + 파일명 토큰 (검색 태그)
  */
-export function deriveBizMeta(path: string, source: 'dev' | 'biz'): BizMeta {
-  if (source !== 'biz') return { doc_category: null, doc_customer: null, path_tags: [] };
+export function deriveBizMeta(path: string, source: string): BizMeta {
+  if (!usesPathMetadata(source)) return { doc_category: null, doc_customer: null, path_tags: [] };
   const segs = path.split('/').filter(Boolean);
   const folders = segs.slice(0, -1); // 마지막 = 파일명
   const fileName = segs[segs.length - 1] ?? '';

@@ -213,7 +213,7 @@ export type ChunkPayload = {
   content_hash: string; // 추출 텍스트 sha256 — 무변경 재색인 skip(EFF-1) 판정용. 모든 청크 동일값.
   file_type: 'dev_log' | 'decision' | 'rule' | 'template' | 'biz' | 'other';
   cluster: string | null;
-  source: 'dev' | 'biz';
+  source: string;
 
   // ── 신규: 이미지·구조 메타 (2026-05-27 RAG 개선) ──
   image_urls: string[]; // 청크 내 Mathpix CDN(또는 영구화) 이미지 URL

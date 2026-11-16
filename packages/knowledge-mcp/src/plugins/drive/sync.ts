@@ -29,7 +29,7 @@ async function resolveFromParents(
   drive: DriveClient,
   firstParents: string[] | null | undefined,
   fileName: string,
-): Promise<{ path: string; source: 'dev' | 'biz' } | null> {
+): Promise<{ path: string; source: string } | null> {
   const folders: string[] = [];
   let parents: string[] | undefined = firstParents ?? undefined;
   for (let hop = 0; hop < 12 && parents && parents.length > 0; hop++) {
