@@ -239,8 +239,8 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Plugin | Tools | Needs |
 | --- | --- | --- |
-| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token, and `drive.roots` in the config |
-| `drive` | `semantic_search_drive` | `QDRANT_URL`, `OPENAI_API_KEY` and an index (`knowledge-mcp drive reindex`) |
+| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token. Share a folder or a document with that account and it is searchable |
+| `drive` | `semantic_search_drive` | `QDRANT_URL`, an embedding key (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) and an index (`knowledge-mcp drive reindex`) |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
@@ -264,7 +264,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | --- | --- |
 | Markdown, plain text | As is |
 | Google Docs, Slides | Drive export |
-| Google Sheets | Drive export as CSV. Only the first sheet |
+| Google Sheets | Drive export, every tab as its own section |
 | Word, PowerPoint, Excel, PDF with text | Local parsers |
 | Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, only when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
 
@@ -306,9 +306,11 @@ it, the sign-in allowlist included.
 | --- | --- |
 | `orgId` | Organization identifier carried in the auth context |
 | `branding.name` / `branding.instructions` | Name shown on the sign-in consent page and in OAuth metadata. `instructions` replaces the guide the client receives (base line plus each plugin's notes) |
-| `drive.roots[]` | `{ id, name, source }` folders to index and search. `source` is `dev` (Markdown with frontmatter) or `biz` (PDF, Office and Google files) |
+| `drive.roots[]` | `{ id, name, source, metadata }` folders to index and search. `source` is a label you choose (`handbook`, `sales`, …; default `docs`) and becomes the `source` search filter. `metadata` is `path` (default: category, customer and tags from folder and file names) or `frontmatter` (Markdown with a YAML header) |
+| `drive.scope` | `shared` (default): everything shared with the service account is in scope, the roots plus any folder or document shared with it separately. `roots`: only files under `drive.roots`. env `DRIVE_SCOPE` overrides |
+| `drive.sharedSource` | `source` label for documents shared outside the roots. Default `shared` |
 | `drive.excludeFolders[]` | Folder names skipped everywhere: index, search, read and list. Case and spacing are ignored |
-| `drive.customerFolders[]` | Top-level `biz` folders with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
+| `drive.customerFolders[]` | Top-level folders (in `path` metadata sources) with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
 | `drive.rank[]` | Optional `{ prefix, label, weight }` rules for `semantic_search_drive`, e.g. prefer `Current/` (weight 1.1) over `Archive/` (0.9). Default: none |
 | `qdrant.collection` | Vector collection name (env `QDRANT_COLLECTION` overrides) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Who may sign in with Google |
@@ -417,6 +419,16 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | Claude web and desktop | Turn on OAuth, then add a custom connector with `https://<host>/mcp` |
 | Any MCP client | URL `https://<host>/mcp` with header `Authorization: Bearer <key>` |
 
+## Upgrading from 0.3
+
+| Change | What to do |
+| --- | --- |
+| Drive scope is `shared` by default | Documents shared with the service account outside `drive.roots` are now searchable, readable and indexed. Excluded folders stay hidden. To keep the 0.3 behaviour set `drive.scope` to `roots` (or env `DRIVE_SCOPE=roots`) |
+| zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
+| `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |
+| Google Sheets are read tab by tab | Indexed sheets change on their next modification. Run `knowledge-mcp drive reindex` to refresh them all now |
+| Semantic search shows at most 2 chunks per document | Set `SEMANTIC_MAX_PER_DOC` to change it |
+
 ## Upgrading from 0.2
 
 | Change | What to do |
@@ -432,8 +444,9 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 1. Never commit `.env`, service-account JSON, `mcp.config.json` or `data/`. All are gitignored and kept out of the image.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
-4. Drive indexing sends document text to OpenAI for embeddings, and scanned files to Mathpix when OCR is on.
-5. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
+4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
+5. With `drive.scope` `shared`, sharing a document with the service account makes it visible to every user of the server who may use the `drive` tools. List sensitive folder names in `drive.excludeFolders`.
+6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 
 ## File map
 
@@ -455,7 +468,7 @@ Develop with `npm install`, `npm test` (unit and end-to-end), `npm run typecheck
 
 ## Contributing
 
-Please open an issue for problems and ideas.
+Please open an issue for problems and ideas. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the setup, the checks to run and how to add a plugin. Changes per version are in [`CHANGELOG.md`](CHANGELOG.md).
 
 | Template | Use it when |
 | --- | --- |

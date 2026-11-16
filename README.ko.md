@@ -239,8 +239,8 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
-| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token, 설정의 `drive.roots` |
-| `drive` | `semantic_search_drive` | `QDRANT_URL`, `OPENAI_API_KEY`, 색인(`knowledge-mcp drive reindex`) |
+| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token. 폴더나 문서를 그 계정에 공유하면 검색됩니다 |
+| `drive` | `semantic_search_drive` | `QDRANT_URL`, 임베딩 키(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자), 색인(`knowledge-mcp drive reindex`) |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
@@ -264,7 +264,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | --- | --- |
 | Markdown, 일반 텍스트 | 그대로 |
 | Google 문서, 슬라이드 | Drive 내보내기 |
-| Google 스프레드시트 | Drive에서 CSV로 내보냅니다. 첫 시트만 읽습니다 |
+| Google 스프레드시트 | Drive에서 내보내 탭마다 한 절로 읽습니다 |
 | Word, PowerPoint, Excel, 글자가 든 PDF | 서버 안의 파서 |
 | 스캔 PDF, PNG, JPEG, WebP | Mathpix OCR. `MATHPIX_APP_ID`, `MATHPIX_APP_KEY`가 있을 때만 |
 
@@ -305,9 +305,11 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | --- | --- |
 | `orgId` | 인증 정보에 실리는 조직 식별자 |
 | `branding.name` / `branding.instructions` | 로그인 동의 화면과 OAuth 메타데이터에 보이는 이름. `instructions`를 적으면 클라이언트가 받는 안내(기본 문장과 플러그인별 안내)를 대신합니다 |
-| `drive.roots[]` | 색인하고 검색할 폴더 `{ id, name, source }`. `source`는 `dev`(머리말이 있는 Markdown) 또는 `biz`(PDF, Office, Google 파일) |
+| `drive.roots[]` | 색인하고 검색할 폴더 `{ id, name, source, metadata }`. `source`는 직접 정하는 이름입니다(`handbook`, `sales` 등, 기본 `docs`). 검색의 `source` 필터가 됩니다. `metadata`는 `path`(기본. 폴더와 파일 이름에서 분류, 고객사, 태그를 얻음) 또는 `frontmatter`(YAML 머리말이 있는 Markdown)입니다 |
+| `drive.scope` | `shared`(기본): 서비스 계정에 공유된 것이 모두 범위입니다. root와, 따로 공유한 폴더나 문서가 포함됩니다. `roots`: `drive.roots` 아래 파일만 봅니다. env `DRIVE_SCOPE`가 우선합니다 |
+| `drive.sharedSource` | root 밖 공유 문서에 붙는 `source` 이름. 기본 `shared` |
 | `drive.excludeFolders[]` | 색인, 검색, 읽기, 목록 어디서든 건너뛸 폴더 이름. 대소문자와 공백은 무시합니다 |
-| `drive.customerFolders[]` | 고객사마다 하위 폴더를 둔 `biz` 최상위 폴더(`Clients/Acme/…` → 고객사 `Acme`). 검색의 `customer` 필터에 씁니다. 기본 `Clients`, `Customers`, `고객사` |
+| `drive.customerFolders[]` | 고객사마다 하위 폴더를 둔 최상위 폴더(`path` 메타 출처에서)(`Clients/Acme/…` → 고객사 `Acme`). 검색의 `customer` 필터에 씁니다. 기본 `Clients`, `Customers`, `고객사` |
 | `drive.rank[]` | `semantic_search_drive`의 선택 규칙 `{ prefix, label, weight }`. 예: `Current/`(가중치 1.1)를 `Archive/`(0.9)보다 앞에. 기본은 없음 |
 | `qdrant.collection` | 벡터 컬렉션 이름(환경변수 `QDRANT_COLLECTION`이 먼저) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Google 로그인을 허용할 대상 |
@@ -413,6 +415,16 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
 | 다⁠른⁠ ⁠M⁠C⁠P⁠ ⁠클⁠라⁠이⁠언⁠트 | 주소 `https://<호스트>/mcp`, 헤더 `Authorization: Bearer <키>` |
 
+## 0.3에서 올리기
+
+| 바뀐 것 | 할 일 |
+| --- | --- |
+| Drive 범위 기본값이 `shared` | `drive.roots` 밖이어도 서비스 계정에 공유된 문서를 검색하고, 읽고, 색인합니다. 제외 폴더는 계속 숨깁니다. 0.3 동작을 유지하려면 `drive.scope`를 `roots`로 두십시오(또는 env `DRIVE_SCOPE=roots`) |
+| zod 4 | 플러그인이 쓰는 `z`가 zod 4가 됩니다. `z.record(값스키마)`는 `z.record(z.string(), 값스키마)`로, 안쪽 기본값에 기대는 객체의 `.default({})`는 `.prefault({})`로 고치십시오 |
+| `source`가 자유 이름 | `dev`와 `biz`는 옛 뜻 그대로 동작합니다. `--dev-only`, `--biz-only`도 그대로 되고, 일반형은 `--source <이름>`입니다 |
+| Google 스프레드시트를 탭마다 읽음 | 색인된 시트는 다음에 수정될 때 바뀝니다. 지금 모두 새로 하려면 `knowledge-mcp drive reindex`를 실행하십시오 |
+| 의미 검색이 문서당 2조각까지만 보여 줌 | `SEMANTIC_MAX_PER_DOC`로 바꿉니다 |
+
 ## 0.2에서 올리기
 
 | 바뀐 점 | 할 일 |
@@ -428,8 +440,9 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 1. `.env`, 서비스 계정 JSON, `mcp.config.json`, `data/`는 커밋하지 않습니다. 모두 gitignore와 이미지 제외 목록에 있습니다.
 2. 데이터 파일에는 키 해시와 OAuth 클라이언트 비밀값이 있습니다. 소유자만 읽게 만들어지니 볼륨도 비공개로 둡니다.
 3. 기본 플러그인은 Drive, Slack, GitHub, Railway를 바꾸지 않습니다. 게이트웨이는 `expose`를 바꿀 때만 원격 쓰기 도구를 엽니다.
-4. Drive 색인은 임베딩을 위해 문서 본문을 OpenAI로 보냅니다. OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
-5. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.
+4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
+5. `drive.scope`가 `shared`이면, 서비스 계정에 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.
+6. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.
 
 ## 파일 구성
 
