@@ -84,7 +84,9 @@ export class LocalVectorClient {
   private memory = new Map<string, MemoryIndex>();
 
   constructor(private readonly db: DatabaseSync) {
-    db.exec('PRAGMA journal_mode = WAL');
+    // Two processes can write here (the server and a manual `drive reindex`, or two stdio sessions). Without a
+    // timeout the second writer fails at once with "database is locked".
+    db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 10000');
     db.exec('CREATE TABLE IF NOT EXISTS vec_collections (name TEXT PRIMARY KEY, dim INTEGER NOT NULL)');
   }
 

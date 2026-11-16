@@ -118,6 +118,12 @@ export interface PluginSpec {
    * Not run in stdio mode, where each client session is its own process.
    */
   start?: (ctx: { config: unknown; state: PluginState; log: (...args: unknown[]) => void }) => Promise<void> | void;
+  /**
+   * Runs once in the background when a stdio session starts (the HTTP server uses `start` instead). For a single
+   * catch-up pass, such as bringing an index up to date. No timers: the process ends with the client session, and
+   * several sessions can run at once, so guard shared work with a lock. Errors are logged, not fatal.
+   */
+  catchUp?: (ctx: { config: unknown; state: PluginState; log: (...args: unknown[]) => void }) => Promise<void> | void;
   /** Extra CLI commands. */
   commands?: Record<string, PluginCommand>;
 }

@@ -20,7 +20,7 @@ when you set it up.
 
 | Area | What to know |
 | --- | --- |
-| Drive | With `drive.scope` `shared` (the default), every document shared with the service account is visible to users who may use the `drive` tools. List sensitive folder names in `drive.excludeFolders`, or set `drive.scope` to `roots` |
+| Drive | Anyone who knows the service account's address can share a document with it; Drive asks nobody. Documents shared outside `drive.roots` are therefore shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`, or set `drive.scope` to `roots` |
 | Slack, GitHub, Railway | A token reaches whatever it can read. Scope each token to what every user may see |
 | Access | Unregistered users get only `ping` unless `access.viewerTools` opens more. Per-user tool, folder and channel limits live in the users table |
 | Embeddings and OCR | Indexing sends document text to the embedding provider, and scanned files to Mathpix when OCR is on |

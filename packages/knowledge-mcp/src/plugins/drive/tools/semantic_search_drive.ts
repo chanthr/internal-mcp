@@ -60,6 +60,21 @@ export const semanticSearchDriveTool = defineTool({
   run: (args) => handleSemanticSearchDrive(args),
 });
 
+/**
+ * The date shown with a result: the date written in the document (frontmatter), otherwise when the file was last
+ * modified, with its age once it is over a month old. A figure from an old document reads as current unless the
+ * model is told how old the document is.
+ */
+export function dateLabel(p: Pick<ChunkPayload, 'doc_date' | 'modified_time'>, now = Date.now()): string | null {
+  const fromDoc = /^\d{4}-\d{2}-\d{2}/.test(p.doc_date ?? '');
+  const raw = fromDoc ? p.doc_date! : (p.modified_time ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return null;
+  const date = raw.slice(0, 10);
+  const days = Math.floor((now - Date.parse(`${date}T00:00:00Z`)) / 86_400_000);
+  const age = days >= 365 ? `${Math.floor(days / 365)}y old` : days >= 30 ? `${Math.floor(days / 30)}mo old` : '';
+  return `${fromDoc ? '' : 'modified '}${date}${age ? `, ${age}` : ''}`;
+}
+
 /** Chunks shown per document (env SEMANTIC_MAX_PER_DOC). */
 const MAX_PER_DOC = Math.max(1, Number(process.env.SEMANTIC_MAX_PER_DOC ?? 2));
 
@@ -113,6 +128,8 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
   });
 
   if (results.length === 0) {
+    // Tell an empty index apart from a query that matched nothing: the advice is different.
+    const indexEmpty = (await client.scroll(DRIVE_COLLECTION, { limit: 1, with_payload: false, with_vector: false })).points.length === 0;
     const filters = Object.entries({ source, cluster, docStatus, tags, docType, category, customer })
       .filter(([, v]) => v)
       .map(([k, v]) => `${k}="${v}"`);
@@ -122,7 +139,9 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
           type: 'text' as const,
           text:
             `No results for "${query}".\n\nPossible reasons:\n` +
-            `- Drive is not indexed yet: ask an admin to run \`knowledge-mcp drive reindex\`\n` +
+            (indexEmpty
+              ? `- The search index is empty. The server builds it by itself after setup; if it was just started, try again in a few minutes. Meanwhile search_drive (keywords) and read_drive_file work.\n`
+              : '') +
             (filters.length ? `- The filters are too narrow (${filters.join(', ')}); try without them\n` : '') +
             `- Weak semantic match: rephrase, or try search_drive for exact words`,
         },
@@ -178,7 +197,7 @@ async function _handleSemanticSearchDrive(args: z.infer<typeof inputSchema>) {
   for (let i = 0; i < ranked.length; i++) {
     const { r, p, label, adj } = ranked[i];
     const driveLink = `https://drive.google.com/file/d/${p.file_id}/view`;
-    const tags = [label, p.doc_date, p.doc_status === 'superseded' ? '⚠️ superseded' : p.doc_status === 'parked' ? 'parked' : null]
+    const tags = [label, dateLabel(p), p.doc_status === 'superseded' ? '⚠️ superseded' : p.doc_status === 'parked' ? 'parked' : null]
       .filter(Boolean)
       .join(' · ');
     lines.push(`---`);

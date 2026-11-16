@@ -24,6 +24,7 @@ import {
   systemExec,
   type Exec,
 } from './auto.js';
+import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
 
 export interface SetupIO {
@@ -197,11 +198,15 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     const exec = opts.exec ?? systemExec;
     let keyPath: string | null = null;
     let found: DriveCheck | null = null;
+    let gcloudUser: string | null = null;
     if (hasTool(exec, 'gcloud')) {
       io.say('  The gcloud CLI is installed, so this can be done for you:');
       io.say('    1. Create the service account and key with gcloud (you only sign in)');
       io.say('    2. I already have a key file');
-      if ((await io.ask('  Choose 1 or 2:', '1')) === '1') keyPath = await driveKeyWithGcloud(io, exec, dir);
+      if ((await io.ask('  Choose 1 or 2:', '1')) === '1') {
+        keyPath = await driveKeyWithGcloud(io, exec, dir);
+        if (keyPath) gcloudUser = gcloudAccount(exec);
+      }
     } else {
       io.say('  Tip: with the gcloud CLI installed (cloud.google.com/sdk), setup can create the key for you.');
     }
@@ -249,6 +254,53 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
         if (shared.length > 8 || more) io.say('    …');
         if (email) io.say(`  To add more, share them with ${email}.`);
       }
+
+      // Whose documents are shown. Sharing with the account needs no acceptance, so without this anyone who learns
+      // its address could plant a document in every user's search results.
+      const trusted: string[] = Array.isArray(config.drive?.trustedOwners) ? [...config.drive.trustedOwners] : [];
+      // How many shared items each owner accounts for, as trust entries (a domain, or one address at a public mail provider).
+      const byOwner = new Map<string, string[]>();
+      for (const item of shared) {
+        for (const entry of new Set(item.owners.map(trustEntryFor).filter((e): e is string => !!e))) {
+          byOwner.set(entry, [...(byOwner.get(entry) ?? []), item.name]);
+        }
+      }
+      io.say();
+      io.say('  Anyone who knows this account\'s address can share a document with it. So only documents from owners you');
+      io.say(`  trust are shown.${trusted.length ? ` Trusted now: ${trusted.join(', ')}.` : ''}`);
+      // A default is offered only for the signed-in Google Cloud account, which is known to be the person at the
+      // keyboard. Nothing is guessed from what happens to be shared: a planted document must never become trusted by
+      // pressing Enter. Every other owner has to be typed.
+      const own = gcloudUser ? trustEntryFor(gcloudUser) : null;
+      if (!own || !trusted.includes(own)) {
+        const answer = await io.ask(
+          `  Your organization's domain, or your own address${own ? ` (Enter for ${own}, "-" for none)` : trusted.length ? ' (Enter to keep the list)' : ' (Enter for none)'}:`,
+          own ?? '',
+        );
+        if (answer && answer !== '-') {
+          const ok = validTrustEntry(answer);
+          if (ok !== true) io.say(`  ✗ ${ok}`);
+          else if (!trusted.includes(answer.toLowerCase())) trusted.push(answer.toLowerCase());
+        }
+      }
+      const others = [...byOwner].filter(([entry]) => !trusted.includes(entry));
+      if (others.length) {
+        io.say('  Also shared with this account by:');
+        for (const [entry, names] of others.slice(0, 8)) io.say(`    ${entry} — ${names.length} item${names.length === 1 ? '' : 's'} (${names.slice(0, 2).join(', ')}${names.length > 2 ? ', …' : ''})`);
+      }
+      const extra = await io.ask('  Other owners to trust: emails or domains, separated by commas (Enter for none):', '');
+      for (const entry of extra.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean)) {
+        const ok = validTrustEntry(entry);
+        if (ok !== true) io.say(`  ✗ ${ok}`);
+        else if (!trusted.includes(entry)) trusted.push(entry);
+      }
+      if (trusted.length !== (config.drive?.trustedOwners?.length ?? 0)) {
+        config.drive = { ...(config.drive ?? {}), trustedOwners: trusted };
+        configChanged = true;
+      }
+      const hidden = shared.filter((s) => !isTrusted(trusted, s.owners, s.driveId));
+      if (trusted.length === 0) io.say('  No owner is trusted, so shared documents stay hidden. Add one later: knowledge-mcp setup trust <email-or-domain>');
+      else if (hidden.length) io.say(`  ${hidden.length} shared item${hidden.length === 1 ? ' stays' : 's stay'} hidden (owner not trusted): ${hidden.slice(0, 3).map((h) => h.name).join(', ')}${hidden.length > 3 ? ' …' : ''}`);
       const current: string[] = Array.isArray(config.drive?.excludeFolders) ? config.drive.excludeFolders : [];
       const ex = await io.ask(
         `  Folder names to keep out of search, separated by commas, e.g. HR, Contracts${current.length ? ` (now: ${current.join(', ')})` : ''}:`,

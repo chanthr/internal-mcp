@@ -42,6 +42,8 @@ export interface DriveFile {
   webViewLink?: string | null;
   trashed?: boolean | null;
   owners?: Array<{ emailAddress?: string | null; displayName?: string | null }> | null;
+  /** Set for items that live in a shared drive (those have no owners). */
+  driveId?: string | null;
   [field: string]: unknown;
 }
 export interface DriveChange {

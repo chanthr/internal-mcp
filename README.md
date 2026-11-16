@@ -230,6 +230,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `setup` | Guided setup: connect Drive, Slack, GitHub and Railway, check every value live, write `.env` and the config, create the admin key. With gcloud installed it creates the Drive service account for you; with gh signed in it can reuse that login. Safe to run again |
 | `setup check` | Verifies every configured service against the real thing. Exit code 1 on a failure |
 | `setup drive --gcloud [--project ID] [--yes]` | Creates the Drive service account and key with the gcloud CLI. Prints its plan and creates nothing without `--yes` |
+| `setup trust <email-or-domain>...` | Adds owners whose shared Drive documents are shown |
 | `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
@@ -270,9 +271,9 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Task | How |
 | --- | --- |
-| First full index | Automatic: the server builds it the first time it starts with an empty index (`DRIVE_AUTO_INDEX=false` turns that off). By hand: `knowledge-mcp drive reindex` |
+| First full index | Automatic: the server builds it the first time it starts with an empty index, over HTTP or in a stdio session (`DRIVE_AUTO_INDEX=false` turns that off). The automatic run never uses paid OCR; scanned files are added by `knowledge-mcp drive reindex` |
 | Where vectors live | `<data dir>/vectors.db` by default, good for tens of thousands of chunks. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
-| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`) |
+| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`). A stdio session syncs once when it starts. A lock file keeps two processes from syncing at the same time |
 | Clean up | A full run deletes vectors of files no longer listed, such as files moved into an excluded folder |
 | Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks. It skips OCR, so it never charges Mathpix |
 
@@ -323,7 +324,8 @@ it, the sign-in allowlist included.
 | `orgId` | Organization identifier carried in the auth context |
 | `branding.name` / `branding.instructions` | Name shown on the sign-in consent page and in OAuth metadata. `instructions` replaces the guide the client receives (base line plus each plugin's notes) |
 | `drive.roots[]` | `{ id, name, source, metadata }` folders to index and search. `source` is a label you choose (`handbook`, `sales`, …; default `docs`) and becomes the `source` search filter. `metadata` is `path` (default: category, customer and tags from folder and file names) or `frontmatter` (Markdown with a YAML header) |
-| `drive.scope` | `shared` (default): everything shared with the service account is in scope, the roots plus any folder or document shared with it separately. `roots`: only files under `drive.roots`. env `DRIVE_SCOPE` overrides |
+| `drive.scope` | `shared` (default): the roots plus any folder or document that a trusted owner (`drive.trustedOwners`) shared with the service account. `roots`: only files under `drive.roots`. env `DRIVE_SCOPE` overrides |
+| `drive.trustedOwners[]` | Whose documents are shown when they are shared with the service account outside the roots: emails (`ann@acme.com`), domains (`acme.com`) or shared drives (`drive:<id>`). Empty by default, which shows nothing outside the roots. `knowledge-mcp setup` asks for it. env `DRIVE_TRUSTED_OWNERS` overrides |
 | `drive.sharedSource` | `source` label for documents shared outside the roots. Default `shared` |
 | `drive.excludeFolders[]` | Folder names skipped everywhere: index, search, read and list. Case and spacing are ignored |
 | `drive.customerFolders[]` | Top-level folders (in `path` metadata sources) with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
@@ -439,7 +441,7 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 
 | Change | What to do |
 | --- | --- |
-| Drive scope is `shared` by default | Documents shared with the service account outside `drive.roots` are now searchable, readable and indexed. Excluded folders stay hidden. To keep the 0.3 behaviour set `drive.scope` to `roots` (or env `DRIVE_SCOPE=roots`) |
+| Drive scope is `shared` by default | Documents that a trusted owner shared with the service account outside `drive.roots` can be searched, read and indexed. Nothing changes until you list owners in `drive.trustedOwners` (`knowledge-mcp setup trust acme.com`). Excluded folders stay hidden. `drive.scope: "roots"` turns it off |
 | zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
 | `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |
 | Google Sheets are read tab by tab | Indexed sheets change on their next modification. Run `knowledge-mcp drive reindex` to refresh them all now |
@@ -461,7 +463,7 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
-5. With `drive.scope` `shared`, sharing a document with the service account makes it visible to every user of the server who may use the `drive` tools. List sensitive folder names in `drive.excludeFolders`.
+5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 
 ## File map

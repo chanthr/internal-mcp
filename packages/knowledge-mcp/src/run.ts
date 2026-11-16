@@ -49,7 +49,7 @@ Usage: knowledge-mcp <command> [options]
   setup                               Guided setup: connect services, check them, write .env and the config
   setup check                         Verify every configured service live (exit 1 on a failure)
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
-  setup github --from-gh | setup embeddings --base-url URL --model NAME
+  setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
                                       Setup steps that ask nothing (for scripts and AI agents)
   serve [--stdio]                     Start the server (HTTP on $PORT, default 8080)
   keys create [--email E] [--role R] [--label L] [--expires 90d]
@@ -263,7 +263,7 @@ async function cmdSetup(argv: string[]): Promise<void> {
   if (!process.stdin.isTTY) {
     throw new UsageError(
       'setup asks questions, so it needs a terminal. Without one use the commands that ask nothing: ' +
-        'setup check | setup drive --gcloud | setup drive --key <file> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
+        'setup check | setup drive --gcloud | setup drive --key <file> | setup trust <owner> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
     );
   }
   const { runSetup } = await import('./setup/wizard.js');

@@ -50,7 +50,7 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
     const res = await drive.files.list({
       q,
       fields:
-        'files(id, name, mimeType, parents, modifiedTime, size, webViewLink, owners(emailAddress))',
+        'files(id, name, mimeType, parents, modifiedTime, size, webViewLink, owners(emailAddress), driveId)',
       pageSize,
       // Full-text results come back by relevance when no order is given. Drive rejects or ignores an explicit
       // order on fullText queries, and newest-first buried the best match. Title search stays newest-first.
@@ -70,6 +70,7 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
       size: f.size,
       viewUrl: f.webViewLink,
       owners: (f.owners || []).map((o) => o.emailAddress).filter(Boolean),
+      driveId: f.driveId ?? null,
     }));
 
     // Security: remove sensitive/excluded folders (PII, contracts, HR, deprecated) and anything outside the index, then apply
@@ -79,15 +80,15 @@ export async function handleSearchDrive(args: z.infer<typeof inputSchema>) {
     const folderScope = allowedDriveFolders(auth);
     const cps = await Promise.all(
       raw.map(async (f): Promise<{ cls: SearchClass; path: string }> => {
-        const parent = await classifyAndPath(drive, f.parents);
+        const parent = await classifyAndPath(drive, f.parents, { owners: f.owners as string[], driveId: f.driveId });
         if (f.mimeType !== FOLDER_MIME || !isReadableClass(parent.cls)) return parent;
         if (isExcludedName(f.name)) return { cls: 'excluded', path: '' };
         return { cls: parent.cls, path: parent.path ? `${parent.path}/${f.name ?? ''}` : f.name ?? '' };
       }),
     );
-    const files = raw.filter(
-      (_, i) => isReadableClass(cps[i].cls) && (!folderScope || isPathInScope(cps[i].path, folderScope)),
-    );
+    const files = raw
+      .filter((_, i) => isReadableClass(cps[i].cls) && (!folderScope || isPathInScope(cps[i].path, folderScope)))
+      .map(({ driveId: _driveId, ...f }) => f);
 
     return {
       content: [

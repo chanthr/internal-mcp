@@ -3,6 +3,7 @@
  * load the whole indexer (indexer.ts, tokenizer, Qdrant) just for these values.
  */
 import { getConfig } from '../../core/config.js';
+import { isTrusted } from './trust.js';
 
 /** Drive index roots (SSOT for full reindex + incremental sync). Configured via config.drive.roots. */
 export const DRIVE_ROOTS = getConfig().drive.roots;
@@ -15,6 +16,23 @@ export function sharedScopeEnabled(): boolean {
   const v = process.env.DRIVE_SCOPE?.trim().toLowerCase();
   if (v === 'roots' || v === 'shared') return v === 'shared';
   return getConfig().drive.scope === 'shared';
+}
+
+/** drive.trustedOwners, lowercased. env DRIVE_TRUSTED_OWNERS (comma-separated) takes precedence. */
+export function trustedOwners(): string[] {
+  const env = process.env.DRIVE_TRUSTED_OWNERS;
+  const list = env !== undefined ? env.split(',') : getConfig().drive.trustedOwners;
+  return list.map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/**
+ * May a document shared outside the roots be shown? Decided on the top shared item (the file that was shared, or
+ * the top folder of a shared folder): its owner, or its shared drive, must be in drive.trustedOwners.
+ * Why: sharing with a service account needs no acceptance, so without this check anyone who knows the address
+ * could plant a document in every user's search results.
+ */
+export function isTrustedShare(owners: string[] | undefined, driveId?: string | null): boolean {
+  return isTrusted(trustedOwners(), owners, driveId);
 }
 
 /** `source` label for documents shared outside the roots (config drive.sharedSource). */

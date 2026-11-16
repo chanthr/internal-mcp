@@ -75,3 +75,25 @@ test('workbook: every tab is read, empty tabs are left out', async () => {
   const text = await workbookText(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer);
   assert.equal(text, '## Stock\nname,qty\napple,3\n\n## Sales\nmonth,sales\nJan,10');
 });
+
+test('sync lock: one holder at a time, released by its owner, a dead holder is replaced', async () => {
+  const { acquireSyncLock, releaseSyncLock } = await import('../src/plugins/drive/sync.js');
+  const { writeFileSync, existsSync } = await import('node:fs');
+  const lock = join(process.env.MCP_DATA_DIR!, 'drive-sync.lock');
+  assert.equal(acquireSyncLock(), true);
+  assert.equal(acquireSyncLock(), false); // this process is alive and holds it
+  releaseSyncLock();
+  assert.equal(existsSync(lock), false);
+  writeFileSync(lock, '2147483646'); // a process id that does not exist
+  assert.equal(acquireSyncLock(), true);
+  releaseSyncLock();
+});
+
+test('result dates: the document date wins, otherwise the modified date, with the age once it is old', async () => {
+  const { dateLabel } = await import('../src/plugins/drive/tools/semantic_search_drive.js');
+  const now = Date.parse('2026-11-17T00:00:00Z');
+  assert.equal(dateLabel({ doc_date: '2026-11-10', modified_time: '2026-01-01T00:00:00Z' }, now), '2026-11-10');
+  assert.equal(dateLabel({ doc_date: null, modified_time: '2026-10-02T05:27:14.002Z' }, now), 'modified 2026-10-02, 1mo old');
+  assert.equal(dateLabel({ doc_date: null, modified_time: '2024-05-01T00:00:00Z' }, now), 'modified 2024-05-01, 2y old');
+  assert.equal(dateLabel({ doc_date: null, modified_time: '' }, now), null);
+});

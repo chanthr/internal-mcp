@@ -78,6 +78,15 @@ const ConfigSchema = z
          * Excluded folders stay hidden either way. env DRIVE_SCOPE takes precedence.
          */
         scope: z.enum(['shared', 'roots']).default('shared'),
+        /**
+         * Whose documents count when they are shared with the service account outside the roots.
+         * Anyone who learns the account's address can share a document with it, and a shared document shows up in
+         * every user's search results. So with drive.scope "shared" only documents whose top shared item is owned
+         * by one of these are shown and indexed. Entries: an email ("ann@acme.com"), a domain ("acme.com"), a
+         * shared drive ("drive:<id>"), or "*" for everyone (not recommended). Empty: nothing outside the roots.
+         * env DRIVE_TRUSTED_OWNERS (comma-separated) takes precedence. `knowledge-mcp setup` fills this in.
+         */
+        trustedOwners: z.array(z.string()).default([]),
         /** `source` label for documents shared outside the roots (drive.scope "shared"). */
         sharedSource: z.string().regex(SOURCE_LABEL).default('shared'),
         /** Folder names to exclude from the search index (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */

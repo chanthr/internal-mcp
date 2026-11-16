@@ -6,10 +6,12 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
-- **Drive scope is `shared` by default.** Every document shared with the service account is searchable, readable
-  and indexed, including folders and single documents shared outside `drive.roots`. Sharing a document with the
-  account is all it takes. Excluded folders stay hidden wherever they are, and a document whose parent folders
-  cannot be checked is hidden. Set `drive.scope` to `roots` (or env `DRIVE_SCOPE=roots`) for the 0.3 behaviour.
+- **Documents shared by a trusted owner are in scope, wherever they are.** A folder or document that an owner in
+  `drive.trustedOwners` shared with the service account can be searched, read and indexed without being under
+  `drive.roots`. The list is empty by default, so an upgrade changes nothing until you add your organization
+  (`knowledge-mcp setup trust acme.com`; the setup wizard asks). The owner check exists because anyone who knows a
+  service account's address can share a document with it. Excluded folders stay hidden wherever they are, and a
+  document whose parent folders cannot be checked is hidden. `drive.scope: "roots"` turns the feature off.
   `drive reindex` now runs with no roots configured.
 - **zod 4.** The exported `z` is zod 4. In your plugins change `z.record(valueSchema)` to
   `z.record(z.string(), valueSchema)`, and an object `.default({})` that relies on inner defaults to `.prefault({})`.
@@ -35,8 +37,13 @@ Changes that affect people who run or extend the server. Dates are release dates
   argument. A generated project includes `AGENTS.md`, a setup guide an agent can follow.
 - **Semantic search without a vector database.** Vectors are stored in `<data dir>/vectors.db` when `QDRANT_URL`
   is not set, so an embedding key is the only thing to supply. Qdrant stays available for larger indexes.
-- **The first index builds itself.** The server indexes Drive the first time it starts with an empty index.
-  `DRIVE_AUTO_INDEX=false` turns that off.
+- **The first index builds itself.** The server indexes Drive the first time it starts with an empty index, over
+  HTTP or in a stdio session. It checks the embedding endpoint first and never uses paid OCR on its own
+  (`drive reindex` does; `--no-ocr` skips it). `DRIVE_AUTO_INDEX=false` turns the automatic build off.
+- **stdio sessions stay current and cannot be broken by a stray `console.log`.** A session syncs Drive once when it
+  starts (new plugin hook `catchUp`), a lock file keeps parallel processes from syncing twice, and anything a
+  plugin prints to stdout is sent to stderr so the protocol stream stays intact.
+- Semantic search results show the document date, or the modified date with the document's age.
 - **Any OpenAI-compatible embedding endpoint**: `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`,
   `EMBEDDING_API_KEY`. A local server needs no key. The default is still OpenAI `text-embedding-3-small`.
   A collection whose vector size differs from `EMBEDDING_DIM` stops indexing with the fix in the message.

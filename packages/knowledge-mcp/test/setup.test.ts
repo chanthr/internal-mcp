@@ -298,3 +298,92 @@ test('setup github --from-gh and setup embeddings: saved only after the live che
   assert.equal(await runSetupCommand(['nope'], { dir: dir2, out: bad.out }), 2);
   assert.throws(() => readFileSync(join(dir2, '.env'), 'utf8'), /ENOENT/);
 });
+
+// ── Drive in the wizard, against a fake Google: token endpoint + files.list ──
+import { generateKeyPairSync } from 'node:crypto';
+const google = createServer((req, res) => {
+  let raw = '';
+  req.on('data', (c) => (raw += c));
+  req.on('end', () => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/token') return res.end(JSON.stringify({ access_token: 'fake-access', expires_in: 3600, token_type: 'Bearer' }));
+    if (req.url?.startsWith('/drive/files')) {
+      return res.end(
+        JSON.stringify({
+          files: [
+            { name: 'Handbook', mimeType: 'application/vnd.google-apps.folder', owners: [{ emailAddress: 'boss@acme.com' }] },
+            { name: 'Plan', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'ann@gmail.com' }] },
+            { name: 'Company policy (urgent)', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'mallory@evil.example' }] },
+          ],
+        }),
+      );
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+});
+await new Promise<void>((r) => google.listen(0, '127.0.0.1', r));
+after(() => google.close());
+const gbase = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
+function fakeKeyFile(dir: string): string {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const path = join(dir, 'sa.json');
+  writeFileSync(
+    path,
+    JSON.stringify({ type: 'service_account', client_email: 'kb@proj.iam.gserviceaccount.com', private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }), token_uri: `${gbase}/token` }),
+  );
+  return path;
+}
+
+test('wizard + Drive: owners are listed and must be typed, a public mail domain is refused', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const key = fakeKeyFile(dir);
+  const s = scripted([
+    'drive',
+    key, // key file path (no gcloud)
+    'acme.com', // own domain: typed, nothing is guessed from what is shared
+    'gmail.com, ann@gmail.com', // extra: a public mail domain is refused, the address is accepted
+    '', // exclude folders
+    '3', // semantic search: skip
+  ]);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools, endpoints: { drive: `${gbase}/drive` } });
+  const text = s.said.join('\n');
+  assert.deepEqual(r.connected, ['drive']);
+  assert.match(text, /signed in as kb@proj\.iam\.gserviceaccount\.com/);
+  assert.match(text, /Anyone who knows this account's address can share a document with it/);
+  assert.match(text, /Your organization's domain, or your own address \(Enter for none\):/);
+  assert.match(text, /Also shared with this account by:[\s\S]*ann@gmail\.com — 1 item \(Plan\)[\s\S]*evil\.example — 1 item \(Company policy \(urgent\)\)/);
+  assert.match(text, /"gmail\.com" is a public mail provider/);
+  const cfg = JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8'));
+  assert.deepEqual(cfg.drive.trustedOwners, ['acme.com', 'ann@gmail.com']);
+  assert.match(text, /1 shared item stays hidden \(owner not trusted\): Company policy \(urgent\)/);
+});
+
+test('wizard + Drive: pressing Enter everywhere never trusts a stranger', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const s = scripted(['drive', fakeKeyFile(dir), '', '', '', '3']);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools, endpoints: { drive: `${gbase}/drive` } });
+  assert.equal(r.configWritten, false);
+  assert.match(s.said.join('\n'), /No owner is trusted, so shared documents stay hidden/);
+});
+
+test('setup trust and setup check: hidden items are counted with their owners, entries are validated', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const key = fakeKeyFile(dir);
+  const env = { GOOGLE_APPLICATION_CREDENTIALS: key };
+  const before = collect();
+  assert.equal(await runSetupCommand(['check'], { dir, out: before.out, env, endpoints: { drive: `${gbase}/drive` } }), 0);
+  assert.match(before.lines.join('\n'), /3 shared items, 3 hidden because the owner is not trusted \(boss@acme\.com, ann@gmail\.com, mallory@evil\.example\)/);
+  assert.match(before.lines.join('\n'), /setup trust acme\.com ann@gmail\.com evil\.example/);
+
+  const t = collect();
+  assert.equal(await runSetupCommand(['trust', 'acme.com', 'Ann@Gmail.com'], { dir, out: t.out }), 0);
+  assert.equal(await runSetupCommand(['trust', 'gmail.com'], { dir, out: t.out }), 1);
+  assert.equal(await runSetupCommand(['trust'], { dir, out: t.out }), 1);
+  assert.match(t.lines.join('\n'), /Now trusted: acme\.com, ann@gmail\.com[\s\S]*public mail provider/);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).drive.trustedOwners, ['acme.com', 'ann@gmail.com']);
+
+  const afterTrust = collect();
+  await runSetupCommand(['check'], { dir, out: afterTrust.out, env, endpoints: { drive: `${gbase}/drive` } });
+  assert.match(afterTrust.lines.join('\n'), /3 shared items, 1 hidden because the owner is not trusted \(mallory@evil\.example\)/);
+});
