@@ -13,7 +13,7 @@ import type { DriveChangeList, DriveClient } from './client.js';
 import { DriveApiError, getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
 import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
-import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS } from './sync_state.js';
+import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS, wasAutoIndexed, markAutoIndexed } from './sync_state.js';
 import { isExcludedPath } from './exclude.js';
 import { clearFolderMetaCache, getFolderMeta } from './path.js';
 import { DRIVE_COLLECTION, getQdrantClient, type PointId } from './qdrant.js';
@@ -167,17 +167,38 @@ export interface SyncResult {
   pathRefresh?: { checked: number; reindexed: number; deleted: number; errored: number };
 }
 
+/** True when the collection holds nothing and the automatic first index has not run for it yet. */
+async function firstIndexNeeded(): Promise<boolean> {
+  if (process.env.DRIVE_AUTO_INDEX === 'false') return false;
+  if (await wasAutoIndexed(DRIVE_COLLECTION)) return false;
+  const page = await (await getQdrantClient()).scroll(DRIVE_COLLECTION, { limit: 1, with_payload: false, with_vector: false });
+  if (page.points.length > 0) {
+    await markAutoIndexed(DRIVE_COLLECTION); // indexed by hand before this feature existed, or by another process
+    return false;
+  }
+  return true;
+}
+
 export async function runIncrementalSync(): Promise<SyncResult> {
   const drive = await getDriveClient();
   const token = await getSyncToken();
 
-  // First run: only store the startPageToken (changes are tracked from then on). Full indexing is done by
-  // knowledge-mcp drive reindex.
+  // First run: store the startPageToken, so changes are tracked from now on.
   if (!token) {
     const { data } = await drive.changes.getStartPageToken({ supportsAllDrives: true });
     if (data.startPageToken) await setSyncToken(data.startPageToken);
-    return { status: 'initialized', changed: 0, deleted: 0, skipped: 0 };
   }
+  // An empty collection that was never indexed is indexed now, so nobody has to run `drive reindex` by hand after
+  // setup. The token above is stored first: documents edited while the index is being built are picked up by the
+  // next cycle. DRIVE_AUTO_INDEX=false leaves the first index to the command.
+  if (await firstIndexNeeded()) {
+    console.error('[drive-sync] the index is empty: building it now (this can take a while; search fills in as files are indexed)');
+    const { runReindex } = await import('./reindex.js');
+    await runReindex([]);
+    await markAutoIndexed(DRIVE_COLLECTION);
+    return { status: 'first index built', changed: 0, deleted: 0, skipped: 0 };
+  }
+  if (!token) return { status: 'initialized', changed: 0, deleted: 0, skipped: 0 };
 
   let changed = 0;
   let deleted = 0;

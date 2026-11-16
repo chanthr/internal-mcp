@@ -50,3 +50,22 @@ export async function setRetryList(list: Record<string, number>): Promise<void> 
     console.error('[sync_state] setRetryList failed:', e instanceof Error ? e.message : e);
   }
 }
+
+// ── First index marker ──
+// The server builds the index by itself the first time it sees an empty collection (sync.ts). The marker records
+// that this was done for a collection, so a Drive with nothing indexable is not listed again on every cycle.
+const AUTO_INDEX_KEY = 'autoIndexed';
+
+/** Has the automatic first index already run for this collection? Store errors throw. */
+export async function wasAutoIndexed(collection: string): Promise<boolean> {
+  const v = await (await getStore()).getState(NS, AUTO_INDEX_KEY);
+  return !!v && typeof v === 'object' && (v as Record<string, unknown>)[collection] !== undefined;
+}
+
+export async function markAutoIndexed(collection: string): Promise<void> {
+  const store = await getStore();
+  const v = await store.getState(NS, AUTO_INDEX_KEY);
+  const map = v && typeof v === 'object' ? { ...(v as Record<string, string>) } : {};
+  map[collection] = new Date().toISOString();
+  await store.setState(NS, AUTO_INDEX_KEY, map);
+}

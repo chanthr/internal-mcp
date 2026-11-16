@@ -142,11 +142,22 @@ export const DRIVE_COLLECTION = process.env.QDRANT_COLLECTION || getConfig().qdr
 // matches the embedding dimension.
 export { EMBEDDING_DIM };
 
-/** Qdrant client (one per process). */
-export async function getQdrantClient(): Promise<QdrantClient> {
+/** The vector store the Drive plugin talks to: Qdrant, or the built-in SQLite store with the same methods. */
+export type VectorClient = Pick<
+  QdrantClient,
+  'getCollections' | 'getCollection' | 'createCollection' | 'deleteCollection' | 'createPayloadIndex' | 'upsert' | 'delete' | 'retrieve' | 'scroll' | 'search'
+>;
+
+/** Which store is in use: Qdrant when QDRANT_URL is set, otherwise the built-in file (local_vectors.ts). */
+export function vectorStoreKind(): 'qdrant' | 'built-in' {
+  return process.env.QDRANT_URL?.trim() ? 'qdrant' : 'built-in';
+}
+
+/** The vector store (one per process). The name is kept from when Qdrant was the only store. */
+export async function getQdrantClient(): Promise<VectorClient> {
+  const url = process.env.QDRANT_URL?.trim();
+  if (!url) return (await import('./local_vectors.js')).getLocalVectorClient();
   if (_client) return _client;
-  const url = process.env.QDRANT_URL;
-  if (!url) throw new Error('[qdrant] QDRANT_URL env missing');
   _client = new QdrantClient(url, process.env.QDRANT_API_KEY || undefined);
   return _client;
 }
