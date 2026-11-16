@@ -9,6 +9,7 @@
  */
 import { definePlugin } from '../../plugin/define.js';
 import { isSet as has } from '../../core/env.js';
+import { embeddingsConfigured } from './embeddings.js';
 import { searchDriveTool } from './tools/search_drive.js';
 import { readDriveFileTool } from './tools/read_drive_file.js';
 import { listDriveFolderTool } from './tools/list_drive_folder.js';
@@ -26,7 +27,7 @@ export function driveConfigured(): boolean {
 
 /** semantic_search_drive — Qdrant (vectors) and OpenAI (embeddings). Independent of the Drive API credentials. */
 export function semanticConfigured(): boolean {
-  return has(process.env.QDRANT_URL) && has(process.env.OPENAI_API_KEY);
+  return has(process.env.QDRANT_URL) && embeddingsConfigured();
 }
 
 const DRIVE_CREDS = 'set GOOGLE_SERVICE_ACCOUNT_KEY, GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN';
@@ -41,7 +42,7 @@ export const drivePlugin = definePlugin({
     { ...searchDriveTool, enabled: driveOnly },
     { ...readDriveFileTool, enabled: driveOnly },
     { ...listDriveFolderTool, enabled: driveOnly },
-    { ...semanticSearchDriveTool, enabled: () => semanticConfigured() || 'missing env QDRANT_URL, OPENAI_API_KEY' },
+    { ...semanticSearchDriveTool, enabled: () => semanticConfigured() || 'missing env QDRANT_URL and an embedding key (OPENAI_API_KEY, or EMBEDDING_BASE_URL for another provider)' },
   ],
   instructions:
     'Drive: meaning/concept questions → semantic_search_drive; keyword or file name → search_drive; ' +

@@ -84,6 +84,11 @@ export class QdrantClient {
     return this.call('GET', '/collections');
   }
 
+  /** Collection info. Only the vector size is read here (single unnamed vector). */
+  getCollection(name: string): Promise<{ config?: { params?: { vectors?: { size?: number } } } }> {
+    return this.call('GET', this.col(name));
+  }
+
   createCollection(name: string, body: Record<string, unknown>): Promise<boolean> {
     return this.call('PUT', this.col(name), body);
   }
@@ -153,7 +158,19 @@ export async function ensureCollection(): Promise<void> {
   const collections = await client.getCollections();
   const exists = collections.collections.some((c) => c.name === DRIVE_COLLECTION);
 
-  if (exists) return;
+  if (exists) {
+    // A collection built with another embedding model has a different vector size. Writing to it would fail on
+    // every point with an unclear error, so stop here and say how to fix it.
+    const size = (await client.getCollection(DRIVE_COLLECTION)).config?.params?.vectors?.size;
+    if (typeof size === 'number' && size !== EMBEDDING_DIM) {
+      throw new Error(
+        `[qdrant] collection '${DRIVE_COLLECTION}' holds ${size}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. ` +
+          'After changing the embedding model, reindex into a new collection: set QDRANT_COLLECTION to a new name, ' +
+          'or run "knowledge-mcp drive reindex --recreate".',
+      );
+    }
+    return;
+  }
 
   await client.createCollection(DRIVE_COLLECTION, {
     vectors: {

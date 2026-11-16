@@ -269,7 +269,8 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 스캔 PDF, PNG, JPEG, WebP | Mathpix OCR. `MATHPIX_APP_ID`, `MATHPIX_APP_KEY`가 있을 때만 |
 
 `DRIVE_MAX_FILE_BYTES`(기본 50MB)보다 큰 파일은 읽거나 색인하지 않습니다. 임베딩은 OpenAI
-`text-embedding-3-small`을 씁니다.
+`text-embedding-3-small`을 기본으로 씁니다. OpenAI 호환 `/embeddings` 주소라면 무엇이든 쓸 수 있습니다. `EMBEDDING_BASE_URL`,
+`EMBEDDING_MODEL`, `EMBEDDING_DIM`을 정한 뒤(예: Ollama 뒤의 로컬 `bge-m3`) 새 컬렉션으로 다시 색인하십시오.
 
 </details>
 

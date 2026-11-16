@@ -269,7 +269,8 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, only when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
 
 Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or indexed. Embeddings use OpenAI
-`text-embedding-3-small`.
+`text-embedding-3-small` by default. Any OpenAI-compatible `/embeddings` endpoint works: set `EMBEDDING_BASE_URL`,
+`EMBEDDING_MODEL` and `EMBEDDING_DIM` (for example a local `bge-m3` behind Ollama), then reindex into a new collection.
 
 </details>
 

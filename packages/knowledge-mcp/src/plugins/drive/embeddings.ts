@@ -1,21 +1,36 @@
 /**
- * Embedding 헬퍼 — OpenAI `text-embedding-3-small` (2026-05-28 비용 전환).
+ * Embeddings — any OpenAI-compatible `/embeddings` endpoint. Default: OpenAI `text-embedding-3-small` (1536d).
  *
- * 기존 Gemini `gemini-embedding-2` → OpenAI 3-small 전환 이유:
- *   - 비용 ~1/10 ($0.02/1M vs Gemini ~$0.20/1M)
- *   - 429 rate limit 여유 (Gemini free tier 한도 잦은 429 → drive-sync 에러 로그)
- *   - backend 가 이미 3-small 사용(한국어 KG 임베딩 검증됨)
- *   - 1536 dim 동일 → Qdrant collection 차원 유지 (벡터 공간만 다름 → 전환 시 전체 재색인 필수)
- *   - input 한도 8191 토큰 → Gemini 대비 큰 청크 Bad Request 완화
+ * Settings (env):
+ *   EMBEDDING_BASE_URL   API base, default https://api.openai.com/v1. Point it at a compatible server to use
+ *                        another provider or a local model (Ollama, vLLM, LM Studio, text-embeddings-inference, …).
+ *   EMBEDDING_MODEL      model name, default text-embedding-3-small.
+ *   EMBEDDING_DIM        vector size the model returns, default 1536. The Qdrant collection is created with it.
+ *   EMBEDDING_API_KEY    bearer token. Falls back to OPENAI_API_KEY. May be empty for a local server.
  *
- * 호출 패턴:
- *   OpenAI embeddings API 는 `input` 배열 batch 지원 → 한 호출에 여러 청크 (Gemini individual call 대비 빠르고 rate limit ↓).
- *   429/5xx → exponential backoff + jitter retry. timeout 방어(무응답 hang).
+ * Vectors from different models are not comparable: after changing the model, run a full reindex into a new
+ * collection (`knowledge-mcp drive reindex --recreate`, or a new QDRANT_COLLECTION).
+ *
+ * The API takes an `input` array, so one call embeds many chunks. 429 and 5xx are retried with exponential
+ * backoff and jitter, and every call has a timeout.
  */
-const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings';
+const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
+const BASE_URL = (process.env.EMBEDDING_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '');
+const EMBEDDINGS_URL = `${BASE_URL}/embeddings`;
 
-export const EMBEDDING_MODEL = 'text-embedding-3-small';
-export const EMBEDDING_DIM = 1536;
+export const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small';
+export const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM ?? 1536);
+if (!Number.isInteger(EMBEDDING_DIM) || EMBEDDING_DIM <= 0) {
+  throw new Error(`[embeddings] EMBEDDING_DIM must be a positive integer, got "${process.env.EMBEDDING_DIM}"`);
+}
+// `dimensions` is an OpenAI text-embedding-3 option. Other servers may reject an unknown field.
+const SEND_DIMENSIONS = /^text-embedding-3/.test(EMBEDDING_MODEL);
+
+/** Is an embedding endpoint usable? A key, or a custom endpoint (which may need no key). */
+export function embeddingsConfigured(): boolean {
+  return !!(process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || process.env.EMBEDDING_BASE_URL?.trim());
+}
+
 // 한 batch 당 input 수 (OpenAI 는 배열 input 지원). 토큰 한도 여유 위해 보수적 128.
 const BATCH_SIZE = Number(process.env.EMBED_BATCH ?? 128);
 
@@ -45,10 +60,10 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([p, timer]).finally(() => clearTimeout(t)) as Promise<T>;
 }
 
-function getApiKey(): string {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error('[embeddings] OPENAI_API_KEY env missing');
-  return key;
+function getApiKey(): string | undefined {
+  const key = process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
+  if (!key && BASE_URL === DEFAULT_BASE_URL) throw new Error('[embeddings] set OPENAI_API_KEY (or EMBEDDING_API_KEY)');
+  return key || undefined;
 }
 
 /** 재시도 가능 여부 (429 rate limit 또는 5xx/timeout). */
@@ -77,20 +92,20 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
   for (let attempt = 0; ; attempt++) {
     try {
       const resp = await withTimeout(
-        fetch(OPENAI_EMBEDDINGS_URL, {
+        fetch(EMBEDDINGS_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-          body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs, dimensions: EMBEDDING_DIM }),
+          headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+          body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs, ...(SEND_DIMENSIONS ? { dimensions: EMBEDDING_DIM } : {}) }),
         }),
         policy.timeoutMs,
-        '[embeddings] openai',
+        '[embeddings] request',
       );
 
       if (!resp.ok) {
         const body = await resp.text();
         const retryable = parseRetryable(resp.status, body);
         if (!retryable || attempt >= policy.maxRetries) {
-          throw new Error(`OpenAI embeddings ${resp.status}: ${body.slice(0, 200)}`);
+          throw new Error(`embeddings ${resp.status} (${EMBEDDING_MODEL}): ${body.slice(0, 200)}`);
         }
         const m = body.match(/try again in ([\d.]+)s/i);
         const base = m ? Math.ceil(parseFloat(m[1]) * 1000) : Math.min(60_000, 1000 * 2 ** attempt);
@@ -106,7 +121,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
       const vecs = sorted.map((d) => d.embedding);
       if (vecs.length !== inputs.length || vecs[0]?.length !== EMBEDDING_DIM) {
         throw new Error(
-          `[embeddings] response mismatch — vecs=${vecs.length}/${inputs.length}, dim=${vecs[0]?.length}/${EMBEDDING_DIM}`,
+          `[embeddings] response mismatch — vectors ${vecs.length}/${inputs.length}, size ${vecs[0]?.length} but EMBEDDING_DIM is ${EMBEDDING_DIM} (model ${EMBEDDING_MODEL})`,
         );
       }
       return vecs;

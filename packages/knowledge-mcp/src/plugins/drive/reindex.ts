@@ -20,7 +20,7 @@
 import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { chunkMarkdown } from './chunker.js';
-import { embedTexts } from './embeddings.js';
+import { embedTexts, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
 import { classifyAndPath } from './path.js';
@@ -391,11 +391,11 @@ export async function runReindex(argv: string[]): Promise<void> {
   }
 
   const elapsedSec = ((Date.now() - startTs) / 1000).toFixed(1);
-  // OpenAI text-embedding-3-small: $0.02/1M tokens.
-  const costUsd = ((totalTokens / 1_000_000) * 0.02).toFixed(4);
+  // Cost is only known for the default model (OpenAI text-embedding-3-small: $0.02 per 1M tokens).
+  const cost = EMBEDDING_MODEL === 'text-embedding-3-small' ? `, ~$${((totalTokens / 1_000_000) * 0.02).toFixed(4)}` : '';
   console.log(
     `\n[index] DONE — ${totalChunks} chunks, ${totalTokens} tokens, ` +
-      `~$${costUsd} (OpenAI text-embedding-3-small), ${elapsedSec}s`,
+      `model ${EMBEDDING_MODEL}${cost}, ${elapsedSec}s`,
   );
   // 전부 성공적으로 끝났으면 체크포인트 정리 (실패가 남아있으면 보존)
   if (!dryRun && done.size >= allFiles.length) clearCheckpoint();
