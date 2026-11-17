@@ -22,5 +22,7 @@
   },
   "access": { "viewerTools": [] },
   "plugins": {},
-  "upstreams": []
+  "upstreams": [],
+  "connections": {},
+  "tools": []
 }

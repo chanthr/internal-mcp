@@ -15,11 +15,16 @@ const { runSetup, parseSelection } = await import('../src/setup/wizard.js');
 const { updateEnvFile, readEnvKeys, formatEnvValue } = await import('../src/setup/envfile.js');
 const { checkEmbedding, checkSlack, checkGithub, checkRailway } = await import('../src/setup/checks.js');
 const auto = await import('../src/setup/auto.js');
+const { runSetupCommand } = await import('../src/setup/commands.js');
 type Exec = import('../src/setup/auto.js').Exec;
 
 /** No CLI installed: every command fails like a missing binary. */
 const noTools: Exec = () => ({ status: 127, stdout: '', stderr: 'not found' });
 
+// Everything that is awaited at the top level (imports, servers) happens here, before the first test is
+// registered. An await between tests suspends this file while the tests registered so far run; when they finish
+// first, the runner takes the file for done and runs the `after` hooks, and the tests registered later find the
+// servers closed (ECONNREFUSED). It showed up on a loaded machine, when an import in the middle got slower.
 // One fake for Slack, GitHub, Railway and an embedding endpoint. "good-*" tokens pass.
 const server = createServer((req, res) => {
   let raw = '';
@@ -45,6 +50,32 @@ const server = createServer((req, res) => {
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+// A fake Google for the Drive steps: token endpoint + files.list.
+const google = createServer((req, res) => {
+  let raw = '';
+  req.on('data', (c) => (raw += c));
+  req.on('end', () => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/token') return res.end(JSON.stringify({ access_token: 'fake-access', expires_in: 3600, token_type: 'Bearer' }));
+    if (req.url?.startsWith('/drive/files')) {
+      return res.end(
+        JSON.stringify({
+          files: [
+            { name: 'Handbook', mimeType: 'application/vnd.google-apps.folder', owners: [{ emailAddress: 'boss@acme.com' }] },
+            { name: 'Plan', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'ann@gmail.com' }] },
+            { name: 'Company policy (urgent)', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'mallory@evil.example' }] },
+          ],
+        }),
+      );
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+});
+await new Promise<void>((r) => google.listen(0, '127.0.0.1', r));
+after(() => google.close());
+const gbase = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
 
 /** Scripted terminal: answers are consumed in order, everything said is recorded. */
 function scripted(answers: string[]) {
@@ -233,7 +264,6 @@ test('wizard + gh: the gh login is offered with a warning and only used after a 
   assert.deepEqual(r2.envWritten, []);
 });
 
-const { runSetupCommand } = await import('../src/setup/commands.js');
 function collect() {
   const lines: string[] = [];
   return { lines, out: (l: string) => void lines.push(l) };
@@ -242,7 +272,7 @@ function collect() {
 test('setup check: verifies what is configured, reports what is not, exit code follows failures', async () => {
   const endpoints = { slack: `${base}/slack`, github: `${base}/github`, railway: `${base}/railway` };
   const ok = collect();
-  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0);
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0, ok.lines.join('\n'));
   assert.match(ok.lines.join('\n'), /✓ slack\s+Acme as kbot[\s\S]*✓ github\s+signed in as octo/);
   assert.match(ok.lines.join('\n'), /✓ embeddings\s+bge-m3 \(1024 dimensions\)/);
   assert.match(ok.lines.join('\n'), /· drive\s+not configured/);
@@ -285,7 +315,7 @@ test('setup drive --gcloud --yes: runs the three steps and saves the key path', 
 test('setup github --from-gh and setup embeddings: saved only after the live check passes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
   const o = collect();
-  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir, out: o.out, exec: fakeCli({ gh: 'good-gh' }).exec, endpoints: { github: `${base}/github` } }), 0);
+  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir, out: o.out, exec: fakeCli({ gh: 'good-gh' }).exec, endpoints: { github: `${base}/github` } }), 0, o.lines.join('\n'));
   assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3'], { dir, out: o.out, env: {} }), 0);
   const env = readFileSync(join(dir, '.env'), 'utf8');
   assert.match(env, /GITHUB_PAT=good-gh\n/);
@@ -301,30 +331,6 @@ test('setup github --from-gh and setup embeddings: saved only after the live che
 
 // ── Drive in the wizard, against a fake Google: token endpoint + files.list ──
 import { generateKeyPairSync } from 'node:crypto';
-const google = createServer((req, res) => {
-  let raw = '';
-  req.on('data', (c) => (raw += c));
-  req.on('end', () => {
-    res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/token') return res.end(JSON.stringify({ access_token: 'fake-access', expires_in: 3600, token_type: 'Bearer' }));
-    if (req.url?.startsWith('/drive/files')) {
-      return res.end(
-        JSON.stringify({
-          files: [
-            { name: 'Handbook', mimeType: 'application/vnd.google-apps.folder', owners: [{ emailAddress: 'boss@acme.com' }] },
-            { name: 'Plan', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'ann@gmail.com' }] },
-            { name: 'Company policy (urgent)', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'mallory@evil.example' }] },
-          ],
-        }),
-      );
-    }
-    res.statusCode = 404;
-    res.end('{}');
-  });
-});
-await new Promise<void>((r) => google.listen(0, '127.0.0.1', r));
-after(() => google.close());
-const gbase = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
 function fakeKeyFile(dir: string): string {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const path = join(dir, 'sa.json');
@@ -449,4 +455,138 @@ test('wizard, a later run: a folder set up before is kept, and the model questio
   assert.match(text, /Search by meaning \(optional\)/);
   assert.equal(r.configWritten, false);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).folders, [{ path: folder }]);
+});
+
+// ── Databases and APIs: connections for tools declared in the config ──
+import { DatabaseSync } from 'node:sqlite';
+import { existsSync, statSync as statFile } from 'node:fs';
+function shopDb(): string {
+  const d = mkdtempSync(join(tmpdir(), 'kmcp-db-'));
+  const path = join(d, 'shop.db');
+  const db = new DatabaseSync(path);
+  db.exec("create table orders (id integer primary key, total real); insert into orders values (1, 10), (2, 20); create table customers (id integer primary key, email text)");
+  db.close();
+  return path;
+}
+
+test('setup connection: writes the connection, names the env var, and never takes a secret', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const db = shopDb();
+  const o = collect();
+  const run = (...argv: string[]) => runSetupCommand(['connection', ...argv], { dir, out: o.out, env: {} });
+  const config = () => JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8'));
+
+  assert.equal(await run('shop', '--postgres', '--env', 'SHOP_DATABASE_URL', '--description', 'Orders'), 0);
+  assert.deepEqual(config().connections.shop, { type: 'postgres', urlEnv: 'SHOP_DATABASE_URL', description: 'Orders' });
+  assert.match(o.lines.join('\n'), /SHOP_DATABASE_URL is not set\. The person who owns it types it into \.env, unseen, with: knowledge-mcp setup secret SHOP_DATABASE_URL/);
+  assert.match(o.lines.join('\n'), /No tools yet\. Declare them under "tools"/);
+
+  assert.equal(await run('books', '--sqlite', db, '--explore'), 0);
+  assert.deepEqual(config().connections.books, { type: 'sqlite', path: db, explore: true });
+  assert.match(o.lines.join('\n'), /explore is on: the assistant can run any read-only query through books_query/);
+
+  assert.equal(await run('crm', '--http', 'https://crm.example.com/api', '--header', 'Authorization: Bearer ${CRM_TOKEN}', '--header', 'Accept: application/json', '--query', 'tenant=acme'), 0);
+  assert.deepEqual(config().connections.crm, {
+    type: 'http',
+    baseUrl: 'https://crm.example.com/api',
+    headers: { Authorization: 'Bearer ${CRM_TOKEN}', Accept: 'application/json' },
+    query: { tenant: 'acme' },
+  });
+  assert.match(o.lines.join('\n'), /CRM_TOKEN is not set/);
+
+  o.lines.length = 0;
+  for (const [argv, re] of [
+    [['crm', '--http', 'https://crm.example.com', '--header', 'Authorization: Bearer abc123'], /looks like a secret\. Write its value as \$\{ENV_NAME\}/],
+    [['crm', '--http', 'https://crm.example.com', '--query', 'api_key=abc123'], /looks like a secret/],
+    [['crm', '--http', 'https://user:pw@crm.example.com'], /must not hold a user name or password/],
+    [['pg', '--postgres'], /--postgres needs --env NAME/],
+    [['pg', '--postgres', '--env', 'postgres://user:pw@host/db'], /urlEnv|Invalid/i], // a URL is not an env var name
+    [['drive', '--sqlite', db], /name of a built-in plugin/],
+    [['x', '--sqlite', db, '--http', 'https://a.example'], /choose one of/],
+    [['x', '--sqlite', join(dir, 'nope.db')], /does not exist/],
+    [['x', '--http', 'https://a.example', '--explore'], /--explore is for databases/],
+    [['Bad_Name', '--sqlite', db], /Invalid|connections/i],
+    [[], /needs one name/],
+  ] as const) {
+    assert.equal(await run(...argv), 1, argv.join(' '));
+    assert.match(o.lines[o.lines.length - 1], re, argv.join(' '));
+  }
+  assert.deepEqual(Object.keys(config().connections), ['shop', 'books', 'crm']); // the refused ones changed nothing
+  assert.ok(!readFileSync(join(dir, 'mcp.config.json'), 'utf8').includes('abc123'));
+});
+
+test('setup secret: the value is typed unseen into .env, never passed as an argument', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const o = collect();
+  const asked: string[] = [];
+  const readSecret = async (q: string) => (asked.push(q), ' postgres://app:p@ss w0rd@db.example.com:5432/shop ');
+  assert.equal(await runSetupCommand(['secret', 'SHOP_DATABASE_URL'], { dir, out: o.out, readSecret }), 0);
+  assert.deepEqual(asked, ['Value for SHOP_DATABASE_URL (not shown):']);
+  const envText = readFileSync(join(dir, '.env'), 'utf8');
+  assert.match(envText, /^SHOP_DATABASE_URL='postgres:\/\/app:p@ss w0rd@db\.example\.com:5432\/shop'$/m);
+  assert.equal(statFile(join(dir, '.env')).mode & 0o777, 0o600);
+  assert.ok(!o.lines.join('\n').includes('w0rd')); // the value is not echoed
+
+  assert.equal(await runSetupCommand(['secret', 'EMPTY'], { dir, out: o.out, readSecret: async () => '  ' }), 1);
+  assert.ok(!readFileSync(join(dir, '.env'), 'utf8').includes('EMPTY'));
+  assert.equal(await runSetupCommand(['secret', 'bad name'], { dir, out: o.out, readSecret }), 1);
+  assert.equal(await runSetupCommand(['secret'], { dir, out: o.out, readSecret }), 1);
+  // No terminal (an agent's shell): the command says who has to run it instead of reading from a pipe.
+  assert.equal(await runSetupCommand(['secret', 'X_TOKEN'], { dir, out: o.out }), 1);
+  assert.match(o.lines[o.lines.length - 1], /needs a terminal\. The person who owns the secret runs it themselves: knowledge-mcp setup secret X_TOKEN/);
+});
+
+test('setup check: each connection is reached and each declared query is compiled; a broken config is listed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const db = shopDb();
+  const write = (tools: unknown[]) =>
+    writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ connections: { shop: { type: 'sqlite', path: db, explore: true }, pg: { type: 'postgres', urlEnv: 'NOT_SET_DATABASE_URL' } }, tools }));
+
+  write([
+    { name: 'big_orders', connection: 'shop', description: 'Orders over an amount', params: { min: { type: 'number' } }, sql: 'select id, total from orders where total >= :min' },
+    { name: 'typo', connection: 'shop', description: 'A misspelled column', sql: 'select totl from orders' },
+  ]);
+  const a = collect();
+  assert.equal(await runSetupCommand(['check'], { dir, out: a.out, env: {} }), 1);
+  const text = a.lines.join('\n');
+  assert.match(text, /^✓ shop\s+SQLite \d+\.\d+\.\d+, 2 tables readable, explore on \(any read-only query\)$/m);
+  assert.match(text, /^✓ shop › big_orders\s+the query compiles$/m);
+  assert.match(text, /^✗ shop › typo\s+the database answered: no such column: totl$/m);
+  assert.match(text, /^✗ pg\s+set NOT_SET_DATABASE_URL in \.env \(the postgres connection reads it\)$/m);
+
+  write([{ name: 'big_orders', connection: 'shop', description: 'd', params: { min: { type: 'number' } }, sql: 'select id from orders where total >= :mni; select 2' }]);
+  const b = collect();
+  assert.equal(await runSetupCommand(['check'], { dir, out: b.out, env: {} }), 1);
+  assert.match(b.lines.join('\n'), /^✗ config\s+tool "big_orders": only one statement can be run/m);
+  assert.match(b.lines.join('\n'), /The server does not start until mcp\.config\.json is fixed/);
+});
+
+test('wizard: a database is connected, checked, and explore is off unless asked for', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const db = shopDb();
+  // no folder, pick the database, SQLite, a taken name then a good one, a wrong path then the file, explore: Enter (no)
+  const s = scripted(['', 'database', '2', 'drive', 'shop', join(dir, 'nope.db'), db, '']);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
+  const text = s.said.join('\n');
+  assert.match(text, /5\. Database\s+Postgres or a SQLite file/);
+  assert.match(text, /"drive" is already used/);
+  assert.match(text, /✗ the database file of "shop" does not exist/);
+  assert.match(text, /✓ SQLite \d+\.\d+\.\d+, 2 tables/);
+  assert.match(text, /It reads whatever this database user can read/);
+  assert.match(text, /Saved without tools\. Declare them under "tools"/);
+  assert.deepEqual(r.connected, ['database']);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).connections, { shop: { type: 'sqlite', path: db } });
+
+  // A second run adds another one with explore on; a Postgres URL that does not answer is not saved.
+  const again = scripted(['', '5', '1', 'pg', 'mysql://nope', 'postgres://app:hunter2-secret@127.0.0.1:1/app', '', '', '5', '2', 'books', db, 'y']);
+  const first = await runSetup({ ...again.io }, { dir, canRunClient: false, exec: noTools });
+  assert.match(again.said.join('\n'), /starts with postgres:\/\//);
+  assert.match(again.said.join('\n'), /cannot connect to the database of "pg"/);
+  assert.ok(!again.said.join('\n').includes('hunter2-secret'));
+  assert.deepEqual(first.connected, []);
+  const second = await runSetup({ ...again.io }, { dir, canRunClient: false, exec: noTools });
+  assert.deepEqual(second.connected, ['database']);
+  const saved = JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).connections;
+  assert.deepEqual(saved, { shop: { type: 'sqlite', path: db }, books: { type: 'sqlite', path: db, explore: true } });
+  assert.ok(!existsSync(join(dir, '.env')) || !readFileSync(join(dir, '.env'), 'utf8').includes('DATABASE_URL'));
 });

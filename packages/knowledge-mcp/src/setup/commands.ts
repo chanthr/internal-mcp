@@ -11,10 +11,13 @@
  *   knowledge-mcp setup github --from-gh               reuse the gh CLI login
  *   knowledge-mcp setup embeddings --base-url URL --model NAME
  *                                                      a keyless OpenAI-compatible endpoint (a local model)
+ *   knowledge-mcp setup connection <name> --postgres --env NAME | --sqlite <file> | --http <base URL>
+ *                                                      a database or an API for declared tools (see connections/schema.ts)
+ *   knowledge-mcp setup secret <ENV_NAME>              type one secret into .env without showing it (needs a terminal)
  *
  * Secrets are never taken as arguments: an argument ends up in shell history and in an agent's transcript.
- * A key that has to be typed (OpenAI, Slack, a GitHub token) goes through the interactive `knowledge-mcp setup`,
- * or straight into .env by the person who owns it. `setup check` then tells whether it works.
+ * A key that has to be typed (OpenAI, Slack, a GitHub token, a database URL) goes through the interactive
+ * `knowledge-mcp setup` or `setup secret <ENV_NAME>`, typed by the person who owns it. `setup check` then tells whether it works.
  */
 import { parseArgs } from 'node:util';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -22,6 +25,9 @@ import { join, resolve } from 'node:path';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDrive, checkDriveCredentials, checkEmbedding, checkGithub, checkRailway, checkSlack } from './checks.js';
 import { updateEnvFile } from './envfile.js';
+import { ConnectionsSchema, DataToolsSchema, dataConfigProblems, envRefs, exploreToolNames, type ConnectionConfig, type DataToolConfig } from '../connections/schema.js';
+import { checkConnection, closeDataConnections } from '../connections/index.js';
+import { formatValidationError } from '../plugin/result.js';
 import { countDocuments } from './wizard.js';
 import {
   createDriveServiceAccount,
@@ -42,6 +48,8 @@ export interface CommandContext {
   env?: NodeJS.ProcessEnv;
   endpoints?: { drive?: string; slack?: string; github?: string; railway?: string };
   retryDelayMs?: number;
+  /** Reads a secret without showing it. Default: the terminal. Tests pass a fake. */
+  readSecret?: (question: string) => Promise<string>;
 }
 
 export const SETUP_USAGE = `setup                      guided setup (asks questions; needs a terminal)
@@ -51,7 +59,11 @@ export const SETUP_USAGE = `setup                      guided setup (asks questi
        setup drive --key <file>
        setup trust <email-or-domain>...
        setup github --from-gh
-       setup embeddings --base-url URL --model NAME`;
+       setup embeddings --base-url URL --model NAME
+       setup connection <name> --postgres --env NAME [--explore]
+       setup connection <name> --sqlite <file> [--explore]
+       setup connection <name> --http <base URL> [--header 'Name: value']... [--query key=value]...
+       setup secret <ENV_NAME>`;
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -180,6 +192,29 @@ async function check(ctx: CommandContext): Promise<number> {
     });
   }
 
+  // Databases and APIs: is the config sound, can each be reached, does each declared query compile there.
+  const data = readDataConfig(ctx.dir);
+  if (data.problems.length) {
+    for (const p of data.problems) {
+      checked++;
+      failed++;
+      ctx.out(`✗ ${'config'.padEnd(11)} ${p}`);
+    }
+    ctx.out('  The server does not start until mcp.config.json is fixed.');
+  } else {
+    try {
+      for (const [name, c] of Object.entries(data.connections)) {
+        for (const line of await checkConnection(name, c, data.tools, env)) {
+          checked++;
+          if (!line.ok) failed++;
+          ctx.out(`${line.ok ? '✓' : '✗'} ${line.what.padEnd(11)} ${line.text}`);
+        }
+      }
+    } finally {
+      await closeDataConnections();
+    }
+  }
+
   if (has('GOOGLE_SERVICE_ACCOUNT_KEY')) {
     await run('drive', async () => driveSummary(await checkDriveCredentials(env.GOOGLE_SERVICE_ACCOUNT_KEY!, 'GOOGLE_SERVICE_ACCOUNT_KEY', { apiBase: ctx.endpoints?.drive })));
   } else if (has('GOOGLE_APPLICATION_CREDENTIALS')) {
@@ -306,6 +341,147 @@ async function embeddings(argv: string[], ctx: CommandContext): Promise<number> 
   return 0;
 }
 
+/** Names that are plugin ids already; a connection cannot take one (its name is its permission group). */
+const BUILT_IN = new Set(['knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
+
+/** `connections` and `tools` of mcp.config.json, checked the way the server checks them at boot. */
+function readDataConfig(dir: string): { connections: Record<string, ConnectionConfig>; tools: DataToolConfig[]; problems: string[] } {
+  const raw = readConfigFile(dir);
+  const c = ConnectionsSchema.safeParse(raw.connections ?? {});
+  const t = DataToolsSchema.safeParse(raw.tools ?? []);
+  if (!c.success || !t.success) {
+    const problems = [...(c.success ? [] : [`connections: ${formatValidationError(c.error)}`]), ...(t.success ? [] : [`tools: ${formatValidationError(t.error)}`])];
+    return { connections: {}, tools: [], problems };
+  }
+  return { connections: c.data, tools: t.data, problems: dataConfigProblems(c.data, t.data).map((p) => p.message) };
+}
+
+/** "Name: value" or "key=value" pairs from repeated flags. */
+function pairs(list: string[] | undefined, sep: string, flag: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const item of list ?? []) {
+    const i = item.indexOf(sep);
+    if (i <= 0) throw new Error(`${flag} must look like ${sep === ':' ? "'Name: value'" : 'key=value'}`);
+    out[item.slice(0, i).trim()] = item.slice(i + 1).trim();
+  }
+  return out;
+}
+
+/** A header or query value that is a secret must be written as ${ENV_NAME}: the config file is not a place for secrets. */
+function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
+  for (const [k, v] of Object.entries(values)) {
+    if (/authorization|api[-_]?key|token|secret|password|cookie/i.test(k) && !/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(v)) {
+      throw new Error(`${what} "${k}" looks like a secret. Write its value as \${ENV_NAME} (for example ${k}: Bearer \${API_TOKEN}) and put the value in .env with: knowledge-mcp setup secret API_TOKEN`);
+    }
+  }
+}
+
+async function connection(argv: string[], ctx: CommandContext): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      postgres: { type: 'boolean' },
+      env: { type: 'string' },
+      sqlite: { type: 'string' },
+      http: { type: 'string' },
+      header: { type: 'string', multiple: true },
+      query: { type: 'string', multiple: true },
+      explore: { type: 'boolean' },
+      description: { type: 'string' },
+    },
+  });
+  if (positionals.length !== 1) throw new Error('setup connection needs one name, for example: setup connection shop --postgres --env SHOP_DATABASE_URL');
+  const name = positionals[0];
+  if (BUILT_IN.has(name)) throw new Error(`"${name}" is the name of a built-in plugin; pick another name`);
+  if ([values.postgres, values.sqlite !== undefined, values.http !== undefined].filter(Boolean).length !== 1) {
+    throw new Error('choose one of: --postgres --env NAME, --sqlite <file>, --http <base URL>');
+  }
+  let conn: Record<string, unknown>;
+  if (values.postgres) {
+    if (!values.env) throw new Error('--postgres needs --env NAME: the name of the env var that holds the connection string. The string itself is never given to a command');
+    conn = { type: 'postgres', urlEnv: values.env };
+  } else if (values.sqlite !== undefined) {
+    const path = resolve(ctx.dir, values.sqlite);
+    if (!existsSync(path)) throw new Error(`${path} does not exist`);
+    conn = { type: 'sqlite', path };
+  } else {
+    const headers = pairs(values.header, ':', '--header');
+    const query = pairs(values.query, '=', '--query');
+    refuseLiteralSecrets(headers, 'the header');
+    refuseLiteralSecrets(query, 'the query parameter');
+    conn = { type: 'http', baseUrl: values.http, ...(Object.keys(headers).length ? { headers } : {}), ...(Object.keys(query).length ? { query } : {}) };
+  }
+  if (values.explore) {
+    if (conn.type === 'http') throw new Error('--explore is for databases');
+    conn.explore = true;
+  }
+  if (values.description) conn.description = values.description;
+
+  const config = readConfigFile(ctx.dir);
+  const existed = config.connections?.[name] !== undefined;
+  const all = { ...(config.connections ?? {}), [name]: conn };
+  const parsed = ConnectionsSchema.safeParse(all);
+  if (!parsed.success) throw new Error(formatValidationError(parsed.error));
+  const tools = DataToolsSchema.safeParse(config.tools ?? []);
+  const problems = tools.success ? dataConfigProblems(parsed.data, tools.data).filter((p) => p.path[0] === 'connections' || p.message.includes(`"${name}"`)) : [];
+  if (problems.length) throw new Error(problems.map((p) => p.message).join('; '));
+  config.connections = all;
+  writeFileSync(join(ctx.dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+
+  ctx.out(`✓ connection "${name}" ${existed ? 'updated' : 'added'} (${conn.type}). Saved to ${join(ctx.dir, 'mcp.config.json')}.`);
+  const env = ctx.env ?? process.env;
+  const needs =
+    conn.type === 'postgres'
+      ? [String(conn.urlEnv)]
+      : conn.type === 'http'
+        ? [...new Set(Object.values({ ...(conn.headers as object), ...(conn.query as object) }).map(String).flatMap(envRefs))]
+        : [];
+  for (const n of needs.filter((x) => !env[x]?.trim())) {
+    ctx.out(`  ${n} is not set. The person who owns it types it into .env, unseen, with: knowledge-mcp setup secret ${n}`);
+  }
+  if (conn.type === 'postgres') ctx.out('  Use a database user that can only read, and only what everyone using this server may see.');
+  if (conn.explore) {
+    ctx.out(`  explore is on: the assistant can run any read-only query through ${exploreToolNames(name).query}.`);
+  } else if (conn.type !== 'http') {
+    ctx.out(`  No tools yet. Declare them under "tools" in mcp.config.json, or run this again with --explore. Tables: knowledge-mcp ${name} tables`);
+  } else {
+    ctx.out('  No tools yet. Declare them under "tools" in mcp.config.json (one API request each).');
+  }
+  ctx.out('  Then: knowledge-mcp setup check');
+  return 0;
+}
+
+async function secret(argv: string[], ctx: CommandContext): Promise<number> {
+  if (argv.length !== 1) throw new Error('setup secret needs one env var name, for example: setup secret SHOP_DATABASE_URL');
+  const name = argv[0];
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw new Error('an env var name holds letters, digits and underscores');
+  let read = ctx.readSecret;
+  let close = () => {};
+  if (!read) {
+    if (!process.stdin.isTTY) {
+      throw new Error(`setup secret asks for the value without showing it, so it needs a terminal. The person who owns the secret runs it themselves: knowledge-mcp setup secret ${name}`);
+    }
+    const { terminalIO } = await import('./terminal.js');
+    const io = terminalIO();
+    read = (q) => io.secret(q);
+    close = () => io.close();
+  }
+  let value: string;
+  try {
+    value = (await read(`Value for ${name} (not shown):`)).trim();
+  } finally {
+    close();
+  }
+  if (!value) {
+    ctx.out('· Nothing was entered, so nothing was changed.');
+    return 1;
+  }
+  updateEnvFile(join(ctx.dir, '.env'), { [name]: value });
+  ctx.out(`✓ ${name} saved to ${join(ctx.dir, '.env')} (readable by you only). Check it with: knowledge-mcp setup check`);
+  return 0;
+}
+
 /** Run one `setup <sub>` command. Returns the process exit code. */
 export async function runSetupCommand(argv: string[], ctx: CommandContext): Promise<number> {
   const [sub, ...rest] = argv;
@@ -316,6 +492,8 @@ export async function runSetupCommand(argv: string[], ctx: CommandContext): Prom
     if (sub === 'folder') return await folder(rest, ctx);
     if (sub === 'github') return await github(rest, ctx);
     if (sub === 'embeddings') return await embeddings(rest, ctx);
+    if (sub === 'connection') return await connection(rest, ctx);
+    if (sub === 'secret') return await secret(rest, ctx);
   } catch (e) {
     ctx.out(`✗ ${msg(e)}`);
     return 1;

@@ -31,6 +31,15 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Your data as tools, without a plugin file.** `connections` in the config names a Postgres database, a SQLite
+  file or an HTTP API; `tools` declares one SQL query or one API request each, with typed parameters. Values are
+  bound by the driver, a read-only tool runs in a read-only transaction (SQLite: a read-only file) with a row limit
+  and a time limit, and an API tool cannot leave its base URL. `setup check` connects and compiles every declared
+  query without running it. `setup connection` and `setup secret <ENV_NAME>` set a connection up without a secret
+  ever being an argument, and the setup wizard has a Database step.
+- **`explore`: let the assistant write the queries.** With `"explore": true` a database connection also offers
+  `<name>_tables` and `<name>_query` (one read-only SELECT). Off by default: it reads whatever the database user
+  can read.
 - **Local folders as a source.** `knowledge-mcp setup folder <path>` (or `folders` in the config, or the first
   question of the setup wizard) makes a folder of Markdown, text, PDF, Word, PowerPoint and Excel files searchable:
   no account, no key. The server scans it when it starts and on a timer, opens only files that changed, and removes
@@ -62,6 +71,10 @@ Changes that affect people who run or extend the server. Dates are release dates
   `EMBEDDING_API_KEY`. A local server needs no key. The default is still OpenAI `text-embedding-3-small`.
   With Qdrant, a collection whose vector size differs from `EMBEDDING_DIM` stops indexing with the fix in the message.
 - `drive.sharedSource`: the `source` label for documents shared outside the roots (default `shared`).
+
+### Dependencies
+
+- Added `pg` (the Postgres driver), loaded on first use by a Postgres connection.
 
 ### Fixed
 

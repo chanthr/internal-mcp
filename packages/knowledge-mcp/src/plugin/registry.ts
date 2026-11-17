@@ -11,6 +11,7 @@ import { getConfig, type AppConfig, BASE_INSTRUCTIONS } from '../core/config.js'
 import { UpstreamManager } from '../core/upstream.js';
 import { isSet } from '../core/env.js';
 import { getStore } from '../store/index.js';
+import { dataPlugins } from '../connections/index.js';
 import type { Plugin, PluginState, ToolContext, ToolSpec, UpstreamSpec } from './define.js';
 import { errorResult, formatValidationError, inputJsonSchema, normalizeResult, textResult, type JsonSchemaObject } from './result.js';
 
@@ -68,6 +69,13 @@ export class Registry {
   private readonly config: AppConfig;
 
   constructor(plugins: Plugin[], config: AppConfig = getConfig()) {
+    // Connections declared in the config are plugins too: the connection's name is the plugin id.
+    const declared = dataPlugins(config);
+    const taken = new Set(plugins.map((p) => p.id));
+    for (const p of declared) {
+      if (taken.has(p.id)) throw new Error(`[config] the connection "${p.id}" has the same name as a plugin; pick another name`);
+    }
+    plugins = [...plugins, ...declared];
     this.plugins = plugins;
     this.config = config;
     const ids = new Set<string>();

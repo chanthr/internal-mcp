@@ -1,8 +1,8 @@
 /**
  * Deployment configuration — "what to look at" is kept out of the code.
  *
- * Credentials live in env (Supabase / Qdrant / Drive / Slack / GitHub keys). This module holds the
- * rest: which Drive folders, which Qdrant collection, which Supabase schema, which domains. That
+ * Credentials live in env (Supabase / Qdrant / Drive / Slack / GitHub keys, database URLs, API tokens). This module
+ * holds the rest: which Drive folders, which Qdrant collection, which Supabase schema, which domains, which queries. That
  * lets anyone self-host by supplying their own config file — no code changes.
  *
  * Resolution order (first match wins):
@@ -18,6 +18,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { candidates } from './paths.js';
+import { ConnectionsSchema, DataToolsSchema, dataConfigProblems } from '../connections/schema.js';
 
 /** First line of the server instructions. Each enabled plugin appends its own notes (plugin `instructions`). */
 export const BASE_INSTRUCTIONS = 'Knowledge MCP — tools over your team\'s data. Answer only from tool results; do not speculate.';
@@ -165,8 +166,18 @@ const ConfigSchema = z
     plugins: z.record(z.string(), z.unknown()).default({}),
     /** Remote MCP servers to proxy. Their tools are listed as `<prefix><name>` in the group `name`. */
     upstreams: z.array(UpstreamConfigSchema).default([]),
+    /**
+     * Your own data as tools, without a plugin file (see connections/schema.ts). `connections` names a Postgres database, a
+     * SQLite file or an HTTP API; the name is the permission group. `tools` declares one SQL query or one API
+     * request each. Secrets stay in env: a connection names the env var that holds them.
+     */
+    connections: ConnectionsSchema,
+    tools: DataToolsSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((cfg, ctx) => {
+    for (const p of dataConfigProblems(cfg.connections, cfg.tools)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
+  });
 
 export type AppConfig = z.infer<typeof ConfigSchema>;
 export type DriveRoot = z.infer<typeof DriveRootSchema>;
