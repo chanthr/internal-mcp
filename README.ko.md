@@ -12,7 +12,8 @@
 <p align="center">
   <b>우리 팀만의 MCP 서버를 만듭니다. 설치는 명령 한 줄, 도구 추가는 파일 하나입니다.</b><br>
   API 키, Google 로그인, 사람별 권한, 호출 기록은 이미 들어 있습니다.<br>
-  문서 검색(로컬 폴더, Google Drive), Slack, GitHub, Railway 연결도 기본으로 들어 있습니다.
+  문서 검색(로컬 폴더, Google Drive), Slack, GitHub, Railway 연결도 기본으로 들어 있습니다.<br>
+  데이터베이스와 API는 설정 몇 줄로 도구가 됩니다.
 </p>
 
 <p align="center">
@@ -36,6 +37,7 @@ Node 22.13 이상이나 Docker가 필요합니다.
 | 원하는 것 | 시작 방법 |
 | --- | --- |
 | **내 도구 만들기** (사내 API, 데이터베이스 등 무엇이든) | `npx create-knowledge-mcp my-mcp` |
+| **데이터베이스나 API에 질문하기**, 코드 없이 | [내 데이터를 도구로](#내-데이터를-도구로): 설정에 연결과 질의를 적습니다 |
 | **기본 연결만 쓰기** (Drive, Slack, GitHub, Railway) | Docker 이미지 |
 
 **내 도구 만들기**
@@ -167,6 +169,97 @@ export default definePlugin({
 | 오류 처리 | `throw new ToolError('...')`는 `[error] ...`, 그 밖의 오류는 `[fatal] ...`로 돌려줍니다 |
 | 호출 기록 | 도구, 사람, 역할, 성공 여부, 걸린 시간을 남깁니다. 입력값은 남기지 않습니다 |
 
+## 내 데이터를 도구로
+
+데이터베이스나 사내 API는 플러그인 파일 없이 도구가 됩니다. 연결에 이름을 붙이고, 무엇을 물을 수 있는지
+적습니다. 둘 다 `mcp.config.json`에 적고, 비밀값은 `.env`에 둡니다.
+
+```json
+{
+  "connections": {
+    "shop": { "type": "postgres", "urlEnv": "SHOP_DATABASE_URL", "description": "주문과 고객" },
+    "crm": { "type": "http", "baseUrl": "https://crm.example.com/api/v2", "headers": { "Authorization": "Bearer ${CRM_TOKEN}" } }
+  },
+  "tools": [
+    {
+      "name": "orders_by_customer",
+      "connection": "shop",
+      "description": "고객 한 명의 주문을 최근 순으로 보여 줍니다. 고객이 무엇을 샀는지 물을 때 씁니다.",
+      "params": {
+        "email": { "type": "string", "description": "고객 이메일" },
+        "limit": { "type": "integer", "default": 20, "min": 1, "max": 100 }
+      },
+      "sql": "select id, total, status, created_at from orders where email = :email order by created_at desc limit :limit"
+    },
+    {
+      "name": "crm_contact",
+      "connection": "crm",
+      "description": "CRM 연락처 하나를 id로 찾습니다.",
+      "params": { "id": { "type": "string" } },
+      "request": { "path": "/contacts/{id}", "pick": "data" }
+    }
+  ]
+}
+```
+
+```bash
+npm run setup -- connection shop --postgres --env SHOP_DATABASE_URL   # 연결을 설정에 적습니다
+npm run setup -- secret SHOP_DATABASE_URL                             # 접속 주소를 화면에 보이지 않게 .env에 넣습니다
+npm run setup -- check                                                # 접속하고, 적어 둔 질의를 모두 컴파일해 봅니다
+```
+
+`setup check`는 데이터베이스에 접속해 적어 둔 질의를 하나씩 컴파일해 봅니다. 열 이름이 틀리면 모델이 도구를
+부르기 전에 알 수 있습니다. 실행하는 것은 없습니다. 설정은 서버가 뜰 때 읽습니다. `npm run dev`는
+`mcp.config.json`이나 `.env`가 바뀌면 다시 뜹니다.
+
+**질의를 AI에게 맡길 수도 있습니다.** 데이터베이스 연결에 `"explore": true`를 적으면 도구 두 개가 더 생깁니다.
+`shop_tables`는 표와 열을 보여 주고, `shop_query`는 읽기 전용 SELECT 하나를 실행합니다. 미리 만들어 둔 도구가
+없는 질문에도 답할 수 있습니다. `npm run setup`에서 Database를 고르면 이 선택을 묻습니다.
+
+| 안전장치 | 방법 |
+| --- | --- |
+| 값은 SQL 글자가 되지 않습니다 | `:name`은 데이터베이스 드라이버가 값으로 묶습니다. 호출자가 무엇을 넣든 데이터입니다 |
+| 읽기 전용 도구는 쓰지 못합니다 | Postgres는 읽기 전용 트랜잭션에서 질의 하나만 실행하고 되돌립니다. 서버가 문장을 하나만 받습니다. SQLite는 파일을 읽기 전용으로 엽니다. 질의를 어떻게 쓰든 데이터베이스가 쓰기를 거절합니다 |
+| 질문 하나가 표나 서버를 차지하지 못합니다 | 행 제한(`maxRows`, 기본 100)은 데이터베이스가 적용하고, 시간 제한(`timeoutMs`, 기본 10초)이 질의를 멈춥니다. 답의 크기도 제한합니다. 긴 값은 4,000자에서 자르고, Postgres 결과가 16MB를 넘으면 버리고, SQLite 질의는 한 번에 4개까지만 돕니다 |
+| API 도구는 그 API를 벗어나지 못합니다 | 매개변수는 경로 한 칸, 쿼리 값, 헤더 값, JSON 필드 하나를 채웁니다. 호스트와 기본 경로는 고정이고 리다이렉트는 따라가지 않습니다 |
+| 비밀값은 밖으로 나가지 않습니다 | `${ENV_NAME}` 값은 답 어디에 나오든 가립니다. 요청을 그대로 되돌려 주는 API 오류가 그런 경우입니다. 매개변수로 비밀값을 끌어올 수도 없습니다. 넣은 값은 다시 템플릿으로 읽지 않습니다 |
+| 누가 부를 수 있나 | 연결 이름이 플러그인 id처럼 권한 그룹입니다([접근 권한](#접근-권한)). tools 목록이 없는 member는 모든 그룹을 쓸 수 있고, 새 연결도 포함됩니다 |
+| 무엇을 읽을 수 있나 | 데이터베이스 사용자가 읽을 수 있는 것 전부입니다. `explore`에서는 더 그렇습니다. 이 연결만 쓰는 사용자를 따로 만드십시오. 읽기만 되고, 이 서버를 쓰는 모두가 봐도 되는 것만 읽는 사용자여야 합니다. superuser는 안 되고, 애플리케이션이 쓰는 사용자도 안 됩니다. 질의는 같은 사용자의 다른 세션을 끊을 수 있습니다 |
+
+<details>
+<summary>연결, 도구, 매개변수 전체</summary>
+<br>
+
+| 연결 | 필드 |
+| --- | --- |
+| `postgres` | `urlEnv`(`postgres://user:password@host:5432/db`가 든 환경변수의 이름), `explore`, `maxRows`, `timeoutMs`, `pool`(열어 두는 접속 수, 기본 3), `description` |
+| `sqlite` | `path`(절대 경로 또는 프로젝트 기준 상대 경로), `explore`, `maxRows`, `timeoutMs`, `description`. 질의마다 잠깐 사는 자식 프로세스에서 돌려서 느린 질의를 멈출 수 있습니다 |
+| `http` | `baseUrl`, 모든 요청에 붙는 `headers`와 `query`(값에 `${ENV_NAME}`을 쓸 수 있습니다), `timeoutMs`(기본 15초), `maxBytes`(읽을 응답 크기 상한, 기본 1MB), `description` |
+
+| 도구 필드 | 뜻 |
+| --- | --- |
+| `name`, `description` | 모델이 보는 것입니다. 모델은 설명을 보고 도구를 고릅니다. 무엇에 답하고 언제 쓰는지 적으십시오 |
+| `connection` | 도구가 쓰는 연결 |
+| `params` | `{ 이름: { type, description, required, default, enum, min, max, maxLength, pattern } }`. `type`은 `string`, `integer`, `number`, `boolean` 가운데 하나입니다. `default`가 있으면 선택 항목입니다. 값이 없는 선택 항목은 SQL에서 NULL이고, 요청에서는 빠집니다 |
+| `sql` | 문장 하나. 매개변수 자리에 `:name`을 씁니다(데이터베이스 연결) |
+| `request` | `{ method, path, query, headers, body, pick }`(http 연결). `{name}`에 매개변수가 들어갑니다. `body`에서 값이 정확히 `{name}`이면 매개변수의 형식 그대로 들어갑니다. `pick`은 JSON 응답의 한 부분만 남깁니다(예: `data.items`) |
+| `readOnly` | SQL은 기본 `true`입니다. 데이터를 바꾸는 도구라면 `false`로 적습니다. HTTP는 GET이 기본 `true`이고, 다른 메서드는 `true`나 `false`를 꼭 적어야 합니다 |
+| `maxRows`, `timeoutMs` | 이 도구만 연결의 제한과 다르게 둡니다 |
+
+| 명령 | 하는 일 |
+| --- | --- |
+| `knowledge-mcp setup connection <이름> --postgres --env NAME [--explore]` | Postgres 연결을 추가합니다. 접속 주소는 인자로 받지 않습니다 |
+| `knowledge-mcp setup connection <이름> --sqlite <파일> [--explore]` | SQLite 파일을 추가합니다 |
+| `knowledge-mcp setup connection <이름> --http <기본 URL> --header 'Authorization: Bearer ${API_TOKEN}'` | API를 추가합니다. 비밀값으로 보이는 헤더와 쿼리 값은 `${ENV_NAME}`으로 적어야 합니다 |
+| `knowledge-mcp setup secret <ENV_NAME>` | 비밀값 하나를 화면에 보이지 않게 `.env`에 넣습니다(터미널 필요) |
+| `knowledge-mcp <이름> tables [필터]` | 연결이 읽을 수 있는 표와 열을 보여 줍니다. 도구를 쓸 때 봅니다 |
+| `knowledge-mcp <이름> check` | 연결 하나와 그 도구를 점검합니다 |
+
+설정 안의 실수(질의가 쓰지 않는 매개변수, 둘째 문장, 없는 연결)는 서버가 뜰 때 도구 이름과 함께 알려 주고
+멈춥니다. Postgres는 [`pg`](https://node-postgres.com) 드라이버를 쓰고, 처음 쓸 때 불러옵니다.
+
+</details>
+
 ## 플러그인 API
 
 모두 `@chnxthr/knowledge-mcp`에서 가져옵니다.
@@ -242,6 +335,9 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `setup check` | 설정된 서비스마다 실제로 붙어 확인합니다. 실패가 있으면 종료 코드 1 |
 | `setup drive --gcloud [--project ID] [--yes]` | gcloud로 Drive 서비스 계정과 키를 만듭니다. 계획을 먼저 보여 주고, `--yes` 없이는 아무것도 만들지 않습니다 |
 | `setup trust <이메일 또는 도메인>...` | 공유된 Drive 문서를 보여 줄 소유자를 추가합니다 |
+| `setup folder <경로>` | 로컬 문서 폴더를 검색 색인에 넣습니다 |
+| `setup connection <이름> --postgres --env NAME` / `--sqlite <파일>` / `--http <기본 URL>` | 설정에 적은 도구가 쓸 데이터베이스나 API를 추가합니다([내 데이터를 도구로](#내-데이터를-도구로)) |
+| `setup secret <ENV_NAME>` | 비밀값 하나를 화면에 보이지 않게 `.env`에 넣습니다 |
 | `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다 |
 | `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
@@ -362,6 +458,8 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `access.viewerTools[]` | 등록되지 않은 로그인 사용자에게 열 플러그인 id. 기본은 없음 |
 | `plugins.<id>` | 플러그인 하나의 설정. `ctx.config`로 들어갑니다 |
 | `upstreams[]` | 원격 MCP 서버(다음 절) |
+| `connections.<이름>` | Postgres 데이터베이스, SQLite 파일, HTTP API. 이름이 권한 그룹입니다. [내 데이터를 도구로](#내-데이터를-도구로) 참고 |
+| `tools[]` | 연결 위에 적는 도구. 하나가 SQL 질의 하나 또는 API 요청 하나이고, 매개변수에 형식이 있습니다 |
 | `data.schema` | 서버 표를 둘 Supabase 스키마(Supabase 저장소일 때만) |
 
 <details>
@@ -490,6 +588,7 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
 5. 서비스 계정 주소를 아는 사람은 누구나 그 계정에 문서를 공유할 수 있습니다. Drive는 받는 쪽에 묻지 않습니다. 그래서 root 밖 공유 문서는 공유된 맨 위 항목의 소유자가 `drive.trustedOwners`에 있을 때만 보여 줍니다. 이 목록에는 자기 조직만 넣고 `*`는 쓰지 마십시오. 신뢰하는 소유자가 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.
 6. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.
+7. 데이터베이스 연결은 그 데이터베이스 사용자가 읽을 수 있는 것을 모두 읽습니다. 읽기만 되는 전용 사용자를 만드십시오. superuser와 애플리케이션이 쓰는 사용자는 쓰지 마십시오. `explore`를 켤 때는 허용된 사람 모두가 봐도 되는 것만 읽는 사용자를 쓰십시오. tools 목록이 없는 member는 모든 연결을 쓸 수 있습니다.
 
 ## 파일 구성
 
@@ -499,7 +598,8 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 | [`packages/knowledge-mcp/src/core/`](packages/knowledge-mcp/src/core/) | 인증, OAuth, 권한, 설정, 게이트웨이, 로그 가리기 |
 | [`packages/knowledge-mcp/src/server/`](packages/knowledge-mcp/src/server/) | HTTP와 stdio 연결, MCP 요청 처리, 사용자 역할 계산 |
 | [`packages/knowledge-mcp/src/store/`](packages/knowledge-mcp/src/store/) | 저장소 인터페이스, SQLite와 Supabase 구현 |
-| [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | 기본 플러그인: `drive`, `slack`, `github`, `railway` |
+| [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | 기본 플러그인: `knowledge`, `drive`, `slack`, `github`, `railway` |
+| [`packages/knowledge-mcp/src/connections/`](packages/knowledge-mcp/src/connections/) | 설정에 적는 도구: Postgres, SQLite, HTTP 연결 |
 | [`packages/knowledge-mcp/src/run.ts`](packages/knowledge-mcp/src/run.ts) | 명령줄 |
 | [`packages/knowledge-mcp/test/`](packages/knowledge-mcp/test/) | 단위 시험, HTTP와 stdio 종단 시험 |
 | [`packages/create-knowledge-mcp/`](packages/create-knowledge-mcp/) | 생성기와 프로젝트 템플릿 |

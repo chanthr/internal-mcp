@@ -12,7 +12,8 @@
 <p align="center">
   <b>Build your team's own MCP server. Install with one command, add a tool with one file.</b><br>
   API keys, Google sign-in, per-person permissions and an audit log are already done.<br>
-  Document search (local folders, Google Drive), Slack, GitHub and Railway come built in.
+  Document search (local folders, Google Drive), Slack, GitHub and Railway come built in.<br>
+  A database or an API becomes tools from a few lines of config.
 </p>
 
 <p align="center">
@@ -36,6 +37,7 @@ SQLite file. You need Node 22.13 or later, or Docker.
 | You want | Start with |
 | --- | --- |
 | **Your own tools** (internal APIs, databases, anything) | `npx create-knowledge-mcp my-mcp` |
+| **Questions about your database or API**, no code | [Your data as tools](#your-data-as-tools): a connection and a query in the config |
 | **Only the built-in connectors** (Drive, Slack, GitHub, Railway) | The Docker image |
 
 **Your own tools**
@@ -167,6 +169,98 @@ router, a tool list or a permission table.
 | Handles errors | `throw new ToolError('...')` returns `[error] ...`. Any other error returns `[fatal] ...` |
 | Logs the call | Tool, person, role, success and duration go to the audit log. Arguments are not stored |
 
+## Your data as tools
+
+A database or an internal API becomes tools without a plugin file. Name the connection, then declare what may be
+asked of it. Both go in `mcp.config.json`; secrets stay in `.env`.
+
+```json
+{
+  "connections": {
+    "shop": { "type": "postgres", "urlEnv": "SHOP_DATABASE_URL", "description": "Orders and customers" },
+    "crm": { "type": "http", "baseUrl": "https://crm.example.com/api/v2", "headers": { "Authorization": "Bearer ${CRM_TOKEN}" } }
+  },
+  "tools": [
+    {
+      "name": "orders_by_customer",
+      "connection": "shop",
+      "description": "Orders of one customer, newest first. Use it for questions about what a customer bought.",
+      "params": {
+        "email": { "type": "string", "description": "Customer email" },
+        "limit": { "type": "integer", "default": 20, "min": 1, "max": 100 }
+      },
+      "sql": "select id, total, status, created_at from orders where email = :email order by created_at desc limit :limit"
+    },
+    {
+      "name": "crm_contact",
+      "connection": "crm",
+      "description": "One CRM contact by id.",
+      "params": { "id": { "type": "string" } },
+      "request": { "path": "/contacts/{id}", "pick": "data" }
+    }
+  ]
+}
+```
+
+```bash
+npm run setup -- connection shop --postgres --env SHOP_DATABASE_URL   # writes the connection
+npm run setup -- secret SHOP_DATABASE_URL                             # you type the URL into .env, unseen
+npm run setup -- check                                                # connects, and compiles every query
+```
+
+`setup check` connects to each database and compiles each declared query there, so a misspelled column is reported
+before the model ever calls the tool. Nothing is executed. The config is read at startup; `npm run dev` restarts
+when `mcp.config.json` or `.env` changes.
+
+**Or let the assistant write the queries.** With `"explore": true` on a database connection two more tools appear:
+`shop_tables` lists the tables and columns, `shop_query` runs one read-only SELECT. The assistant can then answer
+questions nobody prepared a tool for. `npm run setup` offers this when you pick Database.
+
+| What keeps it safe | How |
+| --- | --- |
+| A value is never part of the SQL | Each `:name` is bound by the database driver. Whatever the caller passes is data |
+| A read-only tool cannot write | Postgres: the query runs alone in a read-only transaction that is rolled back, and the server accepts one statement. SQLite: the file is opened read-only. Both refuse a write however the query is written |
+| One question cannot take a table or the server | The row limit (`maxRows`, default 100) is applied by the database and the time limit (`timeoutMs`, default 10 s) stops the query. An answer is limited in size too: long values are cut at 4,000 characters, a Postgres result over 16 MB is dropped, and at most 4 SQLite queries run at once |
+| An API tool stays on its API | A parameter fills one path segment, a query value, a header value or a JSON field. The host and base path are fixed, and redirects are not followed |
+| A secret stays a secret | `${ENV_NAME}` values are masked wherever they show up in an answer, such as an API error that echoes the request. A parameter cannot pull one in: a value is never read as a template |
+| Who may call it | The connection's name is a permission group like a plugin id (see [Access control](#access-control)). A member without a tool list may use every group, a new connection included |
+| What it can read | Whatever the database user can read, above all with `explore`. Give the connection a user of its own that can only read, and only what everyone using this server may see. Never a superuser, and not the user your application runs as: a query can end other sessions of its own user |
+
+<details>
+<summary>Connections, tools and parameters in full</summary>
+<br>
+
+| Connection | Fields |
+| --- | --- |
+| `postgres` | `urlEnv` (the NAME of the env var holding `postgres://user:password@host:5432/db`), `explore`, `maxRows`, `timeoutMs`, `pool` (connections kept open, default 3), `description` |
+| `sqlite` | `path` (absolute, or relative to the project), `explore`, `maxRows`, `timeoutMs`, `description`. Each query runs in a short-lived child process, so a slow one can be stopped |
+| `http` | `baseUrl`, `headers` and `query` sent with every request (a value may contain `${ENV_NAME}`), `timeoutMs` (default 15 s), `maxBytes` (largest response read, default 1 MB), `description` |
+
+| Tool field | Meaning |
+| --- | --- |
+| `name`, `description` | What the model sees. It picks tools by the description, so say what the tool answers and when to use it |
+| `connection` | The connection it runs on |
+| `params` | `{ name: { type, description, required, default, enum, min, max, maxLength, pattern } }`. `type` is `string`, `integer`, `number` or `boolean`. A parameter with a `default` is optional; an optional one without a value is NULL in SQL and left out of a request |
+| `sql` | One statement with `:name` where a parameter goes (database connections) |
+| `request` | `{ method, path, query, headers, body, pick }` (http connections). `{name}` puts a parameter in. In `body`, a string that is exactly `{name}` takes the parameter's own type. `pick` keeps one part of a JSON answer, such as `data.items` |
+| `readOnly` | SQL: default `true`; set `false` for a tool that is meant to change data. HTTP: default `true` for GET; any other method has to say `true` or `false` |
+| `maxRows`, `timeoutMs` | Override the connection's limits for this tool |
+
+| Command | What it does |
+| --- | --- |
+| `knowledge-mcp setup connection <name> --postgres --env NAME [--explore]` | Add a Postgres connection. The connection string is never an argument |
+| `knowledge-mcp setup connection <name> --sqlite <file> [--explore]` | Add a SQLite file |
+| `knowledge-mcp setup connection <name> --http <base URL> --header 'Authorization: Bearer ${API_TOKEN}'` | Add an API. A header or query value that looks like a secret must be written as `${ENV_NAME}` |
+| `knowledge-mcp setup secret <ENV_NAME>` | Type one secret into `.env` without it being shown (needs a terminal) |
+| `knowledge-mcp <name> tables [filter]` | The tables and columns the connection can read, for writing tools |
+| `knowledge-mcp <name> check` | Check one connection and its tools |
+
+A mistake inside the config (a parameter the query does not use, a second statement, an unknown connection) stops
+the server at boot with the tool's name in the message. Postgres uses the [`pg`](https://node-postgres.com) driver,
+loaded on first use.
+
+</details>
+
 ## Plugin API
 
 Everything is exported from `@chnxthr/knowledge-mcp`.
@@ -242,6 +336,9 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `setup check` | Verifies every configured service against the real thing. Exit code 1 on a failure |
 | `setup drive --gcloud [--project ID] [--yes]` | Creates the Drive service account and key with the gcloud CLI. Prints its plan and creates nothing without `--yes` |
 | `setup trust <email-or-domain>...` | Adds owners whose shared Drive documents are shown |
+| `setup folder <path>` | Adds a local folder of documents to the search index |
+| `setup connection <name> --postgres --env NAME` / `--sqlite <file>` / `--http <base URL>` | Adds a database or an API for tools declared in the config (see [Your data as tools](#your-data-as-tools)) |
+| `setup secret <ENV_NAME>` | Types one secret into `.env` without it being shown |
 | `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
@@ -249,7 +346,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `users add <email> [--role admin\|member] [--tools a,b]` | Registers a person. `--tools` limits a member to those plugins |
 | `users list` / `users remove <email>` | Shows or removes people |
 | `doctor` | Config source, store, OAuth, and each plugin on or off with the reason |
-| `<plugin> <command>` | A plugin command, e.g. `drive reindex --dry-run` or `slack channels` |
+| `<plugin> <command>` | A plugin command, e.g. `drive reindex --dry-run`, `slack channels`, or for a connection `shop tables` |
 
 ## Built-in plugins
 
@@ -363,6 +460,8 @@ it, the sign-in allowlist included.
 | `access.viewerTools[]` | Plugin ids open to signed-in people without a users entry. Default: none |
 | `plugins.<id>` | Settings for one plugin, passed as `ctx.config` |
 | `upstreams[]` | Remote MCP servers (next section) |
+| `connections.<name>` | A Postgres database, a SQLite file or an HTTP API. The name is the permission group. See [Your data as tools](#your-data-as-tools) |
+| `tools[]` | Tools declared on a connection: one SQL query or one API request each, with typed parameters |
 | `data.schema` | Supabase schema for the server's tables (Supabase store only) |
 
 <details>
@@ -494,6 +593,7 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
+7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.
 
 ## File map
 
@@ -503,7 +603,8 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | [`packages/knowledge-mcp/src/core/`](packages/knowledge-mcp/src/core/) | Auth, OAuth, permissions, config, gateway, log masking |
 | [`packages/knowledge-mcp/src/server/`](packages/knowledge-mcp/src/server/) | HTTP and stdio transports, MCP request handling, identity |
 | [`packages/knowledge-mcp/src/store/`](packages/knowledge-mcp/src/store/) | Store interface, SQLite and Supabase implementations |
-| [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | Built-in plugins: `drive`, `slack`, `github`, `railway` |
+| [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | Built-in plugins: `knowledge`, `drive`, `slack`, `github`, `railway` |
+| [`packages/knowledge-mcp/src/connections/`](packages/knowledge-mcp/src/connections/) | Tools declared in the config: Postgres, SQLite and HTTP connections |
 | [`packages/knowledge-mcp/src/run.ts`](packages/knowledge-mcp/src/run.ts) | The command line |
 | [`packages/knowledge-mcp/test/`](packages/knowledge-mcp/test/) | Unit tests and end-to-end tests over HTTP and stdio |
 | [`packages/create-knowledge-mcp/`](packages/create-knowledge-mcp/) | The generator and its project template |
