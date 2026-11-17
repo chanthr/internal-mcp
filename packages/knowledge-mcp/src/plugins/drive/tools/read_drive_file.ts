@@ -21,8 +21,7 @@ import { MAX_FILE_BYTES } from '../settings.js';
 const DESCRIPTION =
   'Reads the content of a Google Drive file. markdown/text is returned raw, Google Docs/Sheets/Slides are exported, ' +
   '**PDF, Word (docx), PowerPoint (pptx), Excel (xlsx), and images are extracted to text** (scanned PDFs and images use OCR). ' +
-  'Use the id (File ID) from search_drive / semantic_search_drive results. ' +
-  'This is step 2 of a two-step search: call it after semantic_search_drive finds relevant chunks and you need the full context of the original. ' +
+  'Use the id (File ID) from search_drive or list_drive_folder results. ' +
   '**To read several documents, do not call once per fileId; pass fileIds=[...] in one call (parallel, much faster than sequential).** ' +
   'Large files are truncated to maxChars.';
 
@@ -72,7 +71,7 @@ function isExtractableBinary(mime: string): boolean {
  * Returns null when the file is not indexed or the lookup fails (→ extract_text fallback). The chunk overlap prefix ("…")
  * is removed on a best-effort basis.
  */
-async function reassembleFromIndex(fileId: string): Promise<string | null> {
+export async function reassembleFromIndex(fileId: string): Promise<string | null> {
   try {
     const res = await (await getQdrantClient()).scroll(DRIVE_COLLECTION, {
       filter: { must: [{ key: 'file_id', match: { value: fileId } }] },
@@ -106,7 +105,7 @@ async function reassembleFromIndex(fileId: string): Promise<string | null> {
 type DriveClient = Awaited<ReturnType<typeof getDriveClient>>;
 
 /** Reads one file → a structured object (returns an error field instead of throwing, to isolate per-file errors in a batch). */
-async function readOne(
+export async function readOne(
   drive: DriveClient,
   fileId: string,
   maxChars: number,
@@ -127,7 +126,7 @@ async function readOne(
 
     // Security: under the dev/biz root + not passing through an excluded folder (PII, contracts, HR, deprecated) + the
     // per-user folder scope.
-    // Same guard as search_drive / semantic_search_drive. It blocks the bypass of entering an arbitrary File ID directly
+    // Same guard as search_drive / search_knowledge. It blocks the bypass of entering an arbitrary File ID directly
     // to read files outside the index, in sensitive folders or outside the user's permissions.
     const { cls, path } = await classifyAndPath(drive, m.parents ?? undefined, { owners: ownerEmails(m), driveId: m.driveId });
     if (!isReadableClass(cls) || !isPathInScope(path, folderScope)) {

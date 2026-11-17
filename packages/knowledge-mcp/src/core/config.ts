@@ -25,7 +25,7 @@ export const BASE_INSTRUCTIONS = 'Knowledge MCP — tools over your team\'s data
 /**
  * A Drive folder to index.
  *   - `source` is a label of your choice ("handbook", "sales", "wiki", …). It is stored with every chunk and is the
- *     `source` filter of semantic_search_drive. Default "docs".
+ *     `source` filter of search_knowledge. Default "docs".
  *   - `metadata` says where document metadata comes from: "frontmatter" (Markdown with a YAML header: status, tags,
  *     type, date) or "path" (category, customer and tags derived from folder and file names — for PDFs, Office and
  *     Google files). Default "path". The label "dev" defaults to "frontmatter" so configs written for 0.3 keep working.
@@ -89,15 +89,15 @@ const ConfigSchema = z
         trustedOwners: z.array(z.string()).default([]),
         /** `source` label for documents shared outside the roots (drive.scope "shared"). */
         sharedSource: z.string().regex(SOURCE_LABEL).default('shared'),
-        /** Folder names to exclude from the search index (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */
+        /** Folder names to exclude from the search index, in Drive and in local folders (sensitive/backup). Merged with built-in dev-artifact names (node_modules etc.). */
         excludeFolders: z.array(z.string()).default([]),
         /**
          * Top-level folders (under a "biz" root) that hold one subfolder per customer: Clients/Acme/... → customer "Acme".
-         * Matched case-insensitively, ignoring a leading "01_" style number. Powers the semantic_search_drive `customer` filter.
+         * Matched case-insensitively, ignoring a leading "01_" style number. Powers the search_knowledge `customer` filter.
          */
         customerFolders: z.array(z.string()).default(['Clients', 'Customers', '고객사']),
         /**
-         * Optional ranking rules for semantic_search_drive: results whose path starts with `prefix` are labelled and
+         * Optional ranking rules for search_knowledge: results whose path starts with `prefix` are labelled and
          * their score multiplied by `weight` (e.g. prefer "Current/" over "Archive/"). First match wins. Default: none.
          */
         rank: z
@@ -105,6 +105,23 @@ const ConfigSchema = z
           .default([]),
       })
       .prefault({}),
+    /**
+     * Local folders to index and search (the `knowledge` plugin): Markdown, text, PDF, Word, PowerPoint and Excel
+     * files under each path, subfolders included. `name` is how the folder appears in results and in document ids
+     * (default: the folder's own name). `source` is the label for the `source` search filter (default "files").
+     * A relative path is resolved against the project folder. env KNOWLEDGE_FOLDERS (comma-separated paths) adds more.
+     */
+    folders: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1),
+            name: z.string().regex(/^[^/\\]{1,64}$/).optional(),
+            source: z.string().regex(SOURCE_LABEL).optional(),
+          })
+          .strict(),
+      )
+      .default([]),
     qdrant: z
       .object({
         /** Vector collection name. If env QDRANT_COLLECTION is set, it takes precedence (zero-downtime swap). */

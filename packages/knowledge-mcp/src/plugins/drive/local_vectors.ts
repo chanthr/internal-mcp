@@ -1,11 +1,17 @@
 /**
- * Built-in vector store: a SQLite file, used when QDRANT_URL is not set.
+ * Built-in index: a SQLite file, used when QDRANT_URL is not set. It holds every indexed chunk, a keyword index
+ * over the chunk text, and the chunk's vector when an embedding model is configured.
  *
- * Why: semantic search used to need an external Qdrant before it could be tried at all. With this store the only
- * thing left to supply is an embedding key. It has the same methods and return shapes as QdrantClient (qdrant.ts),
- * so the indexer, sync and search code do not know which one they talk to.
+ * Why: search used to need an external Qdrant and an embedding key before it could be tried at all. With this store
+ * nothing has to be supplied: keyword search works on its own, and vectors are an optional addition. It has the same
+ * methods and return shapes as QdrantClient (qdrant.ts), so the indexer and sync code do not know which one they
+ * talk to, plus a few methods that only exist here (keyword search, vectors added later).
  *
- * How it searches: exact cosine similarity over every stored vector (no approximate index). Vectors are kept
+ * Keyword search: SQLite FTS5 ranked with BM25, over tokens from tokens.ts (words, and character pairs for CJK).
+ * The FTS table stores no text of its own (contentless), only the index, and is kept in step with the chunk table
+ * on every write. If the two ever disagree, the keyword index is rebuilt from the chunks.
+ *
+ * Vector search: exact cosine similarity over every stored vector (no approximate index). Vectors are kept
  * normalized in one Float32Array in memory, so a query is a single pass of dot products. That is a few milliseconds
  * for 10,000 chunks and well under a second for 100,000. Past that, or when several servers must share one index,
  * set QDRANT_URL and reindex.
@@ -13,37 +19,40 @@
  * Point ids are stored as text: chunk ids are 63-bit numbers, which SQLite integers and JS numbers do not share
  * exactly. They come back as the same JS number that went in.
  *
- * Supported filter: `{ must: [{ key, match: { value } }] }`, the only shape the Drive plugin uses. A payload field
- * that holds an array matches when any element equals the value, like Qdrant.
+ * Supported filter: `{ must: [{ key, match: { value } }] }`, the only shape the plugins use. A payload field that
+ * holds an array matches when any element equals the value, like Qdrant.
  *
- * File: <data dir>/vectors.db (MCP_DATA_DIR). One process writes to it. Another process (for example a manual
- * `drive reindex` while the server runs) is noticed through SQLite's data_version and the memory copy is reloaded.
+ * File: <data dir>/vectors.db (MCP_DATA_DIR). Several processes may use it (the server, a manual reindex, stdio
+ * sessions). A write by another process is noticed through SQLite's data_version and the memory copy is reloaded.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from '../../core/paths.js';
 import type { PointId, QdrantFilter, QdrantPoint, ScoredPoint } from './qdrant.js';
+import { ftsQuery, tokenText } from './tokens.js';
 
 type Payload = Record<string, unknown>;
 type MustClause = { key?: unknown; match?: { value?: unknown } };
 
 /** Collection names become table names, so only a safe character set is allowed. */
-function tableOf(collection: string): string {
+function safeName(collection: string): string {
   if (!/^[A-Za-z0-9_]{1,64}$/.test(collection)) {
-    throw new Error(`[vectors] collection name "${collection}" must be letters, digits and underscores (max 64)`);
+    throw new Error(`[index] collection name "${collection}" must be letters, digits and underscores (max 64)`);
   }
-  return `vec_${collection}`;
+  return collection;
 }
+const tableOf = (collection: string) => `vec_${safeName(collection)}`;
+const ftsOf = (collection: string) => `fts_${safeName(collection)}`;
 
 function matchesFilter(payload: Payload | null, filter: QdrantFilter | undefined): boolean {
   if (filter?.should?.length || filter?.must_not?.length) {
-    throw new Error('[vectors] the built-in vector store supports only "must" filters');
+    throw new Error('[index] the built-in index supports only "must" filters');
   }
   for (const raw of filter?.must ?? []) {
     const c = raw as MustClause;
     if (typeof c.key !== 'string' || !c.match || !('value' in c.match)) {
-      throw new Error('[vectors] the built-in vector store supports only { key, match: { value } } clauses');
+      throw new Error('[index] the built-in index supports only { key, match: { value } } clauses');
     }
     const actual = payload?.[c.key];
     const want = c.match.value;
@@ -71,23 +80,41 @@ function normalized(v: number[]): Float32Array {
   return out;
 }
 
+const blobOf = (v: Float32Array) => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+
+/** The text the keyword index sees for a chunk: file name, heading and body. */
+function searchableText(payload: Payload | null | undefined): string {
+  const s = (k: string) => (typeof payload?.[k] === 'string' ? (payload[k] as string) : '');
+  return `${s('file_name')}\n${s('heading')}\n${s('content')}`;
+}
+
 interface MemoryIndex {
   dim: number;
   ids: number[];
   payloads: Array<Payload | null>;
-  /** ids.length × dim, row after row. */
+  /** ids.length × dim, row after row. Only chunks that have a vector. */
   matrix: Float32Array;
   dataVersion: number;
 }
 
 export class LocalVectorClient {
   private memory = new Map<string, MemoryIndex>();
+  private checked = new Set<string>();
 
   constructor(private readonly db: DatabaseSync) {
-    // Two processes can write here (the server and a manual `drive reindex`, or two stdio sessions). Without a
-    // timeout the second writer fails at once with "database is locked".
+    // Several processes can write here (the server, a manual `drive reindex`, stdio sessions). Without a timeout
+    // the second writer fails at once with "database is locked".
     db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 10000');
     db.exec('CREATE TABLE IF NOT EXISTS vec_collections (name TEXT PRIMARY KEY, dim INTEGER NOT NULL)');
+    // Which model made the stored vectors. Added later, so a file from an older version gets the column here.
+    const cols = db.prepare('PRAGMA table_info(vec_collections)').all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'model')) {
+      try {
+        db.exec('ALTER TABLE vec_collections ADD COLUMN model TEXT');
+      } catch {
+        /* another process added it first */
+      }
+    }
   }
 
   private dataVersion(): number {
@@ -99,10 +126,62 @@ export class LocalVectorClient {
     return row?.dim;
   }
 
+  /**
+   * The collection's vector size. Also makes sure, once per process, that the tables are in their current shape
+   * and that the keyword index covers every chunk (a file written by an older version has no keyword index yet).
+   */
   private requireDim(name: string): number {
     const dim = this.dimOf(name);
-    if (dim === undefined) throw new Error(`[vectors] collection '${name}' does not exist`);
+    if (dim === undefined) throw new Error(`[index] collection '${name}' does not exist`);
+    if (!this.checked.has(name)) {
+      this.createTables(name);
+      this.syncKeywordIndex(name);
+      this.checked.add(name);
+    }
     return dim;
+  }
+
+  private createTables(name: string): void {
+    const table = tableOf(name);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB)`);
+    // An earlier layout required a vector on every row. Chunks may now be stored before they have one.
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number }>;
+    if (cols.some((c) => c.name === 'vector' && c.notnull === 1)) {
+      this.db.exec('BEGIN');
+      try {
+        this.db.exec(`ALTER TABLE ${table} RENAME TO ${table}_old`);
+        this.db.exec(`CREATE TABLE ${table} (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB)`);
+        this.db.exec(`INSERT INTO ${table} (id, file_id, payload, vector) SELECT id, file_id, payload, vector FROM ${table}_old`);
+        this.db.exec(`DROP TABLE ${table}_old`);
+        this.db.exec('COMMIT');
+      } catch (e) {
+        this.db.exec('ROLLBACK');
+        throw e;
+      }
+    }
+    this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_file ON ${table} (file_id)`);
+    this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${ftsOf(name)} USING fts5(tokens, content='', contentless_delete=1)`);
+  }
+
+  /** Rebuild the keyword index when it does not cover exactly the chunks in the table. */
+  private syncKeywordIndex(name: string): void {
+    const table = tableOf(name);
+    const fts = ftsOf(name);
+    const chunks = (this.db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n;
+    const indexed = (this.db.prepare(`SELECT count(*) AS n FROM ${fts}`).get() as { n: number }).n;
+    if (chunks === indexed) return;
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec(`DROP TABLE ${fts}`);
+      this.db.exec(`CREATE VIRTUAL TABLE ${fts} USING fts5(tokens, content='', contentless_delete=1)`);
+      const ins = this.db.prepare(`INSERT INTO ${fts} (rowid, tokens) VALUES (?, ?)`);
+      const rows = this.db.prepare(`SELECT rowid AS rid, payload FROM ${table}`).all() as Array<{ rid: number; payload: string }>;
+      for (const r of rows) ins.run(r.rid, tokenText(searchableText(JSON.parse(r.payload) as Payload | null)));
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   async getCollections(): Promise<{ collections: Array<{ name: string }> }> {
@@ -115,19 +194,20 @@ export class LocalVectorClient {
 
   async createCollection(name: string, body: Record<string, unknown>): Promise<boolean> {
     const size = (body.vectors as { size?: unknown } | undefined)?.size;
-    if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) throw new Error('[vectors] createCollection needs vectors.size');
-    const table = tableOf(name);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB NOT NULL)`);
-    this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_file ON ${table} (file_id)`);
+    if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) throw new Error('[index] createCollection needs vectors.size');
+    this.createTables(name);
     this.db.prepare('INSERT OR REPLACE INTO vec_collections (name, dim) VALUES (?, ?)').run(name, size);
     this.memory.delete(name);
+    this.checked.add(name);
     return true;
   }
 
   async deleteCollection(name: string): Promise<boolean> {
     this.db.exec(`DROP TABLE IF EXISTS ${tableOf(name)}`);
+    this.db.exec(`DROP TABLE IF EXISTS ${ftsOf(name)}`);
     this.db.prepare('DELETE FROM vec_collections WHERE name = ?').run(name);
     this.memory.delete(name);
+    this.checked.delete(name);
     return true;
   }
 
@@ -136,18 +216,36 @@ export class LocalVectorClient {
     return true;
   }
 
+  /** Remove rows by their row numbers, from the chunk table and the keyword index together. */
+  private removeRows(name: string, rowids: number[]): void {
+    if (rowids.length === 0) return;
+    const delRow = this.db.prepare(`DELETE FROM ${tableOf(name)} WHERE rowid = ?`);
+    const delFts = this.db.prepare(`DELETE FROM ${ftsOf(name)} WHERE rowid = ?`);
+    for (const rid of rowids) {
+      delFts.run(rid);
+      delRow.run(rid);
+    }
+  }
+
+  /** A point without a vector is stored for keyword search only; its vector can be added later (setVectors). */
   async upsert(name: string, body: { points: QdrantPoint[]; wait?: boolean }): Promise<unknown> {
     const dim = this.requireDim(name);
-    const stmt = this.db.prepare(`INSERT OR REPLACE INTO ${tableOf(name)} (id, file_id, payload, vector) VALUES (?, ?, ?, ?)`);
+    const table = tableOf(name);
+    const find = this.db.prepare(`SELECT rowid AS rid FROM ${table} WHERE id = ?`);
+    const ins = this.db.prepare(`INSERT INTO ${table} (id, file_id, payload, vector) VALUES (?, ?, ?, ?)`);
+    const insFts = this.db.prepare(`INSERT INTO ${ftsOf(name)} (rowid, tokens) VALUES (?, ?)`);
     this.db.exec('BEGIN');
     try {
       for (const p of body.points) {
-        if (!p.vector || p.vector.length !== dim) {
-          throw new Error(`[vectors] vector size ${p.vector?.length ?? 0} does not match collection '${name}' (${dim})`);
+        if (p.vector && p.vector.length !== dim) {
+          throw new Error(`[index] vector size ${p.vector.length} does not match collection '${name}' (${dim})`);
         }
+        const id = String(p.id);
+        const old = find.get(id) as { rid: number } | undefined;
+        if (old) this.removeRows(name, [old.rid]);
         const fileId = typeof p.payload?.file_id === 'string' ? p.payload.file_id : null;
-        const vec = normalized(p.vector);
-        stmt.run(String(p.id), fileId, JSON.stringify(p.payload ?? null), new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength));
+        const info = ins.run(id, fileId, JSON.stringify(p.payload ?? null), p.vector ? blobOf(normalized(p.vector)) : null);
+        insFts.run(Number(info.lastInsertRowid), tokenText(searchableText(p.payload)));
       }
       this.db.exec('COMMIT');
     } catch (e) {
@@ -161,19 +259,31 @@ export class LocalVectorClient {
   async delete(name: string, body: { points?: PointId[]; filter?: QdrantFilter; wait?: boolean }): Promise<unknown> {
     this.requireDim(name);
     const table = tableOf(name);
+    let rowids: number[] = [];
     if (body.points?.length) {
-      const stmt = this.db.prepare(`DELETE FROM ${table} WHERE id = ?`);
-      for (const id of body.points) stmt.run(String(id));
+      const find = this.db.prepare(`SELECT rowid AS rid FROM ${table} WHERE id = ?`);
+      for (const id of body.points) {
+        const r = find.get(String(id)) as { rid: number } | undefined;
+        if (r) rowids.push(r.rid);
+      }
     } else if (body.filter) {
       const must = (body.filter.must ?? []) as MustClause[];
       const only = must.length === 1 && !body.filter.should?.length && !body.filter.must_not?.length ? must[0] : undefined;
       if (only && only.key === 'file_id' && typeof only.match?.value === 'string') {
-        this.db.prepare(`DELETE FROM ${table} WHERE file_id = ?`).run(only.match.value); // the common case, by index
+        // the common case, by index
+        rowids = (this.db.prepare(`SELECT rowid AS rid FROM ${table} WHERE file_id = ?`).all(only.match.value) as Array<{ rid: number }>).map((r) => r.rid);
       } else {
-        const rows = this.db.prepare(`SELECT id, payload FROM ${table}`).all() as Array<{ id: string; payload: string }>;
-        const stmt = this.db.prepare(`DELETE FROM ${table} WHERE id = ?`);
-        for (const r of rows) if (matchesFilter(JSON.parse(r.payload) as Payload | null, body.filter)) stmt.run(r.id);
+        const rows = this.db.prepare(`SELECT rowid AS rid, payload FROM ${table}`).all() as Array<{ rid: number; payload: string }>;
+        rowids = rows.filter((r) => matchesFilter(JSON.parse(r.payload) as Payload | null, body.filter)).map((r) => r.rid);
       }
+    }
+    this.db.exec('BEGIN');
+    try {
+      this.removeRows(name, rowids);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
     }
     this.memory.delete(name);
     return { status: 'completed' };
@@ -214,7 +324,7 @@ export class LocalVectorClient {
     const cached = this.memory.get(name);
     if (cached && cached.dataVersion === version) return cached;
     const dim = this.requireDim(name);
-    const rows = this.db.prepare(`SELECT id, payload, vector FROM ${tableOf(name)} ORDER BY rowid`).all() as Array<{
+    const rows = this.db.prepare(`SELECT id, payload, vector FROM ${tableOf(name)} WHERE vector IS NOT NULL ORDER BY rowid`).all() as Array<{
       id: string;
       payload: string;
       vector: Uint8Array;
@@ -234,13 +344,14 @@ export class LocalVectorClient {
     return index;
   }
 
+  /** Vector search. Only chunks that have a vector take part. */
   async search(
     name: string,
     body: { vector: number[]; limit: number; filter?: QdrantFilter; with_payload?: boolean | string[]; score_threshold?: number },
   ): Promise<ScoredPoint[]> {
     const { dim, ids, payloads, matrix } = this.load(name);
     if (body.vector.length !== dim) {
-      throw new Error(`[vectors] query vector size ${body.vector.length} does not match collection '${name}' (${dim})`);
+      throw new Error(`[index] query vector size ${body.vector.length} does not match collection '${name}' (${dim})`);
     }
     const q = normalized(body.vector);
     const scored: Array<{ i: number; score: number }> = [];
@@ -259,11 +370,119 @@ export class LocalVectorClient {
       payload: pickPayload(payloads[i], body.with_payload ?? false),
     }));
   }
+
+  // ── Only in the built-in index ──
+
+  /**
+   * Keyword search, best match first. `score` is the BM25 relevance (higher is better); it is only comparable
+   * within one result list.
+   */
+  async keywordSearch(
+    name: string,
+    body: { query: string; limit: number; filter?: QdrantFilter; with_payload?: boolean | string[] },
+  ): Promise<ScoredPoint[]> {
+    this.requireDim(name);
+    const match = ftsQuery(body.query);
+    if (!match) return [];
+    const table = tableOf(name);
+    const fts = ftsOf(name);
+    const filtered = !!body.filter?.must?.length;
+    // Filters are applied after ranking, so fetch more than asked for when there is one.
+    const fetch = filtered ? Math.min(2000, body.limit * 20) : body.limit;
+    const rows = this.db
+      .prepare(`SELECT t.id AS id, t.payload AS payload, bm25(${fts}) AS rank FROM ${fts} JOIN ${table} t ON t.rowid = ${fts}.rowid WHERE ${fts} MATCH ? ORDER BY rank LIMIT ?`)
+      .all(match, fetch) as Array<{ id: string; payload: string; rank: number }>;
+    const out: ScoredPoint[] = [];
+    for (const r of rows) {
+      const payload = JSON.parse(r.payload) as Payload | null;
+      if (!matchesFilter(payload, body.filter)) continue;
+      out.push({ id: Number(r.id), score: -r.rank, payload: pickPayload(payload, body.with_payload ?? true) }); // bm25() is smaller for better matches
+      if (out.length === body.limit) break;
+    }
+    return out;
+  }
+
+  /** How much is indexed: chunks, chunks that have a vector, and distinct documents. */
+  async stats(name: string): Promise<{ chunks: number; withVectors: number; documents: number }> {
+    if (this.dimOf(name) === undefined) return { chunks: 0, withVectors: 0, documents: 0 };
+    this.requireDim(name);
+    const r = this.db
+      .prepare(`SELECT count(*) AS chunks, count(vector) AS withVectors, count(DISTINCT file_id) AS documents FROM ${tableOf(name)}`)
+      .get() as { chunks: number; withVectors: number; documents: number };
+    return { chunks: Number(r.chunks), withVectors: Number(r.withVectors), documents: Number(r.documents) };
+  }
+
+  /**
+   * What the stored vectors are: their size, the model that made them (null when unknown or none yet), and how many
+   * chunks have one. Null when the collection does not exist.
+   */
+  async embeddingState(name: string): Promise<{ dim: number; model: string | null; vectors: number } | null> {
+    const row = this.db.prepare('SELECT dim, model FROM vec_collections WHERE name = ?').get(name) as { dim: number; model: string | null } | undefined;
+    if (!row) return null;
+    return { dim: row.dim, model: row.model ?? null, vectors: this.load(name).ids.length };
+  }
+
+  /**
+   * Change the collection's vector size. Only while no chunk has a vector: an index built for keyword search was
+   * created with whatever size was the default then, and takes the size of the model that is added later.
+   */
+  async adoptDimension(name: string, dim: number): Promise<void> {
+    const state = await this.embeddingState(name);
+    if (!state) return;
+    if (state.vectors > 0) throw new Error(`[index] collection '${name}' holds vectors; clear them before changing the size`);
+    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
+    this.memory.delete(name);
+  }
+
+  /** Remember which model made the vectors, so a later change of model is noticed instead of mixing two models. */
+  async noteModel(name: string, model: string): Promise<void> {
+    this.db.prepare('UPDATE vec_collections SET model = ? WHERE name = ? AND model IS NOT ?').run(model, name, model);
+  }
+
+  /**
+   * Drop every vector and set the size for the next model. The chunk text and the keyword index stay, so vectors
+   * can be made again from what is stored. Returns how many chunks lost their vector.
+   */
+  async clearVectors(name: string, dim: number): Promise<number> {
+    this.requireDim(name);
+    const r = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = NULL WHERE vector IS NOT NULL`).run();
+    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
+    this.memory.delete(name);
+    return Number(r.changes);
+  }
+
+  /** Chunks stored without a vector (indexed before an embedding model was configured). */
+  async missingVectors(name: string, limit: number): Promise<Array<{ id: number; payload: Payload | null }>> {
+    this.requireDim(name);
+    const rows = this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL ORDER BY rowid LIMIT ?`).all(limit) as Array<{
+      id: string;
+      payload: string;
+    }>;
+    return rows.map((r) => ({ id: Number(r.id), payload: JSON.parse(r.payload) as Payload | null }));
+  }
+
+  /** Add vectors to chunks that are already stored. The chunk text and the keyword index are untouched. */
+  async setVectors(name: string, vectors: Array<{ id: PointId; vector: number[] }>): Promise<void> {
+    const dim = this.requireDim(name);
+    const stmt = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = ? WHERE id = ?`);
+    this.db.exec('BEGIN');
+    try {
+      for (const v of vectors) {
+        if (v.vector.length !== dim) throw new Error(`[index] vector size ${v.vector.length} does not match collection '${name}' (${dim})`);
+        stmt.run(blobOf(normalized(v.vector)), String(v.id));
+      }
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+    this.memory.delete(name);
+  }
 }
 
 let _local: LocalVectorClient | null = null;
 
-/** Path of the built-in vector file. */
+/** Path of the built-in index file. */
 export function localVectorPath(): string {
   return join(dataDir(), 'vectors.db');
 }

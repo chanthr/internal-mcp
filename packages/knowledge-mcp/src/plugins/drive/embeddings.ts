@@ -15,8 +15,8 @@
  * backoff and jitter, and every call has a timeout.
  */
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const BASE_URL = (process.env.EMBEDDING_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '');
-const EMBEDDINGS_URL = `${BASE_URL}/embeddings`;
+// Read when used, like the key: an endpoint set after this module loaded (a test, a setup step) is picked up.
+const baseUrl = () => (process.env.EMBEDDING_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '');
 
 export const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL?.trim() || 'text-embedding-3-small';
 export const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM ?? 1536);
@@ -63,7 +63,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 
 function getApiKey(): string | undefined {
   const key = process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-  if (!key && BASE_URL === DEFAULT_BASE_URL) throw new Error('[embeddings] set OPENAI_API_KEY (or EMBEDDING_API_KEY)');
+  if (!key && baseUrl() === DEFAULT_BASE_URL) throw new Error('[embeddings] set OPENAI_API_KEY (or EMBEDDING_API_KEY)');
   return key || undefined;
 }
 
@@ -94,7 +94,7 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
   for (let attempt = 0; ; attempt++) {
     try {
       const resp = await withTimeout(
-        fetch(EMBEDDINGS_URL, {
+        fetch(`${baseUrl()}/embeddings`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
           body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs, ...(SEND_DIMENSIONS ? { dimensions: EMBEDDING_DIM } : {}) }),

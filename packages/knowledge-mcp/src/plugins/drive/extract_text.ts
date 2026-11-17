@@ -82,6 +82,12 @@ export async function extractText(
   return { ...raw, text: cleanExtractedText(raw.text) };
 }
 
+/** Where a file's bytes come from: a Drive download, or a file on disk. Each is read at most once, when needed. */
+interface ByteSource {
+  text(): Promise<string>;
+  buffer(): Promise<Buffer>;
+}
+
 /** Raw extraction per format (before cleaning). */
 async function extractRaw(
   drive: DriveClient,
@@ -89,12 +95,7 @@ async function extractRaw(
   mimeType: string,
   ocr: boolean,
 ): Promise<ExtractResult> {
-  // 1. Native text
-  if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
-    return { text: await downloadText(drive, fileId), method: 'native' };
-  }
-
-  // 2. Google Workspace: Drive export (free)
+  // Google Workspace: Drive export (free)
   if (mimeType === 'application/vnd.google-apps.document') {
     return { text: stripEmbeddedImages(await exportGoogle(drive, fileId, 'text/markdown')), method: 'gdoc→md' };
   }
@@ -107,17 +108,27 @@ async function extractRaw(
     return { text: await exportGoogle(drive, fileId, 'text/plain'), method: 'gslide→txt' };
   }
 
+  return extractBytes(mimeType, { text: () => downloadText(drive, fileId), buffer: () => downloadBuffer(drive, fileId) }, ocr);
+}
+
+/** Extraction for formats that are plain files: text, Word, PDF, PowerPoint, Excel, images. */
+async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean): Promise<ExtractResult> {
+  // 1. Native text
+  if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
+    return { text: await src.text(), method: 'native' };
+  }
+
   // 3. Word .docx: dependency-free zip/XML reading (ooxml.ts). Blank line between paragraphs, the same shape as the former
   // mammoth extractRawText output
   if (mimeType.includes('wordprocessingml')) {
     const { docxText } = await import('./ooxml.js');
-    const buffer = await downloadBuffer(drive, fileId);
+    const buffer = await src.buffer();
     return { text: docxText(buffer), method: 'docx→ooxml' };
   }
 
   // 4. PDF: pdf-parse v2. Digital text. Scans (<MIN) fall back to Mathpix OCR
   if (mimeType === 'application/pdf') {
-    const buffer = await downloadBuffer(drive, fileId);
+    const buffer = await src.buffer();
     const { PDFParse } = (await import('pdf-parse')) as any;
     const parser = new PDFParse({ data: new Uint8Array(buffer) });
     let text = '';
@@ -147,19 +158,19 @@ async function extractRaw(
   // 5. PowerPoint .pptx → "## Slide N" + body + speaker notes for each slide (ooxml.ts)
   if (mimeType.includes('presentationml')) {
     const { pptxText } = await import('./ooxml.js');
-    const buffer = await downloadBuffer(drive, fileId);
+    const buffer = await src.buffer();
     return { text: pptxText(buffer), method: 'pptx→ooxml' };
   }
 
   // 6. Excel .xlsx → SheetJS (csv per sheet)
   if (mimeType.includes('spreadsheetml')) {
-    return { text: await workbookText(await downloadBuffer(drive, fileId)), method: 'xlsx→sheetjs' };
+    return { text: await workbookText(await src.buffer()), method: 'xlsx→sheetjs' };
   }
 
   // 7. Image → Mathpix OCR (v3/text, immediate)
   if (mimeType.startsWith('image/')) {
     if (!ocr) return { text: '', method: 'image (OCR off)', needsOcr: true };
-    const buffer = await downloadBuffer(drive, fileId);
+    const buffer = await src.buffer();
     const { mathpixImageToMarkdown } = await import('./mathpix.js');
     const md = await mathpixImageToMarkdown(buffer, mimeType);
     return { text: md, method: 'image→mathpix' };
@@ -167,4 +178,37 @@ async function extractRaw(
 
   // 8. Unsupported
   return { text: '', method: `unsupported:${mimeType}`, needsOcr: true };
+}
+
+/** File extension → the MIME type the extractor understands. Extensions not listed are not indexed. */
+const MIME_BY_EXTENSION: Record<string, string> = {
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  mdx: 'text/markdown',
+  txt: 'text/plain',
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+};
+
+/** The MIME type for a local file name, or null when the format is not supported. */
+export function mimeForFileName(name: string): string | null {
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  return MIME_BY_EXTENSION[ext] ?? null;
+}
+
+/**
+ * Extraction + cleaning for a file on disk (local folder sources). OCR is off unless asked for: a folder scan must
+ * never start a paid job on its own.
+ */
+export async function extractLocalFile(path: string, mimeType: string, opts: { ocr?: boolean } = {}): Promise<ExtractResult> {
+  const { readFile } = await import('node:fs/promises');
+  const { mathpixConfigured } = await import('./mathpix.js');
+  const raw = await extractBytes(
+    mimeType,
+    { text: () => readFile(path, 'utf8'), buffer: () => readFile(path) },
+    opts.ocr === true && mathpixConfigured(),
+  );
+  return { ...raw, text: cleanExtractedText(raw.text) };
 }

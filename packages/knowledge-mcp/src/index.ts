@@ -16,7 +16,7 @@ export type {
 export { loadPlugins } from './plugin/load.js';
 export { Registry } from './plugin/registry.js';
 export { run, type RunOptions } from './run.js';
-export { builtinPlugins, drivePlugin, slackPlugin, githubPlugin, railwayPlugin } from './plugins/index.js';
+export { builtinPlugins, knowledgePlugin, drivePlugin, slackPlugin, githubPlugin, railwayPlugin } from './plugins/index.js';
 export { getAuth, getAuthMaybe } from './core/context.js';
 export { getConfig } from './core/config.js';
 export { getStore } from './store/index.js';

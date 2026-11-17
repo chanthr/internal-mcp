@@ -37,10 +37,16 @@
       "cols": 2,
       "tiles": [
         {
+          "icon": "search",
+          "title": "Knowledge",
+          "tag": "knowledge",
+          "desc": "One search over local folders and Drive. Works by keywords with no key. An embedding model adds search by meaning."
+        },
+        {
           "icon": "folder-search",
           "title": "Google Drive",
           "tag": "drive",
-          "desc": "Search, read and list files. Semantic search over a Qdrant index with OpenAI embeddings."
+          "desc": "Search, read and list files. Documents shared with the service account join the knowledge index."
         },
         {
           "icon": "slack",

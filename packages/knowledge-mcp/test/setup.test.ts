@@ -100,7 +100,7 @@ test('checks: each one says what it found, or what to fix', async () => {
 test('wizard: a rejected token is retried, skipped services write nothing, the admin gets a key', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
   writeFileSync(join(dir, '.env'), 'PORT=9000\n');
-  const s = scripted([
+  const s = scripted(['', 
     'slack, github, railway', // which services
     'bad-token', // slack: rejected
     'good-bot', // slack: accepted
@@ -134,7 +134,7 @@ test('wizard: a rejected token is retried, skipped services write nothing, the a
 
 test('wizard: nothing picked saves nothing and says how to come back', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
-  const s = scripted(['']);
+  const s = scripted(['', '']);
   const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
   assert.deepEqual(r, { envWritten: [], configWritten: false, connected: [], adminEmail: null });
   assert.match(s.said.join('\n'), /Nothing to save[\s\S]*Run `knowledge-mcp setup` again any time/);
@@ -191,7 +191,7 @@ test('gcloud: creates the account once, reuses an existing one, and explains a b
 test('wizard + gcloud: shows the commands, creates nothing without a yes, and falls back to a key file', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
   const cli = fakeCli();
-  const s = scripted([
+  const s = scripted(['', 
     'drive', // which services
     '1', // create with gcloud
     '2', // project number → acme-lab
@@ -211,7 +211,7 @@ test('wizard + gcloud: shows the commands, creates nothing without a yes, and fa
 
 test('wizard + gcloud: a signed-out gcloud is explained, then the key file path is asked', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
-  const s = scripted(['1', '1', '', '']);
+  const s = scripted(['', '1', '1', '', '']);
   await runSetup(s.io, { dir, canRunClient: false, exec: fakeCli({ account: '' }).exec, retryDelayMs: 0 });
   const text = s.said.join('\n');
   assert.match(text, /gcloud is not signed in[\s\S]*gcloud auth login/);
@@ -220,7 +220,7 @@ test('wizard + gcloud: a signed-out gcloud is explained, then the key file path 
 
 test('wizard + gh: the gh login is offered with a warning and only used after a yes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
-  const s = scripted(['github', 'y']);
+  const s = scripted(['', 'github', 'y']);
   const r = await runSetup(s.io, { dir, canRunClient: false, exec: fakeCli({ gh: 'good-gh-token' }).exec, endpoints: { github: `${base}/github` } });
   assert.deepEqual(r.envWritten, ['GITHUB_PAT']);
   assert.match(readFileSync(join(dir, '.env'), 'utf8'), /GITHUB_PAT=good-gh-token/);
@@ -228,7 +228,7 @@ test('wizard + gh: the gh login is offered with a warning and only used after a 
   assert.match(text, /can do everything your gh login can/);
   assert.ok(!text.includes('good-gh-token'));
 
-  const s2 = scripted(['github', 'n', '']);
+  const s2 = scripted(['', 'github', 'n', '']);
   const r2 = await runSetup(s2.io, { dir: mkdtempSync(join(tmpdir(), 'kmcp-setup-')), canRunClient: false, exec: fakeCli({ gh: 'good-gh-token' }).exec, endpoints: { github: `${base}/github` } });
   assert.deepEqual(r2.envWritten, []);
 });
@@ -338,13 +338,13 @@ function fakeKeyFile(dir: string): string {
 test('wizard + Drive: owners are listed and must be typed, a public mail domain is refused', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
   const key = fakeKeyFile(dir);
-  const s = scripted([
+  const s = scripted(['', 
     'drive',
     key, // key file path (no gcloud)
     'acme.com', // own domain: typed, nothing is guessed from what is shared
     'gmail.com, ann@gmail.com', // extra: a public mail domain is refused, the address is accepted
     '', // exclude folders
-    '3', // semantic search: skip
+    '3', // search by meaning: not now
   ]);
   const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools, endpoints: { drive: `${gbase}/drive` } });
   const text = s.said.join('\n');
@@ -361,7 +361,7 @@ test('wizard + Drive: owners are listed and must be typed, a public mail domain 
 
 test('wizard + Drive: pressing Enter everywhere never trusts a stranger', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
-  const s = scripted(['drive', fakeKeyFile(dir), '', '', '', '3']);
+  const s = scripted(['', 'drive', fakeKeyFile(dir), '', '', '', '3']);
   const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools, endpoints: { drive: `${gbase}/drive` } });
   assert.equal(r.configWritten, false);
   assert.match(s.said.join('\n'), /No owner is trusted, so shared documents stay hidden/);
@@ -386,4 +386,67 @@ test('setup trust and setup check: hidden items are counted with their owners, e
   const afterTrust = collect();
   await runSetupCommand(['check'], { dir, out: afterTrust.out, env, endpoints: { drive: `${gbase}/drive` } });
   assert.match(afterTrust.lines.join('\n'), /3 shared items, 1 hidden because the owner is not trusted \(mallory@evil\.example\)/);
+});
+
+// ── Local folders: the path that needs no account and no key ──
+import { mkdirSync } from 'node:fs';
+function docsFolder(): string {
+  const d = mkdtempSync(join(tmpdir(), 'kmcp-folder-'));
+  mkdirSync(join(d, 'sub'));
+  mkdirSync(join(d, 'node_modules'));
+  writeFileSync(join(d, 'a.md'), '# A');
+  writeFileSync(join(d, 'sub', 'b.pdf'), 'x');
+  writeFileSync(join(d, 'sub', 'c.png'), 'x'); // not a document
+  writeFileSync(join(d, 'node_modules', 'd.md'), '# D'); // build folder
+  return d;
+}
+
+test('wizard: a folder is asked first, counted, and saved; search by meaning is then offered', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const folder = docsFolder();
+  // a wrong path, then the folder (quoted, as dragging it into a terminal gives), no services, no model
+  const s = scripted([join(folder, 'nope'), `'${folder}'`, '', '3']);
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
+  const text = s.said.join('\n');
+  assert.match(text, /nope is not a folder/);
+  assert.match(text, /✓ .*: 2 documents to index/);
+  assert.match(text, /Search by meaning \(optional\)[\s\S]*Search already works by keywords/);
+  assert.deepEqual(r.connected, ['local folder']);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).folders, [{ path: folder }]);
+  assert.equal(r.envWritten.length, 0); // nothing secret was needed
+});
+
+test('setup folder: adds a folder once, validates it, and setup check reports it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
+  const folder = docsFolder();
+  const o = collect();
+  assert.equal(await runSetupCommand(['folder', folder, '--name', 'handbook', '--source', 'docs'], { dir, out: o.out }), 0);
+  assert.equal(await runSetupCommand(['folder', folder], { dir, out: o.out }), 0); // again: no duplicate
+  assert.equal(await runSetupCommand(['folder', join(folder, 'missing')], { dir, out: o.out }), 1);
+  assert.equal(await runSetupCommand(['folder', folder, '--name', 'a/b'], { dir, out: o.out }), 1);
+  assert.equal(await runSetupCommand(['folder'], { dir, out: o.out }), 1);
+  assert.match(o.lines.join('\n'), /added: 2 documents[\s\S]*already listed[\s\S]*is not a folder/);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).folders, [{ path: folder, name: 'handbook', source: 'docs' }]);
+
+  const c = collect();
+  assert.equal(await runSetupCommand(['check'], { dir, out: c.out, env: {} }), 0);
+  assert.match(c.lines.join('\n'), /✓ folder\s+.* — 2 documents/);
+  assert.match(c.lines.join('\n'), /search works by keywords/);
+  writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ folders: [{ path: join(folder, 'gone') }] }));
+  const bad = collect();
+  assert.equal(await runSetupCommand(['check'], { dir, out: bad.out, env: {} }), 1);
+  assert.match(bad.lines.join('\n'), /✗ folder\s+.*does not exist or is not a folder/);
+});
+
+test('wizard, a later run: a folder set up before is kept, and the model question is still asked', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const folder = docsFolder();
+  writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ folders: [{ path: folder }] }));
+  const s = scripted(['', '', '3']); // keep the folder list, no services, no model
+  const r = await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
+  const text = s.said.join('\n');
+  assert.match(text, new RegExp(`Indexed now: ${folder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(text, /Search by meaning \(optional\)/);
+  assert.equal(r.configWritten, false);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).folders, [{ path: folder }]);
 });

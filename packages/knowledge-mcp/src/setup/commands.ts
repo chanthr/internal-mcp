@@ -2,6 +2,8 @@
  * Setup commands that ask no questions, for scripts and for AI agents that set the server up on someone's behalf.
  *
  *   knowledge-mcp setup check                          verify every configured service live, exit 1 on a failure
+ *   knowledge-mcp setup folder <path> [--name N] [--source L]
+ *                                                      index a local folder of documents (no account, no key)
  *   knowledge-mcp setup drive --gcloud [--project ID] [--yes]
  *                                                      create the Drive service account and key with gcloud
  *   knowledge-mcp setup drive --key <file>             use an existing key file
@@ -15,11 +17,12 @@
  * or straight into .env by the person who owns it. `setup check` then tells whether it works.
  */
 import { parseArgs } from 'node:util';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDrive, checkDriveCredentials, checkEmbedding, checkGithub, checkRailway, checkSlack } from './checks.js';
 import { updateEnvFile } from './envfile.js';
+import { countDocuments } from './wizard.js';
 import {
   createDriveServiceAccount,
   gcloudAccount,
@@ -43,6 +46,7 @@ export interface CommandContext {
 
 export const SETUP_USAGE = `setup                      guided setup (asks questions; needs a terminal)
        setup check                verify every configured service live
+       setup folder <path> [--name N] [--source LABEL]
        setup drive --gcloud [--project ID] [--yes]
        setup drive --key <file>
        setup trust <email-or-domain>...
@@ -78,6 +82,43 @@ function addTrusted(dir: string, entries: string[]): string[] {
     writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
   }
   return added;
+}
+
+/** Folders listed in mcp.config.json, with absolute paths. */
+function configuredFolders(dir: string): Array<{ path: string; name?: string }> {
+  const list: unknown = readConfigFile(dir).folders;
+  return (Array.isArray(list) ? list : [])
+    .filter((f): f is { path: string; name?: string } => !!f && typeof (f as { path?: unknown }).path === 'string')
+    .map((f) => ({ ...f, path: resolve(dir, f.path) }));
+}
+
+async function folder(argv: string[], ctx: CommandContext): Promise<number> {
+  const { values, positionals } = parseArgs({ args: argv, options: { name: { type: 'string' }, source: { type: 'string' } }, allowPositionals: true });
+  if (positionals.length !== 1) throw new Error('setup folder needs one path');
+  const path = resolve(ctx.dir, positionals[0]);
+  let isDir = false;
+  try {
+    isDir = statSync(path).isDirectory();
+  } catch {
+    /* does not exist */
+  }
+  if (!isDir) throw new Error(`${path} is not a folder`);
+  if (values.name && !/^[^/\\]{1,64}$/.test(values.name)) throw new Error('--name must not contain a slash (max 64 characters)');
+  if (values.source && !/^[a-z][a-z0-9_-]{0,31}$/.test(values.source)) throw new Error('--source must be lowercase letters, digits, dashes or underscores, starting with a letter');
+  const config = readConfigFile(ctx.dir);
+  const list: Array<{ path: string; name?: string; source?: string }> = Array.isArray(config.folders) ? config.folders : [];
+  const n = countDocuments(path);
+  if (list.some((f) => resolve(ctx.dir, f.path) === path)) {
+    ctx.out(`· ${path} is already listed (${n} documents).`);
+    return 0;
+  }
+  list.push({ path, ...(values.name ? { name: values.name } : {}), ...(values.source ? { source: values.source } : {}) });
+  config.folders = list;
+  writeFileSync(join(ctx.dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  ctx.out(`✓ ${path} added: ${n} document${n === 1 ? '' : 's'} (Markdown, text, PDF, Word, PowerPoint, Excel). Saved to ${join(ctx.dir, 'mcp.config.json')}.`);
+  ctx.out('  The server indexes it the next time it starts. To index it now: knowledge-mcp knowledge scan');
+  ctx.out('  Search works by keywords without any key. An embedding model (setup embeddings) adds search by meaning.');
+  return 0;
 }
 
 async function trust(argv: string[], ctx: CommandContext): Promise<number> {
@@ -125,6 +166,20 @@ async function check(ctx: CommandContext): Promise<number> {
     );
   };
 
+  for (const f of configuredFolders(ctx.dir)) {
+    await run('folder', async () => {
+      let isDir = false;
+      try {
+        isDir = statSync(f.path).isDirectory();
+      } catch {
+        /* does not exist */
+      }
+      if (!isDir) throw new Error(`${f.path} does not exist or is not a folder`);
+      const n = countDocuments(f.path);
+      return `${f.path} — ${n} document${n === 1 ? '' : 's'}`;
+    });
+  }
+
   if (has('GOOGLE_SERVICE_ACCOUNT_KEY')) {
     await run('drive', async () => driveSummary(await checkDriveCredentials(env.GOOGLE_SERVICE_ACCOUNT_KEY!, 'GOOGLE_SERVICE_ACCOUNT_KEY', { apiBase: ctx.endpoints?.drive })));
   } else if (has('GOOGLE_APPLICATION_CREDENTIALS')) {
@@ -140,7 +195,7 @@ async function check(ctx: CommandContext): Promise<number> {
       }
       return `${r.model} (${r.dim} dimensions)`;
     });
-  } else ctx.out('· embeddings  not configured (semantic search is off; keyword search and reading work)');
+  } else ctx.out('· embeddings  not configured (search works by keywords; an embedding model adds search by meaning)');
 
   if (has('SLACK_BOT_TOKEN')) await run('slack', async () => { const r = await checkSlack(env.SLACK_BOT_TOKEN!.trim(), { apiBase: ctx.endpoints?.slack }); return `${r.team} as ${r.user}`; });
   else ctx.out('· slack       not configured');
@@ -220,7 +275,7 @@ async function drive(argv: string[], ctx: CommandContext): Promise<number> {
   }
   const own = trustEntryFor(account);
   if (own && addTrusted(ctx.dir, [own]).length) ctx.out(`✓ Documents owned by ${own} are trusted (the account that created this). Add others with: knowledge-mcp setup trust <email-or-domain>`);
-  ctx.out(`Next: share a Drive folder or document with ${r.email} (Viewer). Keyword search sees it at once; semantic search after the next sync.`);
+  ctx.out(`Next: share a Drive folder or document with ${r.email} (Viewer). search_drive sees it at once; search_knowledge after the next sync.`);
   return 0;
 }
 
@@ -258,6 +313,7 @@ export async function runSetupCommand(argv: string[], ctx: CommandContext): Prom
     if (sub === 'check') return (await check(ctx)) > 0 ? 1 : 0;
     if (sub === 'drive') return await drive(rest, ctx);
     if (sub === 'trust') return await trust(rest, ctx);
+    if (sub === 'folder') return await folder(rest, ctx);
     if (sub === 'github') return await github(rest, ctx);
     if (sub === 'embeddings') return await embeddings(rest, ctx);
   } catch (e) {

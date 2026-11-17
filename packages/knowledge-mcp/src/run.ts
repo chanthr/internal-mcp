@@ -48,6 +48,7 @@ Usage: knowledge-mcp <command> [options]
 
   setup                               Guided setup: connect services, check them, write .env and the config
   setup check                         Verify every configured service live (exit 1 on a failure)
+  setup folder <path>                 Index a local folder of documents (no account, no key)
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
   setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
                                       Setup steps that ask nothing (for scripts and AI agents)
@@ -214,6 +215,26 @@ async function cmdDoctor(registry: Registry): Promise<void> {
     process.exitCode = 1;
   }
   out(`vectors   ${process.env.QDRANT_URL?.trim() ? `qdrant — ${new URL(process.env.QDRANT_URL).host}` : 'built-in file (set QDRANT_URL to use Qdrant)'}`);
+  try {
+    const { getLocalIndex, vectorProblem, DRIVE_COLLECTION } = await import('./plugins/drive/qdrant.js');
+    const { embeddingsConfigured } = await import('./plugins/drive/embeddings.js');
+    const local = await getLocalIndex();
+    if (local) {
+      const s = await local.stats(DRIVE_COLLECTION);
+      const problem = embeddingsConfigured() ? await vectorProblem() : null;
+      const how = !embeddingsConfigured()
+        ? 'keywords (add an embedding model for search by meaning)'
+        : problem
+          ? 'keywords'
+          : s.withVectors < s.chunks
+            ? `keywords + meaning (${s.chunks - s.withVectors} passages still waiting for vectors)`
+            : 'keywords + meaning';
+      out(`index     ${s.documents} documents, ${s.chunks} passages · search by ${how}`);
+      if (problem) out(`          search by meaning is off: ${problem}`);
+    }
+  } catch (e) {
+    out(`index     FAILED: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (isOAuthConfigured()) out(`oauth     on — issuer ${OAUTH_ISSUER_URL}`);
   else if (oauthAttempted()) out(`oauth     off — missing ${oauthConfigProblems().join(', ')}`);
   else out('oauth     off (API keys only)');
@@ -263,7 +284,7 @@ async function cmdSetup(argv: string[]): Promise<void> {
   if (!process.stdin.isTTY) {
     throw new UsageError(
       'setup asks questions, so it needs a terminal. Without one use the commands that ask nothing: ' +
-        'setup check | setup drive --gcloud | setup drive --key <file> | setup trust <owner> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
+        'setup check | setup folder <path> | setup drive --gcloud | setup drive --key <file> | setup trust <owner> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
     );
   }
   const { runSetup } = await import('./setup/wizard.js');

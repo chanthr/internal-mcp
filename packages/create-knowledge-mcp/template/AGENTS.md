@@ -26,7 +26,21 @@ npm run setup -- check
 Each line is one service: `✓` works, `✗` is configured but failing (the message says why), `·` is not configured.
 Ask the person which services they want. They do not need all of them.
 
-## Step 2: Google Drive
+## Step 2: documents on this machine (fastest)
+
+If the person has a folder of documents (Markdown, text, PDF, Word, PowerPoint, Excel), this alone gives them
+search. It needs no account and no key.
+
+```bash
+npm run setup -- folder /absolute/path/to/folder      # optional: --name handbook --source handbook
+npm run knowledge -- scan                              # index it now (the server also does this when it starts)
+```
+
+Ask which folder. Do not pick one yourself, and do not add a home directory or a whole disk: everything under the
+folder becomes searchable by everyone who can call the server. Search works by keywords. Step 4 adds search by
+meaning.
+
+## Step 3: Google Drive
 
 This needs the gcloud CLI and a Google Cloud project.
 
@@ -89,18 +103,21 @@ If the person already has a key file: `npm run setup -- drive --key /path/to/key
 | lacks permission | Their account cannot manage that project | Pick a project they own |
 | needs a fresh sign-in | The gcloud login expired | The person runs `gcloud auth login` again |
 
-## Step 3: semantic search (optional)
+## Step 4: search by meaning (optional)
 
-Keyword search and reading work without this. Search by meaning needs an embedding model. Vectors are stored in a
-local file, and the server builds the index by itself the first time it starts.
+Search already works by keywords. An embedding model also finds documents that use other words than the question.
+It can be added at any time: passages that are already indexed get their vectors without the documents being read
+again. With a model set, passage text is sent to that model's endpoint; say so before turning it on.
 
 | The person has | What to do |
 | --- | --- |
 | A local model server (Ollama, LM Studio) | `npm run setup -- embeddings --base-url http://localhost:11434/v1 --model bge-m3`. The vector size is detected |
-| An OpenAI API key | They run `npm run setup` in their terminal, pick Google Drive, and enter the key at the semantic search question |
+| An OpenAI API key | They run `npm run setup` in their terminal and enter the key at the "Search by meaning" question |
 | Neither | Skip it. It can be added later |
 
-## Step 4: GitHub (optional)
+After changing to another model, run `npm run knowledge -- reembed`. It makes new vectors from the stored text.
+
+## Step 5: GitHub (optional)
 
 ```bash
 gh auth status                   # signed in?
@@ -111,7 +128,7 @@ This reuses the gh CLI login. Tell the person that this token can do everything 
 fine-grained read-only token is safer for a server other people use. If they prefer that, or gh is not signed
 in, they run `npm run setup` in their terminal and enter a token there.
 
-## Step 5: Slack and Railway (optional)
+## Step 6: Slack and Railway (optional)
 
 These need a token the person creates in a web console, so they run `npm run setup` in their own terminal and
 pick the service. The wizard says where to get the token and checks it as they enter it.
@@ -121,16 +138,16 @@ pick the service. The wizard says where to get the token and checks it as they e
 | Slack | api.slack.com/apps → their app → OAuth & Permissions → Bot User OAuth Token (`xoxb-`). Scopes: `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `files:read`. Message search also needs a user token (`xoxp-`) with `search:read` |
 | Railway | railway.com → Account Settings → Tokens |
 
-## Step 6: keep sensitive folders out (optional)
+## Step 7: keep sensitive folders out (optional)
 
-Ask whether any Drive folders must stay out of search (HR, contracts, personal data). Put the folder names in
+Ask whether any folders, in Drive or on this machine, must stay out of search (HR, contracts, personal data). Put the folder names in
 `mcp.config.json`. This file has no secrets and you may edit it:
 
 ```json
 { "drive": { "excludeFolders": ["HR", "Contracts"] } }
 ```
 
-## Step 7: connect and verify
+## Step 8: connect and verify
 
 ```bash
 npm run setup -- check           # every configured line should be ✓

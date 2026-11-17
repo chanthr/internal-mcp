@@ -184,6 +184,6 @@ test('.env.example has no trailing comments (docker --env-file keeps them in the
 
 test('built-in plugins load with no credentials and stay off', () => {
   const r = new Registry(builtinPlugins);
-  assert.deepEqual(r.status().map((s) => [s.id, s.enabled]), [['drive', false], ['slack', false], ['github', false], ['railway', false]]);
+  assert.deepEqual(r.status().map((s) => [s.id, s.enabled]), [['knowledge', false], ['drive', false], ['slack', false], ['github', false], ['railway', false]]);
   assert.deepEqual(r.listTools(pingTool).map((t) => t.name), ['ping']);
 });

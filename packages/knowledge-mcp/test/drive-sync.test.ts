@@ -56,16 +56,16 @@ test('customer folders come from config (Clients, Customers, 고객사 by defaul
   assert.equal(deriveBizMeta('Clients/Acme/a.md', 'dev').doc_customer, null);
 });
 
-test('semantic_search_drive: no company-specific filters left in the schema', async () => {
-  const { semanticSearchDriveTool } = await import('../src/plugins/drive/tools/semantic_search_drive.js');
+test('search_knowledge: no company-specific filters left in the schema', async () => {
+  const { searchKnowledgeTool } = await import('../src/plugins/knowledge/tools/search_knowledge.js');
   const { inputJsonSchema } = await import('../src/plugin/result.js');
-  const props = inputJsonSchema('semantic_search_drive', semanticSearchDriveTool.input).properties as Record<string, { type?: string; enum?: unknown }>;
+  const props = inputJsonSchema('search_knowledge', searchKnowledgeTool.input).properties as Record<string, { type?: string; enum?: unknown }>;
   assert.equal('fileType' in props, false);
   assert.equal('docTier' in props, false);
   assert.equal(props.docStatus?.type, 'string');
   assert.equal(props.docStatus?.enum, undefined);
   assert.equal(props.docType?.enum, undefined);
-  assert.doesNotMatch(semanticSearchDriveTool.description, /[가-힣]/);
+  assert.doesNotMatch(searchKnowledgeTool.description, /[가-힣]/);
 });
 
 test('folder change: indexed paths are rechecked', { skip: qdrantUrl ? false : 'set QDRANT_TEST_URL' }, async () => {

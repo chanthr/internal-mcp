@@ -10,7 +10,7 @@
  * this package. Only nine endpoints are used, so calling them directly is lighter. Method names and return shapes
  * are kept the same as that library.
  */
-import { EMBEDDING_DIM } from './embeddings.js';
+import { EMBEDDING_DIM, EMBEDDING_MODEL } from './embeddings.js';
 import { getConfig } from '../../core/config.js';
 
 export type PointId = string | number;
@@ -153,6 +153,15 @@ export function vectorStoreKind(): 'qdrant' | 'built-in' {
   return process.env.QDRANT_URL?.trim() ? 'qdrant' : 'built-in';
 }
 
+/**
+ * The built-in index when it is the store in use, otherwise null (Qdrant). Keyword search and vectors added after
+ * indexing exist only there.
+ */
+export async function getLocalIndex(): Promise<import('./local_vectors.js').LocalVectorClient | null> {
+  if (vectorStoreKind() !== 'built-in') return null;
+  return (await import('./local_vectors.js')).getLocalVectorClient();
+}
+
 /** The vector store (one per process). The name is kept from when Qdrant was the only store. */
 export async function getQdrantClient(): Promise<VectorClient> {
   const url = process.env.QDRANT_URL?.trim();
@@ -160,6 +169,31 @@ export async function getQdrantClient(): Promise<VectorClient> {
   if (_client) return _client;
   _client = new QdrantClient(url, process.env.QDRANT_API_KEY || undefined);
   return _client;
+}
+
+/**
+ * Documents from sources other than Drive carry a scheme in their id ("local:<folder>/<path>"). A Drive file id is
+ * letters, digits, "-" and "_", never a colon. Drive code that walks the whole index (path refresh, cleanup, the
+ * first-index check) must look only at Drive documents, or it would treat the others as files gone from Drive.
+ */
+export const isDriveDocId = (id: string): boolean => id.length > 0 && !id.includes(':');
+
+/**
+ * Why the stored vectors cannot be used with the configured embedding model, or null when they can (built-in index).
+ * Vectors from two models must not be mixed: the scores would be meaningless without any error. While this returns
+ * a reason, indexing stores text only and search answers by keywords.
+ */
+export async function vectorProblem(): Promise<string | null> {
+  const local = await getLocalIndex();
+  if (!local) return null;
+  const s = await local.embeddingState(DRIVE_COLLECTION);
+  if (!s || s.vectors === 0) return null;
+  if (s.dim === EMBEDDING_DIM && (!s.model || s.model === EMBEDDING_MODEL)) return null;
+  return (
+    `the index holds vectors made by ${s.model ?? 'another embedding model'} (${s.dim} dimensions), but ${EMBEDDING_MODEL} ` +
+    `(${EMBEDDING_DIM} dimensions) is configured. Run "knowledge-mcp knowledge reembed" to make new vectors from the stored text ` +
+    '(no document is read again), or set the previous model back'
+  );
 }
 
 /**
@@ -172,6 +206,14 @@ export async function ensureCollection(): Promise<void> {
   const exists = collections.collections.some((c) => c.name === DRIVE_COLLECTION);
 
   if (exists) {
+    const local = await getLocalIndex();
+    if (local) {
+      // An index that holds no vectors yet (keyword search only) takes the size of the model configured now.
+      // One that holds vectors of another model stays usable by keywords; vectorProblem() says what to do.
+      const s = await local.embeddingState(DRIVE_COLLECTION);
+      if (s && s.vectors === 0 && s.dim !== EMBEDDING_DIM) await local.adoptDimension(DRIVE_COLLECTION, EMBEDDING_DIM);
+      return;
+    }
     // A collection built with another embedding model has a different vector size. Writing to it would fail on
     // every point with an unclear error, so stop here and say how to fix it.
     const size = (await client.getCollection(DRIVE_COLLECTION)).config?.params?.vectors?.size;

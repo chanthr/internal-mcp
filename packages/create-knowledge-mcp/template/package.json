@@ -11,6 +11,7 @@
     "keys": "tsx src/server.ts keys",
     "users": "tsx src/server.ts users",
     "doctor": "tsx src/server.ts doctor",
+    "knowledge": "tsx src/server.ts knowledge",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
