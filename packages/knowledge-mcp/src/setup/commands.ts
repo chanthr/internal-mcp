@@ -29,6 +29,7 @@ import { ConnectionsSchema, DataToolsSchema, dataConfigProblems, envRefs, explor
 import { checkConnection, closeDataConnections } from '../connections/index.js';
 import { formatValidationError } from '../plugin/result.js';
 import { countDocuments } from './wizard.js';
+import { cli } from '../core/invocation.js';
 import {
   createDriveServiceAccount,
   gcloudAccount,
@@ -128,7 +129,7 @@ async function folder(argv: string[], ctx: CommandContext): Promise<number> {
   config.folders = list;
   writeFileSync(join(ctx.dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
   ctx.out(`✓ ${path} added: ${n} document${n === 1 ? '' : 's'} (Markdown, text, PDF, Word, PowerPoint, Excel). Saved to ${join(ctx.dir, 'mcp.config.json')}.`);
-  ctx.out('  The server indexes it the next time it starts. To index it now: knowledge-mcp knowledge scan');
+  ctx.out(`  The server indexes it the next time it starts. To index it now: ${cli('knowledge scan')}`);
   ctx.out('  Search works by keywords without any key. An embedding model (setup embeddings) adds search by meaning.');
   return 0;
 }
@@ -173,7 +174,7 @@ async function check(ctx: CommandContext): Promise<number> {
       (d.shared.length === 0 && d.email ? `. Share a folder or document with ${d.email} to make it searchable` : '') +
       (hidden.length
         ? `, ${hidden.length} hidden because the owner is not trusted (${who.slice(0, 4).join(', ')}${who.length > 4 ? ' …' : ''}). ` +
-          `For the owners that are yours: knowledge-mcp setup trust ${[...new Set(who.map((w) => (w.startsWith('drive:') ? w : trustEntryFor(w) ?? w)))].slice(0, 4).join(' ')}`
+          `For the owners that are yours: ${cli('setup trust')} ${[...new Set(who.map((w) => (w.startsWith('drive:') ? w : trustEntryFor(w) ?? w)))].slice(0, 4).join(' ')}`
         : '')
     );
   };
@@ -242,7 +243,7 @@ async function check(ctx: CommandContext): Promise<number> {
   if (has('RAILWAY_TOKEN')) await run('railway', async () => (await checkRailway(env.RAILWAY_TOKEN!.trim(), { apiBase: ctx.endpoints?.railway })).who);
   else ctx.out('· railway     not configured');
 
-  if (checked === 0) ctx.out('Nothing is configured yet. Run `knowledge-mcp setup`.');
+  if (checked === 0) ctx.out(`Nothing is configured yet. Run \`${cli('setup')}\`.`);
   return failed;
 }
 
@@ -264,7 +265,7 @@ async function drive(argv: string[], ctx: CommandContext): Promise<number> {
     const untrusted = owners.filter((o) => !trustedList(ctx).includes(o));
     if (untrusted.length) {
       ctx.out(`  Shared documents are shown only from trusted owners. What is shared now belongs to: ${untrusted.join(', ')}.`);
-      ctx.out(`  Ask the person whether these are theirs, then run: knowledge-mcp setup trust ${untrusted.join(' ')}`);
+      ctx.out(`  Ask the person whether these are theirs, then run: ${cli('setup trust')} ${untrusted.join(' ')}`);
     }
     return 0;
   }
@@ -304,19 +305,19 @@ async function drive(argv: string[], ctx: CommandContext): Promise<number> {
       ctx.out(`✓ The key works. ${d.shared.length} item${d.shared.length === 1 ? '' : 's'} shared with it so far.`);
       break;
     } catch (e) {
-      if (attempt === 6) ctx.out(`· The key is saved but does not answer yet (${msg(e)}). Run \`knowledge-mcp setup check\` in a minute.`);
+      if (attempt === 6) ctx.out(`· The key is saved but does not answer yet (${msg(e)}). Run \`${cli('setup check')}\` in a minute.`);
       else await new Promise((res) => setTimeout(res, ctx.retryDelayMs ?? 4000));
     }
   }
   const own = trustEntryFor(account);
-  if (own && addTrusted(ctx.dir, [own]).length) ctx.out(`✓ Documents owned by ${own} are trusted (the account that created this). Add others with: knowledge-mcp setup trust <email-or-domain>`);
+  if (own && addTrusted(ctx.dir, [own]).length) ctx.out(`✓ Documents owned by ${own} are trusted (the account that created this). Add others with: ${cli('setup trust <email-or-domain>')}`);
   ctx.out(`Next: share a Drive folder or document with ${r.email} (Viewer). search_drive sees it at once; search_knowledge after the next sync.`);
   return 0;
 }
 
 async function github(argv: string[], ctx: CommandContext): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { 'from-gh': { type: 'boolean' } } });
-  if (!values['from-gh']) throw new Error('setup github needs --from-gh (a token you type goes through `knowledge-mcp setup`)');
+  if (!values['from-gh']) throw new Error(`setup github needs --from-gh (a token you type goes through \`${cli('setup')}\`)`);
   const exec = ctx.exec ?? systemExec;
   const token = hasTool(exec, 'gh') ? ghToken(exec) : null;
   if (!token) {
@@ -371,7 +372,7 @@ function pairs(list: string[] | undefined, sep: string, flag: string): Record<st
 function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
   for (const [k, v] of Object.entries(values)) {
     if (/authorization|api[-_]?key|token|secret|password|cookie/i.test(k) && !/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(v)) {
-      throw new Error(`${what} "${k}" looks like a secret. Write its value as \${ENV_NAME} (for example ${k}: Bearer \${API_TOKEN}) and put the value in .env with: knowledge-mcp setup secret API_TOKEN`);
+      throw new Error(`${what} "${k}" looks like a secret. Write its value as \${ENV_NAME} (for example ${k}: Bearer \${API_TOKEN}) and put the value in .env with: ${cli('setup secret API_TOKEN')}`);
     }
   }
 }
@@ -438,17 +439,17 @@ async function connection(argv: string[], ctx: CommandContext): Promise<number> 
         ? [...new Set(Object.values({ ...(conn.headers as object), ...(conn.query as object) }).map(String).flatMap(envRefs))]
         : [];
   for (const n of needs.filter((x) => !env[x]?.trim())) {
-    ctx.out(`  ${n} is not set. The person who owns it types it into .env, unseen, with: knowledge-mcp setup secret ${n}`);
+    ctx.out(`  ${n} is not set. The person who owns it types it into .env, unseen, with: ${cli('setup secret')} ${n}`);
   }
   if (conn.type === 'postgres') ctx.out('  Use a database user that can only read, and only what everyone using this server may see.');
   if (conn.explore) {
     ctx.out(`  explore is on: the assistant can run any read-only query through ${exploreToolNames(name).query}.`);
   } else if (conn.type !== 'http') {
-    ctx.out(`  No tools yet. Declare them under "tools" in mcp.config.json, or run this again with --explore. Tables: knowledge-mcp ${name} tables`);
+    ctx.out(`  No tools yet. Declare them under "tools" in mcp.config.json, or run this again with --explore. Tables: ${cli(`${name} tables`)}`);
   } else {
     ctx.out('  No tools yet. Declare them under "tools" in mcp.config.json (one API request each).');
   }
-  ctx.out('  Then: knowledge-mcp setup check');
+  ctx.out(`  Then: ${cli('setup check')}`);
   return 0;
 }
 
@@ -460,7 +461,7 @@ async function secret(argv: string[], ctx: CommandContext): Promise<number> {
   let close = () => {};
   if (!read) {
     if (!process.stdin.isTTY) {
-      throw new Error(`setup secret asks for the value without showing it, so it needs a terminal. The person who owns the secret runs it themselves: knowledge-mcp setup secret ${name}`);
+      throw new Error(`setup secret asks for the value without showing it, so it needs a terminal. The person who owns the secret runs it themselves: ${cli('setup secret')} ${name}`);
     }
     const { terminalIO } = await import('./terminal.js');
     const io = terminalIO();
@@ -478,7 +479,7 @@ async function secret(argv: string[], ctx: CommandContext): Promise<number> {
     return 1;
   }
   updateEnvFile(join(ctx.dir, '.env'), { [name]: value });
-  ctx.out(`✓ ${name} saved to ${join(ctx.dir, '.env')} (readable by you only). Check it with: knowledge-mcp setup check`);
+  ctx.out(`✓ ${name} saved to ${join(ctx.dir, '.env')} (readable by you only). Check it with: ${cli('setup check')}`);
   return 0;
 }
 

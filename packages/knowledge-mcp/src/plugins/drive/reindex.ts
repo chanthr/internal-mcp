@@ -46,6 +46,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from '
 import { join } from 'path';
 import { dataDir } from '../../core/paths.js';
 import { createLimiter } from '../../core/concurrency.js';
+import { cli } from '../../core/invocation.js';
 
 // Cap on concurrent folder listing calls. Opening subfolders with no limit hits the Drive rate limit (403) when there
 // are thousands of folders.
@@ -238,7 +239,7 @@ async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]>
   } while (pageToken);
   if (untrusted.length) {
     console.log(`[index] ${untrusted.length} shared item(s) left out, owner not in drive.trustedOwners: ${untrusted.slice(0, 5).join('; ')}${untrusted.length > 5 ? ' …' : ''}`);
-    console.log('[index] to include them: knowledge-mcp setup trust <email-or-domain>');
+    console.log(`[index] to include them: ${cli('setup trust <email-or-domain>')}`);
   }
   return out;
 }
@@ -434,7 +435,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       `${useVectors ? `model ${EMBEDDING_MODEL}${cost}` : embeddingsConfigured() ? 'keyword index only (stored vectors are from another model)' : 'keyword index only (no embedding model)'}, ${elapsedSec}s`,
   );
   if (ocrLeftOut > 0) {
-    console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: knowledge-mcp drive reindex (Mathpix is billed per page).`);
+    console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: ${cli('drive reindex')} (Mathpix is billed per page).`);
   }
   // If everything succeeded, clear the checkpoint (keep it if failures remain)
   if (!dryRun && done.size + ocrLeftOut >= allFiles.length) clearCheckpoint();

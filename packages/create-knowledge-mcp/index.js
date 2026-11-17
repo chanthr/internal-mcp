@@ -126,23 +126,31 @@ async function main() {
   // Go straight into the guided setup, so the project is connected and checked before the first start.
   // Only in a terminal: the setup asks questions.
   if (installed && opts.setup && process.stdin.isTTY && process.stdout.isTTY) {
-    const a = (await ask('\nConnect your services now (Drive, Slack, GitHub, Railway)?', 'Y')).toLowerCase();
+    const a = (await ask('\nSet it up now (documents, a database, Drive, Slack, GitHub)?', 'Y')).toLowerCase();
     if (a === 'y' || a === 'yes') {
       console.log('');
       run(pm, ['run', 'setup'], target);
     }
   }
   const tsx = join(target, 'node_modules', '.bin', 'tsx');
+  const steps = [
+    `  cd ${dir}`,
+    ...(installed ? [] : [`  ${pm} install`]),
+    `  ${runScript} setup                                ${dim('# asks what to connect, checks it, writes .env. Run it again any time')}`,
+    `  ${runScript} dev                                  ${dim('# http://localhost:8080/mcp, restarts when a file or the config changes')}`,
+  ];
   console.log(`
 ${bold('Next')}
-  cd ${dir}
-  ${runScript} setup                                ${dim('# connect services: asks, checks, writes .env. Run it again any time')}
-  ${runScript} dev                                  ${dim('# http://localhost:8080/mcp, reloads on save')}
+${steps.join('\n')}
+
+${bold('Nothing to write')}
+  ${runScript} setup -- folder <path>               ${dim('# a folder of documents: searchable right away, no account, no key')}
+  ${runScript} setup                                ${dim('# pick Database: questions about a Postgres database or a SQLite file')}
 
 ${bold('Let an AI agent set it up')}
   Open this folder in Claude Code (or another agent) and say: "set this server up, follow AGENTS.md"
 
-${bold('Add a tool')}
+${bold('Write your own tool')}
   Copy src/plugins/notes.ts to src/plugins/<name>.ts and edit it. Every file there is loaded.
 
 ${bold('Use it from Claude Code (local, no key needed)')}

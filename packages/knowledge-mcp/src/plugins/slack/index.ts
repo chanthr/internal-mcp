@@ -13,6 +13,7 @@ import { slackListChannelsTool } from './tools/slack_list_channels.js';
 import { slackReadChannelTool } from './tools/slack_read_channel.js';
 import { slackFindFilesTool, slackGetFileTool } from './tools/slack_files.js';
 import { slackSearchTool } from './tools/slack_search.js';
+import { cli } from '../../core/invocation.js';
 
 const BOT = 'set SLACK_BOT_TOKEN (xoxb-…)';
 
@@ -44,7 +45,7 @@ async function editChannel(args: string[]): Promise<void> {
     },
   });
   const target = positionals[0]?.replace(/^#/, '');
-  if (!target) throw new Error('usage: knowledge-mcp slack channel <#name|id> [--purpose P] [--category C] [--on|--off] [--order N]');
+  if (!target) throw new Error(`usage: ${cli('slack channel <#name|id> [--purpose P] [--category C] [--on|--off] [--order N]')}`);
   const store = await getStore();
   const row = (await store.listSlackChannels()).find((r) => r.channel_id === target || r.channel_name === target);
   if (!row) throw new Error(`channel ${target} is not in the map yet — call slack_list_channels once to sync it`);

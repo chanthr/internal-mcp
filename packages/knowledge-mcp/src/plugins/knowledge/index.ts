@@ -17,6 +17,7 @@ import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 import { foldersConfigured, scanFolders, startFolderScans } from './folders.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
 import { readDocumentTool } from './tools/read_document.js';
+import { cli } from '../../core/invocation.js';
 
 /** Is there anything that feeds the index? */
 function hasSource(): boolean {
@@ -49,7 +50,7 @@ export const knowledgePlugin = definePlugin({
   id: 'knowledge',
   description: 'Search and read the indexed documents (local folders, Google Drive)',
   enabled: () => {
-    if (!hasSource()) return 'add a local folder (knowledge-mcp setup folder <path>) or connect Google Drive';
+    if (!hasSource()) return `add a local folder (${cli('setup folder <path>')}) or connect Google Drive`;
     if (!indexAvailable()) return 'with QDRANT_URL set, an embedding model is required: set OPENAI_API_KEY or EMBEDDING_BASE_URL (or remove QDRANT_URL to use the built-in index)';
     return true;
   },
@@ -85,20 +86,20 @@ export const knowledgePlugin = definePlugin({
       description: 'make new vectors for every indexed passage with the configured embedding model (after changing the model)',
       run: async () => {
         if (!embeddingsConfigured()) {
-          console.log('No embedding model is configured. Set one first: knowledge-mcp setup embeddings (search works by keywords without one).');
+          console.log(`No embedding model is configured. Set one first: ${cli('setup embeddings')} (search works by keywords without one).`);
           process.exitCode = 1;
           return;
         }
         const index = await getLocalIndex();
         if (!index) {
-          console.log('Vectors are in Qdrant. After changing the model run: knowledge-mcp drive reindex --recreate');
+          console.log(`Vectors are in Qdrant. After changing the model run: ${cli('drive reindex --recreate')}`);
           process.exitCode = 1;
           return;
         }
         // Ask the model first: dropping the old vectors and then finding the new model unreachable would leave none.
         const probe = await embedQuery('ping');
         if (probe.length !== EMBEDDING_DIM) {
-          console.log(`${EMBEDDING_MODEL} returns ${probe.length}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. Set EMBEDDING_DIM=${probe.length} (knowledge-mcp setup embeddings does this) and run again.`);
+          console.log(`${EMBEDDING_MODEL} returns ${probe.length}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. Set EMBEDDING_DIM=${probe.length} (${cli('setup embeddings')} does this) and run again.`);
           process.exitCode = 1;
           return;
         }

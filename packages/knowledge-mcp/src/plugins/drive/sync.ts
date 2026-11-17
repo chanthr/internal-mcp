@@ -19,6 +19,7 @@ import { clearFolderMetaCache, getFolderMeta, ownerEmails, type ShareOrigin } fr
 import { DRIVE_COLLECTION, getQdrantClient, isDriveDocId, type PointId } from './qdrant.js';
 import { embedQuery, embeddingsConfigured } from './embeddings.js';
 import { acquireLock, releaseLock, withLock } from '../../core/lock.js';
+import { cli } from '../../core/invocation.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -222,7 +223,7 @@ export async function runIncrementalSync(): Promise<SyncResult> {
       if (embeddingsConfigured()) await embedQuery('ping');
     } catch (e) {
       console.error(`[drive-sync] the index is empty but the embedding endpoint does not answer, so it is not built yet: ${e instanceof Error ? e.message : e}`);
-      console.error('[drive-sync] fix the key (knowledge-mcp setup check shows what is wrong); the next cycle tries again');
+      console.error(`[drive-sync] fix the key (${cli('setup check')} shows what is wrong); the next cycle tries again`);
       return { status: 'waiting for embeddings', changed: 0, deleted: 0, skipped: 0 };
     }
     console.error('[drive-sync] the index is empty: building it now (this can take a while; search fills in as files are indexed)');

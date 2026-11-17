@@ -20,6 +20,7 @@ import { VERSION } from './version.js';
 import type { Plugin } from './plugin/define.js';
 import { Registry } from './plugin/registry.js';
 import { builtinPlugins } from './plugins/index.js';
+import { cli } from './core/invocation.js';
 
 export interface RunOptions {
   /** Plugins to serve. Default: the built-in Drive, Slack, GitHub and Railway plugins. */
@@ -108,7 +109,7 @@ async function cmdKeys(argv: string[]): Promise<void> {
       const current = existing ? (existing.role === 'admin' ? 'admin' : 'member') : null;
       if (role && current && role !== current) {
         throw new UsageError(
-          `keys create: ${email} is already registered as ${current}. To change the role run: knowledge-mcp users add ${email} --role ${role}`,
+          `keys create: ${email} is already registered as ${current}. To change the role run: ${cli('users add')} ${email} --role ${role}`,
         );
       }
       if (role && !existing) {
@@ -116,7 +117,7 @@ async function cmdKeys(argv: string[]): Promise<void> {
         info(`Registered ${email} as ${role}.`);
       } else if (!existing) {
         info(`note: ${email} is not registered, so this key gets the viewer role (ping only).`);
-        info(`      Run: knowledge-mcp users add ${email} --role member   (or pass --role to this command)`);
+        info(`      Run: ${cli('users add')} ${email} --role member   (or pass --role to this command)`);
       }
     }
     const created = await store.createKey({
@@ -134,7 +135,7 @@ async function cmdKeys(argv: string[]): Promise<void> {
   }
   if (sub === 'list') {
     const keys = await store.listKeys();
-    if (!keys.length) return info('No keys. Create one: knowledge-mcp keys create --email you@example.com --role admin');
+    if (!keys.length) return info(`No keys. Create one: ${cli('keys create --email you@example.com --role admin')}`);
     for (const k of keys) {
       const state = !k.active ? 'revoked' : k.expiresAt && k.expiresAt < new Date().toISOString() ? 'expired' : 'active';
       out(`${k.id}  ${state.padEnd(7)}  ${(k.email ?? `(service, ${k.role})`).padEnd(30)}  ${k.label ?? ''}  created ${k.createdAt.slice(0, 10)}${k.expiresAt ? `  expires ${k.expiresAt.slice(0, 10)}` : ''}`);
@@ -184,7 +185,7 @@ async function cmdUsers(argv: string[]): Promise<void> {
   }
   if (sub === 'list') {
     const users = await store.listUsers();
-    if (!users.length) return info('No users. Add one: knowledge-mcp users add you@example.com --role admin');
+    if (!users.length) return info(`No users. Add one: ${cli('users add')} you@example.com --role admin`);
     for (const u of users) {
       const limits = [
         u.allowedTools?.length ? `tools=${u.allowedTools.join(',')}` : '',
@@ -259,7 +260,7 @@ async function cmdDoctor(registry: Registry): Promise<void> {
       out(`  · ${u.name.padEnd(12)} ${u.url}${token}`);
     }
   }
-  const cmds = registry.plugins.flatMap((p) => Object.entries(p.commands ?? {}).map(([c, d]) => `  knowledge-mcp ${p.id} ${c}  — ${d.description}`));
+  const cmds = registry.plugins.flatMap((p) => Object.entries(p.commands ?? {}).map(([c, d]) => `  ${cli(`${p.id} ${c}`)}  — ${d.description}`));
   if (cmds.length) {
     out('plugin commands');
     for (const c of cmds) out(c);
@@ -336,7 +337,7 @@ export async function run(opts: RunOptions = {}): Promise<void> {
     if (cmd === 'serve' || cmd === '--stdio') return await cmdServe(registry, cmd === '--stdio' ? ['--stdio'] : rest);
     if (cmd === 'doctor') return await cmdDoctor(registry);
     if (await cmdPlugin(registry, cmd, rest)) return;
-    throw new UsageError(`unknown command "${cmd}". Run: knowledge-mcp help`);
+    throw new UsageError(`unknown command "${cmd}". Run: ${cli('help')}`);
   } catch (e) {
     if (e instanceof UsageError) {
       info(`usage: knowledge-mcp ${e.message}`);
