@@ -44,7 +44,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "dev": "tsx watch src/cli.ts serve",
     "start": "node dist/cli.js serve",
     "typecheck": "tsc --noEmit",
@@ -61,14 +61,18 @@
     "gpt-tokenizer": "^3.4.0",
     "jose": "^5.10.0",
     "pdf-parse": "^2.4.5",
+    "pg": "^8.23.1",
     "ws": "^8.21.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "yaml": "^2.9.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "@electric-sql/pglite-socket": "^0.2.19",
     "@types/node": "^22.10.0",
     "@types/pdf-parse": "^1.1.5",
+    "@types/pg": "^8.23.1",
     "@types/ws": "^8.18.1",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0"
