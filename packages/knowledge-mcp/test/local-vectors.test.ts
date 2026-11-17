@@ -1,7 +1,7 @@
 /**
  * Built-in vector store (used when QDRANT_URL is not set): same behaviour the Drive plugin relies on from Qdrant.
  * Cosine ranking, `must` filters including array fields, paging, delete by file and by id, 63-bit ids, a size
- * check, and the collection-size guard of ensureCollection.
+ * check, and what happens when the embedding model is added or changed after the index was built.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,9 +12,10 @@ import { join } from 'node:path';
 for (const k of Object.keys(process.env)) if (/^(QDRANT_|OPENAI_|EMBEDDING_)/.test(k)) delete process.env[k];
 Object.assign(process.env, { MCP_DATA_DIR: mkdtempSync(join(tmpdir(), 'kmcp-vec-')), EMBEDDING_DIM: '4' });
 
-const { getQdrantClient, vectorStoreKind, ensureCollection, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
+const { getQdrantClient, getLocalIndex: localIndex, vectorProblem, vectorStoreKind, ensureCollection, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
 const { makeChunkId } = await import('../src/plugins/drive/indexer.js');
 const client = await getQdrantClient();
+const local = (await localIndex())!;
 const C = 'unit_test';
 
 test('built-in store is used without QDRANT_URL', async () => {
@@ -71,10 +72,92 @@ test('delete by file and by id, and a vector of the wrong size is refused', asyn
   assert.ok(!(await client.getCollections()).collections.some((c) => c.name === C));
 });
 
-test('ensureCollection creates the collection, and stops when the model size changed', async () => {
+test('ensureCollection: a keyword-only index takes the size of the model added later', async () => {
   await ensureCollection();
   assert.equal((await client.getCollection(DRIVE_COLLECTION)).config?.params?.vectors?.size, 4);
+  // An index created while another size was the default (no model then), holding text only.
   await client.deleteCollection(DRIVE_COLLECTION);
   await client.createCollection(DRIVE_COLLECTION, { vectors: { size: 8 } });
-  await assert.rejects(ensureCollection(), /holds 8-dimension vectors but EMBEDDING_DIM is 4/);
+  await client.upsert(DRIVE_COLLECTION, { points: [{ id: 1, payload: { file_id: 'f', content: 'text only' } }] });
+  assert.equal(await vectorProblem(), null);
+  await ensureCollection();
+  assert.equal((await client.getCollection(DRIVE_COLLECTION)).config?.params?.vectors?.size, 4);
+  assert.equal((await local.stats(DRIVE_COLLECTION)).chunks, 1); // nothing was dropped
+});
+
+test('vectors of another model are never mixed: indexing and search fall back to keywords until reembed', async () => {
+  // Same size, another model.
+  await local.setVectors(DRIVE_COLLECTION, [{ id: 1, vector: [1, 0, 0, 0] }]);
+  await local.noteModel(DRIVE_COLLECTION, 'some-older-model');
+  assert.match((await vectorProblem())!, /made by some-older-model \(4 dimensions\), but text-embedding-3-small \(4 dimensions\) is configured.*knowledge reembed/);
+  await ensureCollection(); // does not throw: the index stays usable by keywords
+  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: 'some-older-model', vectors: 1 });
+  await assert.rejects(local.adoptDimension(DRIVE_COLLECTION, 8), /holds vectors/);
+
+  // Another size (vectors written by a version that did not record the model).
+  await client.deleteCollection(DRIVE_COLLECTION);
+  await client.createCollection(DRIVE_COLLECTION, { vectors: { size: 8 } });
+  await client.upsert(DRIVE_COLLECTION, { points: [{ id: 1, vector: [1, 0, 0, 0, 0, 0, 0, 0], payload: { file_id: 'f', content: 'old vector' } }] });
+  assert.match((await vectorProblem())!, /made by another embedding model \(8 dimensions\)/);
+
+  // reembed's first step: drop the vectors, keep the text and the keyword index, take the new size.
+  assert.equal(await local.clearVectors(DRIVE_COLLECTION, 4), 1);
+  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: null, vectors: 0 });
+  assert.equal(await vectorProblem(), null);
+  assert.equal((await local.keywordSearch(DRIVE_COLLECTION, { query: 'old vector', limit: 5, with_payload: true })).length, 1);
+  assert.equal((await local.missingVectors(DRIVE_COLLECTION, 10)).length, 1);
+  await local.setVectors(DRIVE_COLLECTION, [{ id: 1, vector: [0, 1, 0, 0] }]);
+  await local.noteModel(DRIVE_COLLECTION, 'text-embedding-3-small');
+  assert.equal(await vectorProblem(), null);
+  await client.deleteCollection(DRIVE_COLLECTION);
+});
+
+// ── Keyword index and chunks without vectors ──
+const { getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
+const { tokenize, ftsQuery } = await import('../src/plugins/drive/tokens.js');
+const K = 'kw_test';
+
+test('tokens: words for Latin text, character pairs for CJK, split at a script boundary', () => {
+  assert.deepEqual(tokenize('API키 휴가를 신청! deploy_log v2'), ['api', '키', '휴가', '가를', '신청', 'deploy_log', 'v2']);
+  assert.deepEqual(tokenize('東京都'), ['東京', '京都']);
+  assert.equal(ftsQuery('How do we rotate the API keys?'), '"rotate" OR "api" OR "keys"');
+  assert.equal(ftsQuery('the of'), '"the" OR "of"'); // only stopwords: keep them rather than search for nothing
+  assert.equal(ftsQuery('?!'), null);
+  assert.equal(ftsQuery('say "hi" OR NEAR'), '"say" OR "hi" OR "near"'); // quoted words, never FTS5 syntax ("or" is dropped as a stopword)
+});
+
+test('keyword search works with no vectors at all, in Korean and English, with filters', async () => {
+  const index = (await getLocalIndex())!;
+  await index.createCollection(K, { vectors: { size: 4 } });
+  await index.upsert(K, {
+    points: [
+      { id: 1, payload: { file_id: 'a', file_name: 'leave.md', heading: '휴가', content: '연차 휴가를 신청하는 방법과 기한', source: 'docs' } },
+      { id: 2, payload: { file_id: 'b', file_name: 'deploy.md', heading: 'Deploy', content: 'Production deploys from the main branch after review.', source: 'wiki' } },
+      { id: 3, payload: { file_id: 'c', file_name: 'keys.md', heading: 'Keys', content: 'Rotate API keys every ninety days. 키 교체 주기는 90일.', source: 'wiki' } },
+    ],
+  });
+  assert.deepEqual(await index.stats(K), { chunks: 3, withVectors: 0, documents: 3 });
+  assert.deepEqual((await index.keywordSearch(K, { query: '휴가', limit: 5 })).map((h) => h.id), [1]); // "휴가" finds "휴가를"
+  assert.deepEqual((await index.keywordSearch(K, { query: 'which branch is deployed to production?', limit: 5 })).map((h) => h.id), [2]);
+  assert.equal((await index.keywordSearch(K, { query: 'keys.md', limit: 5 }))[0].id, 3); // the file name is searchable ("md" matches every file, so 3 only has to come first)
+  assert.deepEqual((await index.keywordSearch(K, { query: 'api keys deploy', limit: 5, filter: { must: [{ key: 'source', match: { value: 'wiki' } }] } })).map((h) => h.id).sort(), [2, 3]);
+  assert.deepEqual(await index.keywordSearch(K, { query: 'nothing matches this zzz', limit: 5 }), []);
+  assert.deepEqual(await index.search(K, { vector: [1, 0, 0, 0], limit: 5 }), []); // no vectors yet
+});
+
+test('keyword index follows edits and deletes; vectors can be added later', async () => {
+  const index = (await getLocalIndex())!;
+  await index.upsert(K, { points: [{ id: 1, payload: { file_id: 'a', file_name: 'leave.md', heading: '휴가', content: '완전히 다른 내용: 예산 계획', source: 'docs' } }] });
+  assert.deepEqual(await index.keywordSearch(K, { query: '연차', limit: 5 }), []);
+  assert.deepEqual((await index.keywordSearch(K, { query: '예산', limit: 5 })).map((h) => h.id), [1]);
+  await index.delete(K, { filter: { must: [{ key: 'file_id', match: { value: 'b' } }] } });
+  assert.deepEqual(await index.keywordSearch(K, { query: 'production', limit: 5 }), []);
+
+  assert.deepEqual((await index.missingVectors(K, 10)).map((m) => m.id).sort(), [1, 3]); // in storage order: the rewritten chunk comes last
+  await index.setVectors(K, [{ id: 3, vector: [0, 2, 0, 0] }]);
+  assert.deepEqual((await index.missingVectors(K, 10)).map((m) => m.id), [1]);
+  assert.deepEqual((await index.search(K, { vector: [0, 1, 0, 0], limit: 5 })).map((h) => h.id), [3]);
+  assert.deepEqual((await index.keywordSearch(K, { query: 'rotate', limit: 5 })).map((h) => h.id), [3]); // text search unaffected
+  assert.deepEqual(await index.stats(K), { chunks: 2, withVectors: 1, documents: 2 });
+  await index.deleteCollection(K);
 });

@@ -5,9 +5,10 @@
 import type { DriveClient } from './client.js';
 import { createHash } from 'crypto';
 import { chunkMarkdown, type RawChunk } from './chunker.js';
-import { embedTexts } from './embeddings.js';
+import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
-import { getQdrantClient, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
+import { getQdrantClient, getLocalIndex, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
+import { withLock } from '../../core/lock.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
 import { normalizeFolderName } from './exclude.js';
@@ -174,7 +175,7 @@ export function buildChunkPayload(
  * Looks up the indexed state of a file (payload of chunk 0): content_hash and chunk count.
  * Returns null if not found (not indexed). A failed lookup is also treated as null (safe: reindexing proceeds).
  */
-async function getIndexedState(
+export async function getIndexedState(
   fileId: string,
 ): Promise<{
   content_hash: string | null;
@@ -227,7 +228,24 @@ export async function indexFile(drive: DriveClient, file: IndexableFile): Promis
   const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
   // Unsupported files, scans and images with OCR off, and files with empty extracted text are not indexed.
   if (needsOcr || text.trim().length === 0) return 0;
+  return indexText(file, text, prev);
+}
 
+/**
+ * Index the extracted text of one document: chunk, embed when an embedding model is configured, and store.
+ * Shared by every source (Drive files, local folders). `prev` is the document's indexed state when the caller
+ * already looked it up; otherwise it is read here.
+ *
+ * Without an embedding model the chunks are stored for keyword search only. Their vectors are added later by
+ * backfillVectors once a model is configured, without reading the document again.
+ */
+export async function indexText(
+  file: IndexableFile,
+  text: string,
+  prev: Awaited<ReturnType<typeof getIndexedState>> | undefined = undefined,
+): Promise<number> {
+  if (prev === undefined) prev = await getIndexedState(file.id);
+  const sameLocation = !!prev && prev.file_path === file.path && prev.file_name === file.name && prev.source === file.source;
   const hash = contentHash(text);
 
   // If the body, path and name are all unchanged, skip embed and upsert (e.g. a save that only changed the modified
@@ -242,16 +260,17 @@ export async function indexFile(drive: DriveClient, file: IndexableFile): Promis
   const classification = classifyFile(file.path, file.source);
   const bizMeta = deriveBizMeta(file.path, file.source);
   // Embed with the heading breadcrumb (embedInputForChunk): the stored content is unchanged, only the embedding input
-  // gets the section context.
-  const vectors = await embedTexts(chunks.map(embedInputForChunk));
+  // gets the section context. No embedding model: store the text now, vectors come later (backfillVectors).
+  const vectors = (await vectorsUsable()) ? await embedTexts(chunks.map(embedInputForChunk)) : null;
 
   const points = chunks.map((c, idx) => ({
     id: makeChunkId(file.id, idx),
-    vector: vectors[idx],
+    vector: vectors?.[idx],
     payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash),
   }));
 
   const client = await getQdrantClient();
+  if (vectors) await noteVectorModel();
   // Upsert the new chunks 0..M-1 (wait:true: cheap for one file, gives immediate search visibility and failure detection)
   await client.upsert(DRIVE_COLLECTION, { wait: true, points });
   // If the count shrank, delete the old chunks (index >= M) directly by their deterministic chunk IDs.
@@ -270,4 +289,52 @@ export async function deleteFileVectors(fileId: string): Promise<void> {
   await (await getQdrantClient()).delete(DRIVE_COLLECTION, {
     filter: { must: [{ key: 'file_id', match: { value: fileId } }] },
   });
+}
+
+/**
+ * Can documents be indexed at all? The built-in index stores text without vectors, so it always can.
+ * Qdrant stores vectors only, so it needs an embedding model.
+ */
+export function indexAvailable(): boolean {
+  return vectorStoreKind() === 'built-in' || embeddingsConfigured();
+}
+
+/**
+ * Give vectors to chunks that were indexed before an embedding model was configured (built-in index only).
+ * Uses the stored chunk text, so no document is downloaded or extracted again. Works through at most `max` chunks
+ * per call; the next sync continues. Returns how many chunks got a vector.
+ */
+export async function backfillVectors(max = 20_000): Promise<number> {
+  const index = await getLocalIndex();
+  if (!index || !(await vectorsUsable())) return 0;
+  // One process at a time: two would embed the same passages twice (and pay twice).
+  const done = await withLock('backfill', async () => {
+    let n = 0;
+    while (n < max) {
+      const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(128, max - n));
+      if (batch.length === 0) break;
+      const inputs = batch.map((b) =>
+        embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') } as RawChunk),
+      );
+      const vectors = await embedTexts(inputs);
+      await index.setVectors(DRIVE_COLLECTION, batch.map((b, i) => ({ id: b.id, vector: vectors[i] })));
+      await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
+      n += batch.length;
+    }
+    return n;
+  });
+  return done ?? 0;
+}
+
+/**
+ * Can vectors be written and searched right now? An embedding model is configured, and the vectors already stored
+ * (if any) were made by it. When false, indexing stores text only and search answers by keywords.
+ */
+export async function vectorsUsable(): Promise<boolean> {
+  return embeddingsConfigured() && (await vectorProblem()) === null;
+}
+
+/** Record which model made the vectors (built-in index), so a later change of model is noticed. */
+export async function noteVectorModel(): Promise<void> {
+  await (await getLocalIndex())?.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
 }

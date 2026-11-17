@@ -21,12 +21,12 @@
 import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { chunkMarkdown } from './chunker.js';
-import { embedTexts, EMBEDDING_MODEL } from './embeddings.js';
+import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
 import { classifyAndPath, ownerEmails } from './path.js';
 import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
-import { ensureCollection, getQdrantClient, DRIVE_COLLECTION } from './qdrant.js';
+import { ensureCollection, getQdrantClient, isDriveDocId, vectorProblem, DRIVE_COLLECTION } from './qdrant.js';
 // Single source of truth for the core indexing logic, shared with the incremental sync (sync.ts) to prevent drift.
 // In particular makeChunkId must match on both paths for the orphan chunk logic to hold.
 import {
@@ -39,6 +39,8 @@ import {
   SUPPORTED_MIMES,
   DRIVE_ROOTS,
   MAX_FILE_BYTES,
+  noteVectorModel,
+  vectorsUsable,
 } from './indexer.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
@@ -106,7 +108,7 @@ function parseArgs(args: string[]): CliArgs {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--root' && args[i + 1]) {
       // Only a configured root is accepted. An arbitrary folder would be indexed with short paths relative to that
-      // folder, which bypasses folder permissions, or would bring content outside the roots into semantic search.
+      // folder, which bypasses folder permissions, or would bring content outside the roots into the search index.
       const id = args[++i];
       const root = DRIVE_ROOTS.find((r) => r.id === id);
       if (!root) throw new Error(`--root ${id} is not one of drive.roots (${DRIVE_ROOTS.map((r) => r.id).join(', ')})`);
@@ -242,10 +244,10 @@ async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]>
 }
 
 /**
- * Deletes the vectors of files that are not in this run's listing (keep). Returns the number of files deleted.
+ * Deletes the Drive documents that are not in this run's listing (keep). Returns the number of files deleted.
  * If the listing step fails, main exits with FATAL before this point, so reaching here means the listing is complete.
  */
-async function pruneStaleVectors(keep: Set<string>): Promise<number> {
+export async function pruneStaleVectors(keep: Set<string>): Promise<number> {
   const qdrant = await getQdrantClient();
   const stale = new Set<string>();
   let offset: string | number | null | undefined = undefined;
@@ -258,7 +260,8 @@ async function pruneStaleVectors(keep: Set<string>): Promise<number> {
     });
     for (const pt of page.points) {
       const fid = (pt.payload as { file_id?: unknown } | null | undefined)?.file_id;
-      if (typeof fid === 'string' && !keep.has(fid)) stale.add(fid);
+      // Only Drive documents: documents from other sources (local folders) are not in a Drive listing by nature.
+      if (typeof fid === 'string' && isDriveDocId(fid) && !keep.has(fid)) stale.add(fid);
     }
     offset = (page.next_page_offset as string | number | null | undefined) ?? null;
   } while (offset !== null);
@@ -312,6 +315,9 @@ export async function runReindex(argv: string[]): Promise<void> {
     for (const f of shared) allFiles.push({ ...f, source: SHARED_SOURCE });
   }
   console.log(`[index] total ${allFiles.length} files`);
+  // Vectors are written only when a model is configured and the stored vectors (if any) are that model's.
+  const useVectors = await vectorsUsable();
+  if (embeddingsConfigured() && !useVectors) console.error(`[index] storing text only: ${await vectorProblem()}`);
 
   // 3. Per file: download + chunk + embed + upsert
   //    Checkpoint: reset on recreate, otherwise skip earlier progress (resume after a 429 abort)
@@ -370,12 +376,13 @@ export async function runReindex(argv: string[]): Promise<void> {
       }
 
       // Embed with the heading breadcrumb (embedInputForChunk), the same input as the incremental path (indexFile).
-      const vectors = await embedTexts(chunks.map(embedInputForChunk));
+      // No embedding model: the text is stored for keyword search and vectors are added later (backfillVectors).
+      const vectors = useVectors ? await embedTexts(chunks.map(embedInputForChunk)) : null;
 
       // Qdrant upsert: the payload is built by buildChunkPayload, shared with indexer.ts
       const points = chunks.map((c, idx) => ({
         id: makeChunkId(file.id, idx),
-        vector: vectors[idx],
+        vector: vectors?.[idx],
         payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash),
       }));
 
@@ -391,6 +398,7 @@ export async function runReindex(argv: string[]): Promise<void> {
         wait: false,
         points,
       });
+      if (vectors) await noteVectorModel();
 
       done.set(file.id, file.modifiedTime); // record in the checkpoint (upsert succeeded)
       saveCheckpoint(done);
@@ -423,7 +431,7 @@ export async function runReindex(argv: string[]): Promise<void> {
   const cost = EMBEDDING_MODEL === 'text-embedding-3-small' ? `, ~$${((totalTokens / 1_000_000) * 0.02).toFixed(4)}` : '';
   console.log(
     `\n[index] DONE — ${totalChunks} chunks, ${totalTokens} tokens, ` +
-      `model ${EMBEDDING_MODEL}${cost}, ${elapsedSec}s`,
+      `${useVectors ? `model ${EMBEDDING_MODEL}${cost}` : embeddingsConfigured() ? 'keyword index only (stored vectors are from another model)' : 'keyword index only (no embedding model)'}, ${elapsedSec}s`,
   );
   if (ocrLeftOut > 0) {
     console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: knowledge-mcp drive reindex (Mathpix is billed per page).`);

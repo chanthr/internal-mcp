@@ -90,7 +90,7 @@ test('sync lock: one holder at a time, released by its owner, a dead holder is r
 });
 
 test('result dates: the document date wins, otherwise the modified date, with the age once it is old', async () => {
-  const { dateLabel } = await import('../src/plugins/drive/tools/semantic_search_drive.js');
+  const { dateLabel } = await import('../src/plugins/knowledge/tools/search_knowledge.js');
   const now = Date.parse('2026-11-17T00:00:00Z');
   assert.equal(dateLabel({ doc_date: '2026-11-10', modified_time: '2026-01-01T00:00:00Z' }, now), '2026-11-10');
   assert.equal(dateLabel({ doc_date: null, modified_time: '2026-10-02T05:27:14.002Z' }, now), 'modified 2026-10-02, 1mo old');

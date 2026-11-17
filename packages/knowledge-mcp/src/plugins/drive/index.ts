@@ -1,19 +1,18 @@
 /**
- * Google Drive plugin — keyword search, read, folder listing, and semantic (vector) search.
+ * Google Drive plugin — search by title or text, read, folder listing, and keeping Drive documents in the search index.
  *
  * Credentials (any one):
  *   GOOGLE_SERVICE_ACCOUNT_KEY (JSON) | GOOGLE_APPLICATION_CREDENTIALS (file path)
  *   | GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET + GOOGLE_OAUTH_REFRESH_TOKEN
- * Semantic search also needs QDRANT_URL and OPENAI_API_KEY, and an index (`knowledge-mcp drive reindex`).
+ * Search over the index (search_knowledge) is the `knowledge` plugin; this plugin feeds it and keeps it in sync.
  * Scope comes from the config file: drive.roots (folders to search) and drive.excludeFolders.
  */
 import { definePlugin } from '../../plugin/define.js';
 import { isSet as has } from '../../core/env.js';
-import { embeddingsConfigured } from './embeddings.js';
+import { indexAvailable } from './indexer.js';
 import { searchDriveTool } from './tools/search_drive.js';
 import { readDriveFileTool } from './tools/read_drive_file.js';
 import { listDriveFolderTool } from './tools/list_drive_folder.js';
-import { semanticSearchDriveTool } from './tools/semantic_search_drive.js';
 
 /** Drive API credentials present. Matches client.ts. */
 export function driveConfigured(): boolean {
@@ -25,37 +24,27 @@ export function driveConfigured(): boolean {
   return has(id) && has(secret) && has(refresh);
 }
 
-/**
- * semantic_search_drive needs an embedding endpoint. Vectors go to Qdrant when QDRANT_URL is set, otherwise to the
- * built-in SQLite store, so there is nothing else to set up. Independent of the Drive API credentials.
- */
-export function semanticConfigured(): boolean {
-  return embeddingsConfigured();
-}
-
 const DRIVE_CREDS = 'set GOOGLE_SERVICE_ACCOUNT_KEY, GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_OAUTH_CLIENT_ID/SECRET/REFRESH_TOKEN';
 const driveOnly = () => driveConfigured() || DRIVE_CREDS;
 
 export const drivePlugin = definePlugin({
   id: 'drive',
-  description: 'Google Drive search, read and semantic search',
-  // On when either half works: the Drive API tools, or semantic search over an existing index.
-  enabled: () => driveConfigured() || semanticConfigured() || `${DRIVE_CREDS} (or an embedding key for semantic search over an existing index)`,
+  description: 'Google Drive search, read and folder listing; Drive documents join the search index',
+  enabled: () => driveConfigured() || DRIVE_CREDS,
   tools: [
     { ...searchDriveTool, enabled: driveOnly },
     { ...readDriveFileTool, enabled: driveOnly },
     { ...listDriveFolderTool, enabled: driveOnly },
-    { ...semanticSearchDriveTool, enabled: () => semanticConfigured() || 'missing an embedding key: set OPENAI_API_KEY, or EMBEDDING_BASE_URL for another provider' },
   ],
   instructions:
-    'Drive: meaning/concept questions → semantic_search_drive; keyword or file name → search_drive; ' +
-    '"list all" / folder contents → list_drive_folder(folderName). When a chunk lacks context, read_drive_file with the File ID ' +
+    'Drive: questions about what documents say → search_knowledge (the index); a file by its name, or the newest files → search_drive; ' +
+    '"list all" / folder contents → list_drive_folder(folderName). read_drive_file reads a whole Drive file by its id ' +
     '(fileIds=[...] reads several at once).',
   async start({ log }) {
     // Keeps the index in step with Drive: builds it on the first run, then applies changes on a timer. Needs Drive
-    // credentials and an embedding key (without one every changed file would fail and be dropped).
+    // credentials. With Qdrant as the store it also needs an embedding model; the built-in index does not.
     // DRIVE_SYNC_ENABLED=false turns it off.
-    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !semanticConfigured()) return;
+    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !indexAvailable()) return;
     const { ensureCollection } = await import('./qdrant.js');
     const { startDriveSyncScheduler } = await import('./sync.js');
     try {
@@ -68,7 +57,7 @@ export const drivePlugin = definePlugin({
   async catchUp({ log }) {
     // A stdio session has no scheduler, so without this a local-only setup would never get an index or see new
     // documents. One pass per session start; a lock keeps parallel sessions from doing the same work.
-    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !semanticConfigured()) return;
+    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !indexAvailable()) return;
     const { ensureCollection } = await import('./qdrant.js');
     const { runSyncOnce } = await import('./sync.js');
     await ensureCollection();
