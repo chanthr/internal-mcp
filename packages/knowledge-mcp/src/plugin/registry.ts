@@ -242,8 +242,8 @@ export class Registry {
   }
 
   /**
-   * After listen: connect remotes and, on HTTP, run plugin start hooks (background jobs such as the Drive
-   * sync). stdio skips the hooks: every client session spawns its own process and would start its own jobs.
+   * After listen: connect remotes, then run the plugin hooks. On HTTP that is `start` (background jobs such as the
+   * Drive sync). On stdio it is `catchUp`, a single pass: every client session is its own short-lived process.
    * Failures are logged and skipped.
    */
   async start(opts: { jobs: boolean } = { jobs: true }): Promise<void> {
@@ -252,11 +252,11 @@ export class Registry {
     } catch (e) {
       console.error('[knowledge-mcp] upstream connect failed (local tools keep working):', e);
     }
-    if (!opts.jobs) return;
     for (const p of this.plugins) {
-      if (!p.start || this.pluginEnabled(p) !== true) continue;
+      const hook = opts.jobs ? p.start : p.catchUp;
+      if (!hook || this.pluginEnabled(p) !== true) continue;
       try {
-        await p.start({
+        await hook({
           config: this.pluginConfig.get(p.id),
           state: stateFor(p.id),
           log: (...a: unknown[]) => console.error(`[${p.id}]`, ...a),

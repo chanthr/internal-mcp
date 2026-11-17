@@ -221,7 +221,7 @@ export async function handleListDriveFolder(args: z.infer<typeof inputSchema>) {
         } else {
           const resolved = await resolveFolderId(drive, spec.name!);
           if (!resolved) {
-            return { folderId: null, folderName: spec.name, error: `Folder "${spec.name}" not found (only folders under the indexed roots are searched)` };
+            return { folderId: null, folderName: spec.name, error: `Folder "${spec.name}" not found (searched by exact name among the folders this server may show)` };
           }
           fid = resolved.id;
           rootPath = resolved.path;

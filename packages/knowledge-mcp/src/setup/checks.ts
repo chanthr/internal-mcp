@@ -34,7 +34,7 @@ export interface DriveCheck {
   /** The address to share folders and documents with (service accounts only). */
   email: string | null;
   /** Names of the top items shared with the account, folders first. At most `limit`. */
-  shared: Array<{ name: string; folder: boolean }>;
+  shared: Array<{ id: string; name: string; folder: boolean; owners: string[]; driveId: string | null }>;
   /** True when more items are shared than were listed. */
   more: boolean;
 }
@@ -57,7 +57,7 @@ export async function checkDriveCredentials(raw: string, source: string, opts: {
   const limit = opts.limit ?? 20;
   const res = await drive.files.list({
     q: 'sharedWithMe = true and trashed = false',
-    fields: 'nextPageToken, files(name, mimeType)',
+    fields: 'nextPageToken, files(id, name, mimeType, owners(emailAddress), driveId)',
     pageSize: limit,
     orderBy: 'folder, name',
     supportsAllDrives: true,
@@ -67,7 +67,13 @@ export async function checkDriveCredentials(raw: string, source: string, opts: {
   return {
     kind: creds.kind,
     email: creds.kind === 'service_account' ? creds.clientEmail : null,
-    shared: files.map((f) => ({ name: f.name ?? '(no name)', folder: f.mimeType === 'application/vnd.google-apps.folder' })),
+    shared: files.map((f) => ({
+      id: f.id ?? '',
+      name: f.name ?? '(no name)',
+      folder: f.mimeType === 'application/vnd.google-apps.folder',
+      owners: (f.owners ?? []).map((o) => o.emailAddress ?? '').filter(Boolean),
+      driveId: f.driveId ?? null,
+    })),
     more: !!res.data.nextPageToken,
   };
 }

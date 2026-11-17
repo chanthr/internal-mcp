@@ -35,7 +35,10 @@ export async function runStdio(registry: Registry): Promise<void> {
   // Set before the transport exists — see context.ts for why AsyncLocalStorage.enterWith is not enough.
   setProcessAuth(auth);
   scheduleToolLogPrune(await getStore());
-  void registry.start({ jobs: false }); // remotes only — background jobs belong to the long-running HTTP server
+  // stdout carries the protocol, so nothing else may write to it. Plugins (and their dependencies) that call
+  // console.log would corrupt the stream and the client would drop the connection: send those lines to stderr.
+  console.log = console.info = console.debug = (...args: unknown[]) => console.error(...args);
+  void registry.start({ jobs: false }); // remotes, plus one catch-up pass per plugin (no timers in a session process)
   const server = createMcpServer(registry);
   await server.connect(new StdioServerTransport());
   console.error(

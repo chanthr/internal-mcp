@@ -12,7 +12,7 @@ import { defineTool } from '../../../plugin/define.js';
 import { getDriveClient } from '../client.js';
 import { getAuth } from '../../../core/context.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
-import { classifyAndPath, isReadableClass } from '../path.js';
+import { classifyAndPath, isReadableClass, ownerEmails } from '../path.js';
 import { stripEmbeddedImages } from '../clean_text.js';
 import { extractText } from '../extract_text.js';
 import { getQdrantClient, DRIVE_COLLECTION } from '../qdrant.js';
@@ -115,7 +115,7 @@ async function readOne(
   try {
     const meta = await drive.files.get({
       fileId,
-      fields: 'id, name, mimeType, parents, size, modifiedTime, webViewLink',
+      fields: 'id, name, mimeType, parents, size, modifiedTime, webViewLink, owners(emailAddress), driveId',
       supportsAllDrives: true, // without this flag, files on a shared drive return 404
     });
     const m = meta.data;
@@ -129,7 +129,7 @@ async function readOne(
     // per-user folder scope.
     // Same guard as search_drive / semantic_search_drive. It blocks the bypass of entering an arbitrary File ID directly
     // to read files outside the index, in sensitive folders or outside the user's permissions.
-    const { cls, path } = await classifyAndPath(drive, m.parents ?? undefined);
+    const { cls, path } = await classifyAndPath(drive, m.parents ?? undefined, { owners: ownerEmails(m), driveId: m.driveId });
     if (!isReadableClass(cls) || !isPathInScope(path, folderScope)) {
       return {
         fileId,

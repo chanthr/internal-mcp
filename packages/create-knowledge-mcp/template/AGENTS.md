@@ -11,7 +11,7 @@ All commands run in this folder. `npm run setup -- <args>` passes arguments to t
 1. **Never ask the person to paste a secret into the chat, and never put one on a command line.** Tokens and keys
    reach `.env` through the setup commands, or the person types them into `npm run setup` in their own terminal.
 2. **Never print a secret.** Do not `cat .env` or a key file. To see what is configured, run `npm run setup -- check`.
-3. **Ask before anything is created in their accounts.** `setup drive --gcloud` prints its plan first and creates
+3. **Ask before anything is created in their accounts, and before trusting a document owner.** `setup drive --gcloud` prints its plan first and creates
    nothing without `--yes`. Show the plan, wait for a yes, then add `--yes`.
 4. **Do not edit `.env` or `mcp.config.json` by hand for credentials.** Use the commands. Editing
    `mcp.config.json` for non-secret settings (excluded folder names) is fine.
@@ -60,8 +60,25 @@ This enables the Drive API, creates a read-only service account, saves its key t
 `drive-service-account.json` (git-ignored) and writes the path to `.env`.
 
 Then tell the person the service account address from the output and ask them to **share the Drive folders or
-documents they want searchable with that address, as Viewer**. Nothing is visible until they do. Shared items
-become searchable without a restart. Run `npm run setup -- check` to confirm: it shows how many items are shared.
+documents they want searchable with that address, as Viewer**. Nothing is visible until they do. Keyword search
+and reading see a shared item at once; search by meaning sees it after the next sync (within 30 minutes, or when
+a new session starts). Run `npm run setup -- check` to confirm: it shows how many items are shared.
+
+### Whose documents are shown
+
+Anyone who knows the service account's address can share a document with it. So a shared document is shown only
+when its owner is trusted. `setup drive --gcloud --yes` trusts the Google account that ran it. `setup check` lists
+items that are hidden and who owns them.
+
+**Ask the person which of those owners are theirs. Never add an owner on your own judgment**: an unfamiliar owner
+may be someone planting a document.
+
+```bash
+npm run setup -- trust acme.com            # a whole organization's domain
+npm run setup -- trust ann@gmail.com       # one address (a public mail domain as a whole is refused)
+```
+
+Restart the server after changing the list.
 
 If the person already has a key file: `npm run setup -- drive --key /path/to/key.json`.
 

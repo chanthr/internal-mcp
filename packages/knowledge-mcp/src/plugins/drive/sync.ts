@@ -12,11 +12,15 @@
 import type { DriveChangeList, DriveClient } from './client.js';
 import { DriveApiError, getDriveClient } from './client.js';
 import { indexFile, deleteFileVectors, SUPPORTED_MIMES, DRIVE_ROOTS } from './indexer.js';
-import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
+import { isTrustedShare, sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
 import { getSyncToken, setSyncToken, getRetryList, setRetryList, MAX_RETRY_ATTEMPTS, wasAutoIndexed, markAutoIndexed } from './sync_state.js';
 import { isExcludedPath } from './exclude.js';
-import { clearFolderMetaCache, getFolderMeta } from './path.js';
+import { clearFolderMetaCache, getFolderMeta, ownerEmails, type ShareOrigin } from './path.js';
 import { DRIVE_COLLECTION, getQdrantClient, type PointId } from './qdrant.js';
+import { embedQuery } from './embeddings.js';
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { join } from 'node:path';
+import { dataDir } from '../../core/paths.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
@@ -30,8 +34,10 @@ async function resolveFromParents(
   drive: DriveClient,
   firstParents: string[] | null | undefined,
   fileName: string,
+  self: ShareOrigin,
 ): Promise<{ path: string; source: string } | null> {
   const folders: string[] = [];
+  let top: ShareOrigin = self;
   let parents: string[] | undefined = firstParents ?? undefined;
   for (let hop = 0; hop < 12 && parents && parents.length > 0; hop++) {
     const pid = parents[0];
@@ -39,19 +45,21 @@ async function resolveFromParents(
     if (root) return { path: [...folders, fileName].join('/'), source: root.source };
     const meta = await getFolderMeta(drive, pid);
     if (meta.name) folders.unshift(meta.name);
+    top = meta;
     parents = meta.parent ? [meta.parent] : undefined;
   }
   // Nothing further up: this is the top of what was shared with the service account. With drive.scope "shared"
-  // such a file is indexed with its path starting at the top shared folder. A chain deeper than 12 hops stays out.
-  if ((!parents || parents.length === 0) && sharedScopeEnabled()) {
+  // such a file is indexed with its path starting at the top shared folder, provided the top of the share belongs to a
+  // trusted owner (drive.trustedOwners). A chain deeper than 12 hops stays out.
+  if ((!parents || parents.length === 0) && sharedScopeEnabled() && isTrustedShare(top.owners, top.driveId)) {
     return { path: [...folders, fileName].join('/'), source: SHARED_SOURCE };
   }
   return null;
 }
 
 async function resolvePathAndSource(drive: DriveClient, fileId: string, fileName: string) {
-  const parents = (await drive.files.get({ fileId, fields: 'parents', supportsAllDrives: true })).data.parents;
-  return resolveFromParents(drive, parents, fileName);
+  const d = (await drive.files.get({ fileId, fields: 'parents,owners(emailAddress),driveId', supportsAllDrives: true })).data;
+  return resolveFromParents(drive, d.parents, fileName, { owners: ownerEmails(d), driveId: d.driveId });
 }
 
 /**
@@ -88,7 +96,7 @@ export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked
       let f;
       try {
         f = (
-          await drive.files.get({ fileId: id, fields: 'id,name,mimeType,modifiedTime,size,trashed,parents', supportsAllDrives: true })
+          await drive.files.get({ fileId: id, fields: 'id,name,mimeType,modifiedTime,size,trashed,parents,owners(emailAddress),driveId', supportsAllDrives: true })
         ).data;
       } catch (e) {
         if (e instanceof DriveApiError && e.code === 404) {
@@ -98,7 +106,7 @@ export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked
         }
         throw e;
       }
-      const resolved = f.trashed || !f.name ? null : await resolveFromParents(drive, f.parents, f.name);
+      const resolved = f.trashed || !f.name ? null : await resolveFromParents(drive, f.parents, f.name, { owners: ownerEmails(f), driveId: f.driveId });
       if (!resolved || isExcludedPath(resolved.path)) {
         await deleteFileVectors(id);
         r.deleted++;
@@ -131,7 +139,7 @@ export async function refreshIndexedPaths(drive: DriveClient): Promise<{ checked
 async function syncOneFile(drive: DriveClient, fileId: string): Promise<'indexed' | 'deleted' | 'skipped'> {
   let f;
   try {
-    f = (await drive.files.get({ fileId, fields: 'id,name,mimeType,modifiedTime,size,trashed,parents', supportsAllDrives: true })).data;
+    f = (await drive.files.get({ fileId, fields: 'id,name,mimeType,modifiedTime,size,trashed,parents,owners(emailAddress),driveId', supportsAllDrives: true })).data;
   } catch (e) {
     if (e instanceof DriveApiError && e.code === 404) {
       await deleteFileVectors(fileId);
@@ -140,7 +148,7 @@ async function syncOneFile(drive: DriveClient, fileId: string): Promise<'indexed
     throw e;
   }
   if (!f.name || !f.mimeType || !SUPPORTED_MIMES.has(f.mimeType)) return 'skipped';
-  const resolved = f.trashed ? null : await resolveFromParents(drive, f.parents, f.name);
+  const resolved = f.trashed ? null : await resolveFromParents(drive, f.parents, f.name, { owners: ownerEmails(f), driveId: f.driveId });
   if (!resolved || isExcludedPath(resolved.path)) {
     await deleteFileVectors(fileId);
     return 'deleted';
@@ -170,6 +178,7 @@ export interface SyncResult {
 /** True when the collection holds nothing and the automatic first index has not run for it yet. */
 async function firstIndexNeeded(): Promise<boolean> {
   if (process.env.DRIVE_AUTO_INDEX === 'false') return false;
+  if (DRIVE_ROOTS.length === 0 && !sharedScopeEnabled()) return false; // nothing is in scope, so nothing to build
   if (await wasAutoIndexed(DRIVE_COLLECTION)) return false;
   const page = await (await getQdrantClient()).scroll(DRIVE_COLLECTION, { limit: 1, with_payload: false, with_vector: false });
   if (page.points.length > 0) {
@@ -192,9 +201,20 @@ export async function runIncrementalSync(): Promise<SyncResult> {
   // setup. The token above is stored first: documents edited while the index is being built are picked up by the
   // next cycle. DRIVE_AUTO_INDEX=false leaves the first index to the command.
   if (await firstIndexNeeded()) {
+    // Check the embedding endpoint with one call before touching Drive. With a wrong key every file would be
+    // downloaded and extracted only to fail at the last step, on every cycle.
+    try {
+      await embedQuery('ping');
+    } catch (e) {
+      console.error(`[drive-sync] the index is empty but the embedding endpoint does not answer, so it is not built yet: ${e instanceof Error ? e.message : e}`);
+      console.error('[drive-sync] fix the key (knowledge-mcp setup check shows what is wrong); the next cycle tries again');
+      return { status: 'waiting for embeddings', changed: 0, deleted: 0, skipped: 0 };
+    }
     console.error('[drive-sync] the index is empty: building it now (this can take a while; search fills in as files are indexed)');
     const { runReindex } = await import('./reindex.js');
-    await runReindex([]);
+    // An automatic run never sends files to paid OCR. Scanned files are counted in the log and are indexed by a
+    // deliberate `knowledge-mcp drive reindex`.
+    await runReindex(['--no-ocr']);
     await markAutoIndexed(DRIVE_COLLECTION);
     return { status: 'first index built', changed: 0, deleted: 0, skipped: 0 };
   }
@@ -314,6 +334,70 @@ export async function runIncrementalSync(): Promise<SyncResult> {
   return { status: 'synced', changed, deleted, skipped, errored };
 }
 
+// ── One sync at a time across processes ──
+// The HTTP server, a second server on the same data directory, and every stdio session can all want to sync. Two at
+// once would embed the same files twice and, on an empty index, both build it. A lock file in the data directory
+// lets one of them work; the others skip the cycle. A lock whose process is gone, or that is older than 12 hours, is
+// taken over.
+const LOCK_STALE_MS = 12 * 60 * 60_000;
+const lockPath = () => join(dataDir(), 'drive-sync.lock');
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export function acquireSyncLock(): boolean {
+  mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(lockPath(), 'wx', 0o600);
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      let pid = NaN;
+      let age = Infinity;
+      try {
+        pid = Number(readFileSync(lockPath(), 'utf8').trim());
+        age = Date.now() - statSync(lockPath()).mtimeMs;
+      } catch {
+        continue; // released between the two calls: try again
+      }
+      if (Number.isInteger(pid) && pid > 0 && processAlive(pid) && age < LOCK_STALE_MS) return false;
+      try {
+        unlinkSync(lockPath());
+      } catch {
+        /* someone else took it over first */
+      }
+    }
+  }
+  return false;
+}
+
+export function releaseSyncLock(): void {
+  try {
+    if (readFileSync(lockPath(), 'utf8').trim() === String(process.pid)) unlinkSync(lockPath());
+  } catch {
+    /* already gone */
+  }
+}
+
+/** One sync pass, unless another process is already syncing (then null). */
+export async function runSyncOnce(): Promise<SyncResult | null> {
+  if (!acquireSyncLock()) return null;
+  try {
+    return await runIncrementalSync();
+  } finally {
+    releaseSyncLock();
+  }
+}
+
 let _started = false;
 let _running = false;
 
@@ -335,7 +419,11 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
     }
     _running = true;
     try {
-      const r = await runIncrementalSync();
+      const r = await runSyncOnce();
+      if (!r) {
+        console.error('[drive-sync] another process is syncing this data directory — skipping this tick');
+        return;
+      }
       console.error(
         `[drive-sync] ${r.status} · changed=${r.changed} deleted=${r.deleted} skipped=${r.skipped} errored=${r.errored ?? 0}`,
       );

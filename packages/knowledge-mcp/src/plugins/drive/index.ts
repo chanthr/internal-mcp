@@ -65,6 +65,16 @@ export const drivePlugin = definePlugin({
     }
     startDriveSyncScheduler(parseInt(process.env.DRIVE_SYNC_INTERVAL_MIN || '30', 10));
   },
+  async catchUp({ log }) {
+    // A stdio session has no scheduler, so without this a local-only setup would never get an index or see new
+    // documents. One pass per session start; a lock keeps parallel sessions from doing the same work.
+    if (process.env.DRIVE_SYNC_ENABLED === 'false' || !driveConfigured() || !semanticConfigured()) return;
+    const { ensureCollection } = await import('./qdrant.js');
+    const { runSyncOnce } = await import('./sync.js');
+    await ensureCollection();
+    const r = await runSyncOnce();
+    log(r ? `sync: ${r.status} · changed=${r.changed} deleted=${r.deleted}` : 'sync: another process is already syncing');
+  },
   commands: {
     reindex: {
       description: 'rebuild the whole search index (--dry-run, --recreate, --root <id>, --source <label>). The server builds the first one itself',

@@ -24,7 +24,7 @@ import { chunkMarkdown } from './chunker.js';
 import { embedTexts, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
-import { classifyAndPath } from './path.js';
+import { classifyAndPath, ownerEmails } from './path.js';
 import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
 import { ensureCollection, getQdrantClient, DRIVE_COLLECTION } from './qdrant.js';
 // Single source of truth for the core indexing logic, shared with the incremental sync (sync.ts) to prevent drift.
@@ -83,6 +83,8 @@ interface DriveRoot {
 interface CliArgs {
   roots: DriveRoot[];
   dryRun: boolean;
+  /** Leave out files that need OCR instead of sending them to Mathpix (billed per page). */
+  noOcr: boolean;
   recreate: boolean;
   /** True when the run covers only some roots. Cleanup is then skipped so vectors of other roots are not deleted. */
   partial: boolean;
@@ -98,6 +100,7 @@ function parseArgs(args: string[]): CliArgs {
     );
   }
   let dryRun = false;
+  let noOcr = false;
   let recreate = false;
   let partial = false;
   for (let i = 0; i < args.length; i++) {
@@ -121,12 +124,14 @@ function parseArgs(args: string[]): CliArgs {
       partial = true;
     } else if (args[i] === '--dry-run') {
       dryRun = true;
+    } else if (args[i] === '--no-ocr') {
+      noOcr = true;
     } else if (args[i] === '--recreate') {
       // Empty the collection and rebuild (removes orphan chunks, reflects changes in cleaning and chunk counts)
       recreate = true;
     }
   }
-  return { roots, dryRun, recreate, partial };
+  return { roots, dryRun, noOcr, recreate, partial };
 }
 
 interface ListedFile {
@@ -200,11 +205,12 @@ async function listAllMarkdown(
 async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]> {
   const rootIds = new Set(DRIVE_ROOTS.map((r) => r.id));
   const out: ListedFile[] = [];
+  const untrusted: string[] = [];
   let pageToken: string | undefined;
   do {
     const resp = await drive.files.list({
       q: 'sharedWithMe = true and trashed = false',
-      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, size, parents)',
+      fields: 'nextPageToken, files(id, name, mimeType, modifiedTime, size, parents, owners(emailAddress), driveId)',
       pageSize: 200,
       pageToken,
       includeItemsFromAllDrives: true,
@@ -212,8 +218,12 @@ async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]>
     });
     for (const f of resp.data.files ?? []) {
       if (!f.id || !f.name || rootIds.has(f.id)) continue;
-      const { cls, path: parentPath } = await classifyAndPath(drive, f.parents ?? undefined);
-      if (cls !== 'shared') continue;
+      const { cls, path: parentPath } = await classifyAndPath(drive, f.parents ?? undefined, { owners: ownerEmails(f), driveId: f.driveId });
+      if (cls !== 'shared') {
+        // Not under a root, and either excluded or shared by someone who is not in drive.trustedOwners.
+        if (!rootIds.has(f.id) && (f.parents ?? []).length === 0 && !isExcludedName(f.name)) untrusted.push(`${f.name} (${ownerEmails(f).join(', ') || 'shared drive'})`);
+        continue;
+      }
       if (isExcludedName(f.name)) continue;
       const path = parentPath ? `${parentPath}/${f.name}` : f.name;
       if (f.mimeType === 'application/vnd.google-apps.folder') {
@@ -224,6 +234,10 @@ async function listSharedOutsideRoots(drive: DriveClient): Promise<ListedFile[]>
     }
     pageToken = resp.data.nextPageToken ?? undefined;
   } while (pageToken);
+  if (untrusted.length) {
+    console.log(`[index] ${untrusted.length} shared item(s) left out, owner not in drive.trustedOwners: ${untrusted.slice(0, 5).join('; ')}${untrusted.length > 5 ? ' …' : ''}`);
+    console.log('[index] to include them: knowledge-mcp setup trust <email-or-domain>');
+  }
   return out;
 }
 
@@ -257,9 +271,10 @@ async function pruneStaleVectors(keep: Set<string>): Promise<number> {
   return stale.size;
 }
 
-/** `knowledge-mcp drive reindex [--root ID | --source LABEL] [--dry-run] [--recreate]` */
+/** `knowledge-mcp drive reindex [--root ID | --source LABEL] [--dry-run] [--recreate] [--no-ocr]` */
 export async function runReindex(argv: string[]): Promise<void> {
-  const { roots, dryRun, recreate, partial } = parseArgs(argv);
+  const { roots, dryRun, noOcr, recreate, partial } = parseArgs(argv);
+  let ocrLeftOut = 0;
   const startTs = Date.now();
 
   console.log(
@@ -319,7 +334,12 @@ export async function runReindex(argv: string[]): Promise<void> {
     }
     try {
       // A dry run does not call OCR (Mathpix charges per page).
-      const { text, needsOcr } = await extractText(drive, file.id, file.mimeType, { ocr: !dryRun });
+      const { text, needsOcr } = await extractText(drive, file.id, file.mimeType, { ocr: !dryRun && !noOcr });
+      if (needsOcr && noOcr) {
+        // Not recorded as done: a later run with OCR must still pick this file up.
+        ocrLeftOut++;
+        continue;
+      }
       if (needsOcr || text.trim().length === 0) {
         console.log(`[index] skip (ocr/empty): [${file.source}] ${file.path}`);
         done.set(file.id, file.modifiedTime);
@@ -405,7 +425,10 @@ export async function runReindex(argv: string[]): Promise<void> {
     `\n[index] DONE — ${totalChunks} chunks, ${totalTokens} tokens, ` +
       `model ${EMBEDDING_MODEL}${cost}, ${elapsedSec}s`,
   );
+  if (ocrLeftOut > 0) {
+    console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: knowledge-mcp drive reindex (Mathpix is billed per page).`);
+  }
   // If everything succeeded, clear the checkpoint (keep it if failures remain)
-  if (!dryRun && done.size >= allFiles.length) clearCheckpoint();
+  if (!dryRun && done.size + ocrLeftOut >= allFiles.length) clearCheckpoint();
 }
 
