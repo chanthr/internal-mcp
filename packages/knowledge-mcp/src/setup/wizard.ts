@@ -8,7 +8,8 @@
  *
  * All prompts go through `SetupIO`, so tests drive the whole flow with scripted answers and fake services.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { checkDrive, checkEmbedding, checkGithub, checkRailway, checkSlack, type DriveCheck } from './checks.js';
@@ -60,7 +61,7 @@ export interface SetupResult {
 }
 
 const CONNECTORS = [
-  { id: 'drive', label: 'Google Drive', hint: 'search and read documents, semantic search' },
+  { id: 'drive', label: 'Google Drive', hint: 'search and read documents shared with a service account' },
   { id: 'slack', label: 'Slack', hint: 'read channels and search messages' },
   { id: 'github', label: 'GitHub', hint: 'read repositories' },
   { id: 'railway', label: 'Railway', hint: 'deployments and logs' },
@@ -75,6 +76,31 @@ const ENV_OF: Record<ConnectorId, string[]> = {
 };
 
 const yes = (answer: string) => /^y(es)?$/i.test(answer.trim());
+
+const COUNT_CAP = 5000;
+const DOCUMENT = /\.(md|markdown|mdx|txt|pdf|docx|pptx|xlsx)$/i;
+
+/** How many indexable documents a folder holds, for the confirmation line. Stops counting at COUNT_CAP. */
+export function countDocuments(dir: string): number {
+  let n = 0;
+  const walk = (d: string, depth: number): void => {
+    if (n >= COUNT_CAP || depth > 12) return;
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (n >= COUNT_CAP) return;
+      if (e.name.startsWith('.') || e.name === 'node_modules' || e.isSymbolicLink()) continue;
+      if (e.isDirectory()) walk(join(d, e.name), depth + 1);
+      else if (e.isFile() && DOCUMENT.test(e.name)) n++;
+    }
+  };
+  walk(dir, 0);
+  return n;
+}
 
 /** "1,3" or "drive slack" → connector ids. Unknown entries are ignored. */
 export function parseSelection(answer: string): ConnectorId[] {
@@ -184,6 +210,35 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   io.say('Knowledge MCP setup');
   io.say(`Files: ${envPath} (secrets) and ${configPath} (what to look at).`);
   io.say('Every value is checked against the real service before it is saved. Press Enter to skip a question.');
+  io.say();
+  // ── Documents on this machine ──
+  const currentFolders: Array<{ path: string }> = Array.isArray(config.folders) ? config.folders : [];
+  io.say('Documents on this machine');
+  io.say('  A folder of documents (Markdown, text, PDF, Word, PowerPoint, Excel) is searchable right away: no account, no key.');
+  if (currentFolders.length) io.say(`  Indexed now: ${currentFolders.map((f) => f.path).join(', ')}`);
+  for (;;) {
+    const answer = await io.ask(`  Folder path (Enter to ${currentFolders.length ? 'keep the list' : 'skip'}):`, '');
+    if (!answer) break;
+    const path = resolve(dir, answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ').replace(/^~(?=$|\/)/, homedir()));
+    let count: number | null = null;
+    try {
+      if (statSync(path).isDirectory()) count = countDocuments(path);
+    } catch {
+      /* does not exist */
+    }
+    if (count === null) {
+      io.say(`  ✗ ${path} is not a folder. Try again, or press Enter to skip.`);
+      continue;
+    }
+    if (!currentFolders.some((f) => resolve(dir, f.path) === path)) {
+      currentFolders.push({ path });
+      config.folders = currentFolders;
+      configChanged = true;
+    }
+    connected.push('local folder');
+    io.say(`  ✓ ${path}: ${count >= COUNT_CAP ? `${COUNT_CAP}+` : count} document${count === 1 ? '' : 's'} to index`);
+    break;
+  }
   io.say();
   io.say('Which services do you want to connect?');
   CONNECTORS.forEach((c, i) => io.say(`  ${i + 1}. ${c.label.padEnd(13)} ${c.hint}${isSet(c.id) ? '  (already set)' : ''}`));
@@ -312,44 +367,6 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
         configChanged = true;
       }
 
-      // Semantic search needs one more thing: an embedding endpoint. Vectors are stored in the built-in file.
-      io.say();
-      io.say('  Semantic search (find by meaning) needs an embedding model. Vectors are stored locally; no database to set up.');
-      io.say('    1. OpenAI (needs an API key)');
-      io.say('    2. Another OpenAI-compatible endpoint (a local model through Ollama, or another provider)');
-      io.say('    3. Skip (keyword search and reading still work)');
-      const choice = await io.ask('  Choose 1, 2 or 3:', '3');
-      if (choice === '1') {
-        const key = await askChecked(
-          io,
-          () => io.secret('  OpenAI API key:'),
-          (k) => checkEmbedding({ apiKey: k }),
-          (r) => `${r.model} answers (${r.dim} dimensions)`,
-        );
-        if (key) {
-          env.OPENAI_API_KEY = key.value;
-          env.EMBEDDING_BASE_URL = undefined;
-          env.EMBEDDING_MODEL = undefined;
-          env.EMBEDDING_DIM = undefined;
-          connected.push('semantic search');
-        }
-      } else if (choice === '2') {
-        const baseUrl = await io.ask('  Base URL (Ollama: http://localhost:11434/v1):', 'http://localhost:11434/v1');
-        const model = await io.ask('  Model name:', 'bge-m3');
-        const apiKey = await io.secret('  API key (Enter if the server needs none):');
-        try {
-          const r = await checkEmbedding({ baseUrl, model, apiKey: apiKey || undefined });
-          io.say(`  ✓ ${r.model} answers (${r.dim} dimensions)`);
-          env.EMBEDDING_BASE_URL = baseUrl;
-          env.EMBEDDING_MODEL = model;
-          env.EMBEDDING_DIM = String(r.dim); // read from the answer, so nobody has to look it up
-          if (apiKey) env.EMBEDDING_API_KEY = apiKey;
-          connected.push('semantic search');
-        } catch (e) {
-          io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
-          io.say('    Skipped. Run setup again when the endpoint is up.');
-        }
-      }
     }
   }
 
@@ -427,6 +444,50 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     }
   }
 
+  // ── Search by meaning: asked once there is something to search ──
+  // Also on a later run, when the folder or Drive was set up before: this is where a model is added afterwards.
+  if (currentFolders.length > 0 || connected.includes('drive') || isSet('drive')) {
+  io.say();
+  io.say('Search by meaning (optional)');
+  io.say('  Search already works by keywords, with nothing to set up. An embedding model also finds documents that use');
+  io.say('  different words than the question. It can be added later: documents are not read again.');
+  io.say('    1. OpenAI (needs an API key)');
+  io.say('    2. Another OpenAI-compatible endpoint (a local model through Ollama, or another provider)');
+  io.say('    3. Not now');
+  const choice = await io.ask('  Choose 1, 2 or 3:', '3');
+  if (choice === '1') {
+    const key = await askChecked(
+      io,
+      () => io.secret('  OpenAI API key:'),
+      (k) => checkEmbedding({ apiKey: k }),
+      (r) => `${r.model} answers (${r.dim} dimensions)`,
+    );
+    if (key) {
+      env.OPENAI_API_KEY = key.value;
+      env.EMBEDDING_BASE_URL = undefined;
+      env.EMBEDDING_MODEL = undefined;
+      env.EMBEDDING_DIM = undefined;
+      connected.push('search by meaning');
+    }
+  } else if (choice === '2') {
+    const baseUrl = await io.ask('  Base URL (Ollama: http://localhost:11434/v1):', 'http://localhost:11434/v1');
+    const model = await io.ask('  Model name:', 'bge-m3');
+    const apiKey = await io.secret('  API key (Enter if the server needs none):');
+    try {
+      const r = await checkEmbedding({ baseUrl, model, apiKey: apiKey || undefined });
+      io.say(`  ✓ ${r.model} answers (${r.dim} dimensions)`);
+      env.EMBEDDING_BASE_URL = baseUrl;
+      env.EMBEDDING_MODEL = model;
+      env.EMBEDDING_DIM = String(r.dim); // read from the answer, so nobody has to look it up
+      if (apiKey) env.EMBEDDING_API_KEY = apiKey;
+      connected.push('search by meaning');
+    } catch (e) {
+      io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
+      io.say('    Skipped. Run setup again when the endpoint is up.');
+    }
+  }
+  }
+
   // ── Write the files ──
   io.say();
   const envWritten = Object.keys(env).length ? updateEnvFile(envPath, env) : [];
@@ -472,7 +533,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
 
   io.say();
   io.say(connected.length ? `Connected: ${connected.join(', ')}.` : 'No service connected yet. Run `knowledge-mcp setup` again any time.');
-  if (connected.includes('semantic search')) io.say('The server builds the search index by itself the first time it starts.');
+  if (currentFolders.length > 0 || connected.includes('drive')) io.say('The server builds the search index by itself and keeps it up to date.');
   io.say('Check the result with `knowledge-mcp doctor`. Start the server with `knowledge-mcp serve`.');
   return { envWritten, configWritten: configChanged, connected, adminEmail };
 }
