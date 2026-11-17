@@ -227,7 +227,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 ```
 
 `loadPlugins` imports every `.ts` and `.js` file in the folder in name order. It skips names starting with `_`,
-`.d.ts` files and tests. Leave out `builtinPlugins`, or pick from `drivePlugin`, `slackPlugin`, `githubPlugin`
+`.d.ts` files and tests. Leave out `builtinPlugins`, or pick from `knowledgePlugin`, `drivePlugin`, `slackPlugin`, `githubPlugin`
 and `railwayPlugin`, to ship fewer connectors.
 
 </details>

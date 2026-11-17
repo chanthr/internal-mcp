@@ -227,7 +227,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 ```
 
 `loadPlugins`는 폴더 안의 `.ts`, `.js` 파일을 이름 순서로 불러옵니다. `_`로 시작하는 파일, `.d.ts`, 시험 파일은
-건너뜁니다. 기본 연결을 빼려면 `builtinPlugins`를 빼거나, `drivePlugin`, `slackPlugin`, `githubPlugin`,
+건너뜁니다. 기본 연결을 빼려면 `builtinPlugins`를 빼거나, `knowledgePlugin`, `drivePlugin`, `slackPlugin`, `githubPlugin`,
 `railwayPlugin` 중 필요한 것만 넣습니다.
 
 </details>
