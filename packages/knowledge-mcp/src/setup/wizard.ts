@@ -26,6 +26,7 @@ import {
   type Exec,
 } from './auto.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
+import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
 
 export interface SetupIO {
@@ -65,6 +66,7 @@ const CONNECTORS = [
   { id: 'slack', label: 'Slack', hint: 'read channels and search messages' },
   { id: 'github', label: 'GitHub', hint: 'read repositories' },
   { id: 'railway', label: 'Railway', hint: 'deployments and logs' },
+  { id: 'database', label: 'Database', hint: 'Postgres or a SQLite file: questions about your own data' },
 ] as const;
 type ConnectorId = (typeof CONNECTORS)[number]['id'];
 
@@ -73,6 +75,7 @@ const ENV_OF: Record<ConnectorId, string[]> = {
   slack: ['SLACK_BOT_TOKEN'],
   github: ['GITHUB_PAT', 'GITHUB_TOKEN'],
   railway: ['RAILWAY_TOKEN'],
+  database: [], // a connection in mcp.config.json, not one env var
 };
 
 const yes = (answer: string) => /^y(es)?$/i.test(answer.trim());
@@ -200,7 +203,8 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   const envPath = join(dir, '.env');
   const configPath = join(dir, 'mcp.config.json');
   const already = readEnvKeys(envPath);
-  const isSet = (id: ConnectorId) => ENV_OF[id].some((k) => already.has(k) || !!process.env[k]?.trim());
+  const isSet = (id: ConnectorId) =>
+    id === 'database' ? Object.keys(config.connections ?? {}).length > 0 : ENV_OF[id].some((k) => already.has(k) || !!process.env[k]?.trim());
 
   const env: Record<string, string | undefined> = {};
   const config = readConfig(configPath);
@@ -441,6 +445,61 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     if (got) {
       env.RAILWAY_TOKEN = got.value;
       connected.push('railway');
+    }
+  }
+
+  // ── Database ──
+  if (picked.includes('database')) {
+    io.say();
+    io.say('Database');
+    io.say('  Connect a database and the assistant can answer questions from it. Use a database user that can only read,');
+    io.say('  and only what everyone using this server may see.');
+    io.say('    1. Postgres');
+    io.say('    2. A SQLite file');
+    const kind = (await io.ask('  Choose 1 or 2:', '1')) === '2' ? 'sqlite' : 'postgres';
+    const taken = new Set([...Object.keys(config.connections ?? {}), 'knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
+    let name = '';
+    for (;;) {
+      const answer = (await io.ask('  A short name for it (lowercase letters, digits, dashes; for example shop):', 'db')).toLowerCase();
+      if (/^[a-z][a-z0-9-]{0,31}$/.test(answer) && !taken.has(answer)) {
+        name = answer;
+        break;
+      }
+      io.say(`  ✗ "${answer}" ${taken.has(answer) ? 'is already used' : 'is not a valid name'}. Try another.`);
+    }
+    let conn: Record<string, unknown> | null = null;
+    if (kind === 'postgres') {
+      const envName = `${name.toUpperCase().replace(/-/g, '_')}_DATABASE_URL`;
+      const got = await askChecked(
+        io,
+        () => io.secret('  Connection string (postgres://user:password@host:5432/database):'),
+        (url) => checkPostgresUrl(name, url),
+        (r) => `${r.version}, ${r.tables} table${r.tables === 1 ? '' : 's'} readable`,
+      );
+      if (got) {
+        env[envName] = got.value;
+        conn = { type: 'postgres', urlEnv: envName };
+      }
+    } else {
+      const got = await askChecked(
+        io,
+        async () => {
+          const answer = await io.ask('  Path to the database file:', '');
+          return answer ? resolve(dir, answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ').replace(/^~(?=$|\/)/, homedir())) : '';
+        },
+        (path) => checkSqliteFile(name, path),
+        (r) => `${r.version}, ${r.tables} table${r.tables === 1 ? '' : 's'}`,
+      );
+      if (got) conn = { type: 'sqlite', path: got.value };
+    }
+    if (conn) {
+      io.say('  Let the assistant run any read-only query on it? It can then answer questions nobody prepared a tool for.');
+      io.say('  The database refuses writes, and answers are limited in rows and time. It reads whatever this database user can read.');
+      if (yes(await io.ask('  Turn it on? (y/N)', 'n'))) conn.explore = true;
+      else io.say(`  Saved without tools. Declare them under "tools" in mcp.config.json (README: "Your data as tools"). Tables: knowledge-mcp ${name} tables`);
+      config.connections = { ...(config.connections ?? {}), [name]: conn };
+      configChanged = true;
+      connected.push('database');
     }
   }
 

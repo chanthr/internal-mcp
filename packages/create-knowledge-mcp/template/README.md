@@ -1,8 +1,8 @@
 # __NAME__
 
 Your own MCP server, built on [Knowledge MCP](https://github.com/chanthr/internal-mcp) __VERSION__.
-Each file in `src/plugins/` is a plugin that adds tools. The built-in Google Drive, Slack, GitHub and Railway
-plugins turn on when you set their env vars in `.env`.
+Each file in `src/plugins/` is a plugin that adds tools. Document search, Google Drive, Slack, GitHub and Railway
+are built in and turn on when they are set up.
 
 ## Run
 
@@ -14,6 +14,19 @@ npm run doctor                                            # which plugins are on
 ```
 
 Clients send the key as `Authorization: Bearer <key>`. State (keys, users, plugin data) lives in `./data`.
+
+## Without writing code
+
+| You have | Do this |
+| --- | --- |
+| A folder of documents | `npm run setup -- folder <path>`. Searchable right away: no account, no key |
+| A Postgres database or a SQLite file | `npm run setup` and pick Database. Or `npm run setup -- connection <name> --postgres --env NAME`, then declare tools in `mcp.config.json` |
+| An internal HTTP API | `npm run setup -- connection <name> --http <base URL>`, then declare one request per tool |
+
+Secrets go into `.env` with `npm run setup -- secret <ENV_NAME>`, typed unseen. `npm run setup -- check` connects
+to each database and compiles every declared query. The config reference is in the
+[Knowledge MCP README](https://github.com/chanthr/internal-mcp#your-data-as-tools). `npm run dev` restarts when
+`mcp.config.json` or `.env` changes.
 
 ## Add a tool
 

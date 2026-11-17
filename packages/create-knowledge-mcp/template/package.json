@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --include src/plugins src/server.ts serve",
+    "dev": "tsx watch --include src/plugins --include mcp.config.json --include .env src/server.ts serve",
     "build": "tsc",
     "start": "node dist/server.js serve",
     "setup": "tsx src/server.ts setup",
@@ -12,6 +12,7 @@
     "users": "tsx src/server.ts users",
     "doctor": "tsx src/server.ts doctor",
     "knowledge": "tsx src/server.ts knowledge",
+    "mcp": "tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

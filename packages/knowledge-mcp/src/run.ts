@@ -49,6 +49,8 @@ Usage: knowledge-mcp <command> [options]
   setup                               Guided setup: connect services, check them, write .env and the config
   setup check                         Verify every configured service live (exit 1 on a failure)
   setup folder <path>                 Index a local folder of documents (no account, no key)
+  setup connection <name> ...         Connect a database or an API for tools declared in mcp.config.json
+  setup secret <ENV_NAME>             Type one secret into .env without showing it
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
   setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
                                       Setup steps that ask nothing (for scripts and AI agents)
@@ -284,7 +286,7 @@ async function cmdSetup(argv: string[]): Promise<void> {
   if (!process.stdin.isTTY) {
     throw new UsageError(
       'setup asks questions, so it needs a terminal. Without one use the commands that ask nothing: ' +
-        'setup check | setup folder <path> | setup drive --gcloud | setup drive --key <file> | setup trust <owner> | setup github --from-gh | setup embeddings --base-url URL --model NAME',
+        'setup check | setup folder <path> | setup drive --gcloud | setup drive --key <file> | setup trust <owner> | setup github --from-gh | setup embeddings --base-url URL --model NAME | setup connection <name> ...',
     );
   }
   const { runSetup } = await import('./setup/wizard.js');

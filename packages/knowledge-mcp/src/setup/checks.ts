@@ -143,3 +143,26 @@ export async function checkRailway(token: string, opts: { apiBase?: string } = {
   const why = projects.json?.errors?.[0]?.message ?? me.json?.errors?.[0]?.message ?? `answer ${projects.status}`;
   throw new Error(`Railway: the token was rejected (${String(why).slice(0, 120)}).`);
 }
+
+/** A Postgres connection string, checked by connecting: which server answered and how many tables this user can read. */
+export async function checkPostgresUrl(name: string, url: string): Promise<{ version: string; tables: number }> {
+  if (!/^postgres(ql)?:\/\//i.test(url)) throw new Error('a Postgres connection string starts with postgres:// (postgres://user:password@host:5432/database)');
+  const { postgresAdapter } = await import('../connections/postgres.js');
+  // The adapter reads its URL from an env var. The value is not saved yet, so it gets a name of its own for the check.
+  const key = `KMCP_SETUP_CHECK_${Date.now()}`;
+  process.env[key] = url;
+  const adapter = postgresAdapter({ name, urlEnv: key, pool: 1 });
+  try {
+    return { version: await adapter.ping(), tables: (await adapter.tables()).length };
+  } finally {
+    await adapter.close();
+    delete process.env[key];
+  }
+}
+
+/** A SQLite file, checked by opening it read-only. */
+export async function checkSqliteFile(name: string, path: string): Promise<{ version: string; tables: number }> {
+  const { sqliteAdapter } = await import('../connections/sqlite.js');
+  const adapter = sqliteAdapter({ name, path });
+  return { version: await adapter.ping(), tables: (await adapter.tables()).length };
+}

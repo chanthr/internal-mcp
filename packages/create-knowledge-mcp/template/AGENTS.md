@@ -117,7 +117,47 @@ again. With a model set, passage text is sent to that model's endpoint; say so b
 
 After changing to another model, run `npm run knowledge -- reembed`. It makes new vectors from the stored text.
 
-## Step 5: GitHub (optional)
+## Step 5: a database or an internal API (optional)
+
+The person's own data becomes tools from a few lines in `mcp.config.json`. The full reference is in the README of
+`@chnxthr/knowledge-mcp`, section "Your data as tools".
+
+```bash
+npm run setup -- connection shop --postgres --env SHOP_DATABASE_URL     # or: --sqlite <file>, --http <base URL>
+npm run mcp -- shop tables                                              # the tables and columns it can read
+npm run setup -- check                                                  # connects, and compiles every declared query
+```
+
+| Rule | Why |
+| --- | --- |
+| Never ask for the connection string or an API token | The person runs `npm run setup -- secret SHOP_DATABASE_URL` in their own terminal and types it there, unseen. A command of yours never carries a secret |
+| Ask which database user it is | It should be a user made for this server that can only read, and only what everyone using this server may see. Never a superuser, and not the user their application runs as |
+| Ask before adding `--explore` | It lets the assistant run any read-only query. Say that it reads whatever the database user can read |
+| Ask before any tool with `"readOnly": false` | Such a tool changes data. Say what it changes and wait for a yes |
+| For an API, write secrets as `${ENV_NAME}` | `--header 'Authorization: Bearer ${CRM_TOKEN}'`. The command refuses a secret written out |
+
+To add a tool, look at the tables, then edit `tools` in `mcp.config.json` (this file has no secrets, so you may
+edit it):
+
+```json
+{
+  "tools": [
+    {
+      "name": "orders_by_customer",
+      "connection": "shop",
+      "description": "Orders of one customer, newest first. Use it for questions about what a customer bought.",
+      "params": { "email": { "type": "string", "description": "Customer email" }, "limit": { "type": "integer", "default": 20, "min": 1, "max": 100 } },
+      "sql": "select id, total, status, created_at from orders where email = :email order by created_at desc limit :limit"
+    }
+  ]
+}
+```
+
+Write `:name` where a value goes and declare every name in `params`. Never build SQL by putting a value into the
+text. One statement per tool. Run `npm run setup -- check` after every change: it reports a misspelled column or an
+undeclared parameter with the tool's name, and the server does not start while the file has such a mistake.
+
+## Step 6: GitHub (optional)
 
 ```bash
 gh auth status                   # signed in?
@@ -128,7 +168,7 @@ This reuses the gh CLI login. Tell the person that this token can do everything 
 fine-grained read-only token is safer for a server other people use. If they prefer that, or gh is not signed
 in, they run `npm run setup` in their terminal and enter a token there.
 
-## Step 6: Slack and Railway (optional)
+## Step 7: Slack and Railway (optional)
 
 These need a token the person creates in a web console, so they run `npm run setup` in their own terminal and
 pick the service. The wizard says where to get the token and checks it as they enter it.
@@ -138,7 +178,7 @@ pick the service. The wizard says where to get the token and checks it as they e
 | Slack | api.slack.com/apps → their app → OAuth & Permissions → Bot User OAuth Token (`xoxb-`). Scopes: `channels:read`, `channels:history`, `groups:read`, `groups:history`, `im:history`, `mpim:history`, `users:read`, `files:read`. Message search also needs a user token (`xoxp-`) with `search:read` |
 | Railway | railway.com → Account Settings → Tokens |
 
-## Step 7: keep sensitive folders out (optional)
+## Step 8: keep sensitive folders out (optional)
 
 Ask whether any folders, in Drive or on this machine, must stay out of search (HR, contracts, personal data). Put the folder names in
 `mcp.config.json`. This file has no secrets and you may edit it:
@@ -147,7 +187,7 @@ Ask whether any folders, in Drive or on this machine, must stay out of search (H
 { "drive": { "excludeFolders": ["HR", "Contracts"] } }
 ```
 
-## Step 8: connect and verify
+## Step 9: connect and verify
 
 ```bash
 npm run setup -- check           # every configured line should be ✓
