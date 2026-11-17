@@ -233,7 +233,7 @@ questions nobody prepared a tool for. `npm run setup` offers this when you pick 
 | Connection | Fields |
 | --- | --- |
 | `postgres` | `urlEnv` (the NAME of the env var holding `postgres://user:password@host:5432/db`), `explore`, `maxRows`, `timeoutMs`, `pool` (connections kept open, default 3), `description` |
-| `sqlite` | `path` (absolute, or relative to the project), `explore`, `maxRows`, `timeoutMs`, `description`. Each query runs in a short-lived child process, so a slow one can be stopped |
+| `sqlite` | `path` (absolute, or relative to the project), `explore`, `maxRows`, `timeoutMs`, `description`. Each query runs in a short-lived child process, so a slow one can be stopped, and it ends with the server instead of outliving it |
 | `http` | `baseUrl`, `headers` and `query` sent with every request (a value may contain `${ENV_NAME}`), `timeoutMs` (default 15 s), `maxBytes` (largest response read, default 1 MB), `description` |
 
 | Tool field | Meaning |

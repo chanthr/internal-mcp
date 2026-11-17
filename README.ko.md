@@ -233,7 +233,7 @@ npm run setup -- check                                                # 접속�
 | 연결 | 필드 |
 | --- | --- |
 | `postgres` | `urlEnv`(`postgres://user:password@host:5432/db`가 든 환경변수의 이름), `explore`, `maxRows`, `timeoutMs`, `pool`(열어 두는 접속 수, 기본 3), `description` |
-| `sqlite` | `path`(절대 경로 또는 프로젝트 기준 상대 경로), `explore`, `maxRows`, `timeoutMs`, `description`. 질의마다 잠깐 사는 자식 프로세스에서 돌려서 느린 질의를 멈출 수 있습니다 |
+| `sqlite` | `path`(절대 경로 또는 프로젝트 기준 상대 경로), `explore`, `maxRows`, `timeoutMs`, `description`. 질의마다 잠깐 사는 자식 프로세스에서 돌려서 느린 질의를 멈출 수 있습니다. 서버가 죽으면 자식도 스스로 끝납니다 |
 | `http` | `baseUrl`, 모든 요청에 붙는 `headers`와 `query`(값에 `${ENV_NAME}`을 쓸 수 있습니다), `timeoutMs`(기본 15초), `maxBytes`(읽을 응답 크기 상한, 기본 1MB), `description` |
 
 | 도구 필드 | 뜻 |

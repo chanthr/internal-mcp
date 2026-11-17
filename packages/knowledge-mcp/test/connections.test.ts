@@ -497,3 +497,50 @@ test('a single row that is too large is cut to fit, arrays and JSON values inclu
   assert.ok(JSON.stringify(wide).length < 201000);
   assert.equal(wide.truncated, true);
 });
+
+// ── A query must not outlive the server that started it ──
+// (Found the hard way: a test process died with 31 endless queries running, and they ran for over an hour.)
+import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
+const { SQLITE_CHILD_SOURCE } = await import('../src/connections/sqlite.js');
+const ENDLESS = 'with recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n';
+const started: ChildProcess[] = [];
+after(() => {
+  for (const c of started) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL'); // never leave one behind, whatever a test did
+});
+function startChild(job: Record<string, unknown>) {
+  const child = spawnProcess(process.execPath, ['--no-warnings', '--max-old-space-size=256', '-e', SQLITE_CHILD_SOURCE], { env: {}, stdio: ['pipe', 'pipe', 'ignore'] });
+  started.push(child);
+  let out = '';
+  child.stdout!.on('data', (c) => (out += c));
+  const closed = new Promise<{ signal: NodeJS.Signals | null; ms: number; out: string }>((resolve) => {
+    const t = Date.now();
+    child.on('close', (_code, signal) => resolve({ signal, ms: Date.now() - t, out }));
+  });
+  child.stdin!.write(`${JSON.stringify({ mode: 'query', path: dbPath, readOnly: true, maxRows: 10, maxCell: 4000, params: {}, timeoutMs: 60000, ...job })}\n`);
+  return { child, closed };
+}
+
+test('sqlite child: it ends itself when the server that started it is gone', async () => {
+  const { child, closed } = startChild({ sql: ENDLESS });
+  await new Promise((r) => setTimeout(r, 400)); // the query is running by now
+  assert.equal(child.exitCode, null);
+  child.stdin!.destroy(); // what the child sees when its parent process dies: the pipe closes
+  const end = await closed;
+  assert.equal(end.signal, 'SIGKILL');
+  assert.ok(end.ms < 5000, `still running ${end.ms}ms after the pipe closed`);
+});
+
+test('sqlite child: it ends itself a little past the time limit even when nobody stops it', async () => {
+  const { closed } = startChild({ sql: ENDLESS, timeoutMs: 300 }); // the pipe stays open: the "server" is alive but does nothing
+  const end = await closed;
+  assert.equal(end.signal, 'SIGKILL');
+  assert.ok(end.ms >= 2000 && end.ms < 6000, `ended after ${end.ms}ms`);
+});
+
+test('sqlite child: an ordinary query answers and exits by itself', async () => {
+  const { closed } = startChild({ sql: 'select count(*) as n from customers' });
+  const end = await closed;
+  assert.equal(end.signal, null);
+  assert.deepEqual(JSON.parse(end.out), { ok: { columns: ['n'], rows: [[2]], truncated: false } });
+  assert.ok(end.ms < 3000);
+});

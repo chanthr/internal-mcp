@@ -3,8 +3,9 @@
  *
  * Node's SQLite runs a query on the calling thread until it finishes. On the server's own thread a slow query would
  * stop every other request, and it could not be ended: the time is spent inside SQLite, where neither a timer nor
- * terminating a worker thread reaches. Each query therefore runs in a short-lived child process (about 25 ms to
- * start). When the time limit passes the process is killed, and the server never waits.
+ * terminating a worker thread reaches. Each query therefore runs in a short-lived child process (about 35 ms to
+ * start). When the time limit passes the process is killed, and the server never waits. The child also ends itself
+ * when the server is gone, so a crash or a restart in the middle of a query leaves nothing running.
  *
  * What keeps a read-only query from doing anything but read, all of it decided inside the child process:
  *   1. The file is opened read-only, so SQLite refuses to change it.
@@ -28,15 +29,24 @@ import { MAX_CELL_CHARS, type Table } from './format.js';
 import type { ParsedSql } from './sql.js';
 
 // Plain JavaScript on purpose: run with `node -e`, it is the same from source (tsx) and from the build.
-// The job arrives on stdin and the answer leaves on stdout, both as JSON.
-const CHILD = `
-let raw = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (c) => (raw += c));
-process.stdin.on('end', () => {
+// The job arrives as one line of JSON on stdin and the answer leaves on stdout as JSON.
+//
+// The query runs in a worker thread of the child, so the child's own thread stays free to watch two things a
+// query cannot be trusted to respect, because the time is spent inside SQLite:
+//   - stdin. The server keeps its end open for as long as it lives. When it closes, the server is gone (a crash,
+//     a restart) and nobody is left to stop the query: the child ends itself.
+//   - a deadline a little past the time limit, in case the server is alive but did not stop it.
+// Without this, a query that never ends would keep a processor busy until someone found the process.
+export const SQLITE_CHILD_SOURCE = `
+const { Worker } = require('node:worker_threads');
+const NEWLINE = String.fromCharCode(10);
+const die = () => process.kill(process.pid, 'SIGKILL');
+
+// Runs in the worker thread.
+function work() {
+  const { parentPort, workerData: w } = require('node:worker_threads');
   let answer;
   try {
-    const w = JSON.parse(raw);
     const { DatabaseSync } = require('node:sqlite');
     const cell = (v) => {
       if (v instanceof Uint8Array) return '[binary, ' + v.length + ' bytes]';
@@ -46,12 +56,12 @@ process.stdin.on('end', () => {
     };
     // The start of a statement the way SQLite reads it: whitespace, "--" comments and slash-star comments (which
     // do not nest) are skipped.
-    const NEWLINE = String.fromCharCode(10);
+    const LF = String.fromCharCode(10);
     const firstWord = (s) => {
       let i = 0;
       for (;;) {
         while (i < s.length && s.charCodeAt(i) <= 32) i++;
-        if (s.startsWith('--', i)) { const e = s.indexOf(NEWLINE, i); i = e === -1 ? s.length : e + 1; continue; }
+        if (s.startsWith('--', i)) { const e = s.indexOf(LF, i); i = e === -1 ? s.length : e + 1; continue; }
         if (s.startsWith('/*', i)) { const e = s.indexOf('*/', i + 2); i = e === -1 ? s.length : e + 2; continue; }
         break;
       }
@@ -98,12 +108,38 @@ process.stdin.on('end', () => {
         }
       }
     }
+    db.close();
     answer = { ok: out };
   } catch (e) {
     answer = { error: e && e.message ? String(e.message) : String(e) };
   }
-  process.stdout.write(JSON.stringify(answer), () => process.exit(0));
+  parentPort.postMessage(answer);
+}
+
+const send = (answer) => process.stdout.write(JSON.stringify(answer), () => process.exit(0));
+let raw = '';
+let started = false;
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  if (started) return;
+  raw += chunk;
+  const end = raw.indexOf(NEWLINE);
+  if (end === -1) return;
+  started = true;
+  let job;
+  try {
+    job = JSON.parse(raw.slice(0, end));
+  } catch (e) {
+    return send({ error: 'the job could not be read' });
+  }
+  setTimeout(die, job.timeoutMs + 2000);
+  const worker = new Worker('(' + work.toString() + ')()', { eval: true, workerData: job, resourceLimits: { maxOldGenerationSizeMb: 256 } });
+  worker.on('message', send);
+  worker.on('error', (e) => send({ error: e && e.message ? String(e.message) : String(e) }));
 });
+// The other end of stdin closed: the server is gone.
+process.stdin.on('end', die);
+process.stdin.on('close', die);
 `;
 
 type Job =
@@ -142,7 +178,7 @@ export function sqliteAdapter(opts: { name: string; path: string }): SqlAdapter 
   function spawnQuery<T>(job: Job, readOnly: boolean, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolvePromise, reject) => {
       // An empty environment: the child needs nothing from it, and the server's secrets stay out of it.
-      const child = spawn(process.execPath, ['--no-warnings', '--max-old-space-size=256', '-e', CHILD], { env: {}, stdio: ['pipe', 'pipe', 'ignore'] });
+      const child = spawn(process.execPath, ['--no-warnings', '--max-old-space-size=256', '-e', SQLITE_CHILD_SOURCE], { env: {}, stdio: ['pipe', 'pipe', 'ignore'] });
       const chunks: Buffer[] = [];
       let size = 0;
       let failure: ToolError | null = null;
@@ -180,7 +216,8 @@ export function sqliteAdapter(opts: { name: string; path: string }): SqlAdapter 
           else resolvePromise(answer.ok as T);
         }),
       );
-      child.stdin?.end(JSON.stringify({ ...job, path: file, readOnly, maxCell: MAX_CELL_CHARS }));
+      // One line, and the pipe stays open: the child takes the pipe closing as "the server is gone" and ends itself.
+      child.stdin?.write(`${JSON.stringify({ ...job, path: file, readOnly, maxCell: MAX_CELL_CHARS, timeoutMs })}\n`);
     });
   }
 
