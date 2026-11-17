@@ -15,11 +15,16 @@ const { runSetup, parseSelection } = await import('../src/setup/wizard.js');
 const { updateEnvFile, readEnvKeys, formatEnvValue } = await import('../src/setup/envfile.js');
 const { checkEmbedding, checkSlack, checkGithub, checkRailway } = await import('../src/setup/checks.js');
 const auto = await import('../src/setup/auto.js');
+const { runSetupCommand } = await import('../src/setup/commands.js');
 type Exec = import('../src/setup/auto.js').Exec;
 
 /** No CLI installed: every command fails like a missing binary. */
 const noTools: Exec = () => ({ status: 127, stdout: '', stderr: 'not found' });
 
+// Everything that is awaited at the top level (imports, servers) happens here, before the first test is
+// registered. An await between tests suspends this file while the tests registered so far run; when they finish
+// first, the runner takes the file for done and runs the `after` hooks, and the tests registered later find the
+// servers closed (ECONNREFUSED). It showed up on a loaded machine, when an import in the middle got slower.
 // One fake for Slack, GitHub, Railway and an embedding endpoint. "good-*" tokens pass.
 const server = createServer((req, res) => {
   let raw = '';
@@ -45,6 +50,32 @@ const server = createServer((req, res) => {
 await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
 after(() => server.close());
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+// A fake Google for the Drive steps: token endpoint + files.list.
+const google = createServer((req, res) => {
+  let raw = '';
+  req.on('data', (c) => (raw += c));
+  req.on('end', () => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/token') return res.end(JSON.stringify({ access_token: 'fake-access', expires_in: 3600, token_type: 'Bearer' }));
+    if (req.url?.startsWith('/drive/files')) {
+      return res.end(
+        JSON.stringify({
+          files: [
+            { name: 'Handbook', mimeType: 'application/vnd.google-apps.folder', owners: [{ emailAddress: 'boss@acme.com' }] },
+            { name: 'Plan', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'ann@gmail.com' }] },
+            { name: 'Company policy (urgent)', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'mallory@evil.example' }] },
+          ],
+        }),
+      );
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+});
+await new Promise<void>((r) => google.listen(0, '127.0.0.1', r));
+after(() => google.close());
+const gbase = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
 
 /** Scripted terminal: answers are consumed in order, everything said is recorded. */
 function scripted(answers: string[]) {
@@ -233,7 +264,6 @@ test('wizard + gh: the gh login is offered with a warning and only used after a 
   assert.deepEqual(r2.envWritten, []);
 });
 
-const { runSetupCommand } = await import('../src/setup/commands.js');
 function collect() {
   const lines: string[] = [];
   return { lines, out: (l: string) => void lines.push(l) };
@@ -242,7 +272,7 @@ function collect() {
 test('setup check: verifies what is configured, reports what is not, exit code follows failures', async () => {
   const endpoints = { slack: `${base}/slack`, github: `${base}/github`, railway: `${base}/railway` };
   const ok = collect();
-  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0);
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0, ok.lines.join('\n'));
   assert.match(ok.lines.join('\n'), /✓ slack\s+Acme as kbot[\s\S]*✓ github\s+signed in as octo/);
   assert.match(ok.lines.join('\n'), /✓ embeddings\s+bge-m3 \(1024 dimensions\)/);
   assert.match(ok.lines.join('\n'), /· drive\s+not configured/);
@@ -285,7 +315,7 @@ test('setup drive --gcloud --yes: runs the three steps and saves the key path', 
 test('setup github --from-gh and setup embeddings: saved only after the live check passes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-cmd-'));
   const o = collect();
-  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir, out: o.out, exec: fakeCli({ gh: 'good-gh' }).exec, endpoints: { github: `${base}/github` } }), 0);
+  assert.equal(await runSetupCommand(['github', '--from-gh'], { dir, out: o.out, exec: fakeCli({ gh: 'good-gh' }).exec, endpoints: { github: `${base}/github` } }), 0, o.lines.join('\n'));
   assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3'], { dir, out: o.out, env: {} }), 0);
   const env = readFileSync(join(dir, '.env'), 'utf8');
   assert.match(env, /GITHUB_PAT=good-gh\n/);
@@ -301,30 +331,6 @@ test('setup github --from-gh and setup embeddings: saved only after the live che
 
 // ── Drive in the wizard, against a fake Google: token endpoint + files.list ──
 import { generateKeyPairSync } from 'node:crypto';
-const google = createServer((req, res) => {
-  let raw = '';
-  req.on('data', (c) => (raw += c));
-  req.on('end', () => {
-    res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/token') return res.end(JSON.stringify({ access_token: 'fake-access', expires_in: 3600, token_type: 'Bearer' }));
-    if (req.url?.startsWith('/drive/files')) {
-      return res.end(
-        JSON.stringify({
-          files: [
-            { name: 'Handbook', mimeType: 'application/vnd.google-apps.folder', owners: [{ emailAddress: 'boss@acme.com' }] },
-            { name: 'Plan', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'ann@gmail.com' }] },
-            { name: 'Company policy (urgent)', mimeType: 'application/vnd.google-apps.document', owners: [{ emailAddress: 'mallory@evil.example' }] },
-          ],
-        }),
-      );
-    }
-    res.statusCode = 404;
-    res.end('{}');
-  });
-});
-await new Promise<void>((r) => google.listen(0, '127.0.0.1', r));
-after(() => google.close());
-const gbase = `http://127.0.0.1:${(google.address() as AddressInfo).port}`;
 function fakeKeyFile(dir: string): string {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const path = join(dir, 'sa.json');

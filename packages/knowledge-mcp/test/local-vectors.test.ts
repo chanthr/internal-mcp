@@ -14,6 +14,8 @@ Object.assign(process.env, { MCP_DATA_DIR: mkdtempSync(join(tmpdir(), 'kmcp-vec-
 
 const { getQdrantClient, getLocalIndex: localIndex, vectorProblem, vectorStoreKind, ensureCollection, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
 const { makeChunkId } = await import('../src/plugins/drive/indexer.js');
+const { getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
+const { tokenize, ftsQuery } = await import('../src/plugins/drive/tokens.js');
 const client = await getQdrantClient();
 const local = (await localIndex())!;
 const C = 'unit_test';
@@ -113,8 +115,6 @@ test('vectors of another model are never mixed: indexing and search fall back to
 });
 
 // ── Keyword index and chunks without vectors ──
-const { getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
-const { tokenize, ftsQuery } = await import('../src/plugins/drive/tokens.js');
 const K = 'kw_test';
 
 test('tokens: words for Latin text, character pairs for CJK, split at a script boundary', () => {

@@ -146,6 +146,7 @@ const { dataConfigProblems, ConnectionsSchema, DataToolsSchema } = await import(
 const { buildUrl, fillBody, fillPath } = await import('../src/connections/http.js');
 const { checkConnection, closeDataConnections } = await import('../src/connections/index.js');
 const { tableResult } = await import('../src/connections/format.js');
+const { SQLITE_CHILD_SOURCE } = await import('../src/connections/sqlite.js'); // every awaited import stays above the first test
 const { Registry } = await import('../src/plugin/registry.js');
 const { getConfig } = await import('../src/core/config.js');
 const { isToolAllowed } = await import('../src/core/scope.js');
@@ -501,7 +502,6 @@ test('a single row that is too large is cut to fit, arrays and JSON values inclu
 // ── A query must not outlive the server that started it ──
 // (Found the hard way: a test process died with 31 endless queries running, and they ran for over an hour.)
 import { spawn as spawnProcess, type ChildProcess } from 'node:child_process';
-const { SQLITE_CHILD_SOURCE } = await import('../src/connections/sqlite.js');
 const ENDLESS = 'with recursive n(x) as (select 1 union all select x + 1 from n) select count(*) from n';
 const started: ChildProcess[] = [];
 after(() => {

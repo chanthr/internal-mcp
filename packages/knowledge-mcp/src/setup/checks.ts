@@ -16,7 +16,10 @@ async function getJson(url: string, init: RequestInit, what: string): Promise<{ 
   try {
     res = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
   } catch (e) {
-    throw new Error(`${what}: could not reach ${new URL(url).host} (${e instanceof Error ? e.message : String(e)})`);
+    // "fetch failed" alone says nothing: the reason is in the cause (ECONNREFUSED, ENOTFOUND, a TLS error, a timeout).
+    const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+    const why = (e as { name?: string }).name === 'TimeoutError' ? `no answer within ${TIMEOUT_MS / 1000}s` : cause?.code ?? cause?.message ?? (e instanceof Error ? e.message : String(e));
+    throw new Error(`${what}: could not reach ${new URL(url).host} (${why})`);
   }
   const text = await res.text();
   let json: any = null;

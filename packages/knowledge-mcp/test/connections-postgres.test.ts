@@ -117,7 +117,17 @@ const json = async (name: string, args: Record<string, unknown> = {}) => {
   assert.equal(r.isError, false, r.text);
   return JSON.parse(r.text);
 };
-const count = async (where = 'true') => Number((await json('shop_query', { sql: `select count(*) as n from orders where ${where}` })).rows[0].n);
+// Rows in `orders`. Also the way a test waits for the engine after a connection was dropped: PGlite serves one
+// connection at a time and needs a moment to notice that the last one is gone. A real server does not; the wait is
+// for the test engine, and only for "cannot connect".
+const count = async (where = 'true') => {
+  for (let attempt = 0; ; attempt++) {
+    const r = await call('shop_query', { sql: `select count(*) as n from orders where ${where}` });
+    if (!r.isError) return Number(JSON.parse(r.text).rows[0].n);
+    if (attempt >= 50 || !/cannot connect to the database|connection to the database was lost/.test(r.text)) assert.fail(r.text);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+};
 
 test('postgres: a declared query runs with bound parameters and typed results', async () => {
   const r = await json('orders_by_customer', { email: 'ann@example.com' });
