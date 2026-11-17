@@ -243,6 +243,8 @@ export async function indexText(
   file: IndexableFile,
   text: string,
   prev: Awaited<ReturnType<typeof getIndexedState>> | undefined = undefined,
+  /** `vectors: false` stores the text now and leaves the vectors to backfillVectors (see folders.ts). */
+  opts: { vectors?: boolean } = {},
 ): Promise<number> {
   if (prev === undefined) prev = await getIndexedState(file.id);
   const sameLocation = !!prev && prev.file_path === file.path && prev.file_name === file.name && prev.source === file.source;
@@ -261,7 +263,7 @@ export async function indexText(
   const bizMeta = deriveBizMeta(file.path, file.source);
   // Embed with the heading breadcrumb (embedInputForChunk): the stored content is unchanged, only the embedding input
   // gets the section context. No embedding model: store the text now, vectors come later (backfillVectors).
-  const vectors = (await vectorsUsable()) ? await embedTexts(chunks.map(embedInputForChunk)) : null;
+  const vectors = opts.vectors !== false && (await vectorsUsable()) ? await embedTexts(chunks.map(embedInputForChunk)) : null;
 
   const points = chunks.map((c, idx) => ({
     id: makeChunkId(file.id, idx),

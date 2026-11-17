@@ -56,6 +56,8 @@ Object.assign(process.env, {
   MCP_DATA_DIR: mkdtempSync(join(tmpdir(), 'kmcp-kn-')),
   EMBEDDING_DIM: String(DIM),
   EMBEDDING_MODEL: 'test-model',
+  EMBED_INDEX_RETRIES: '0', // a dead endpoint fails at once in these tests
+  EMBED_QUERY_RETRIES: '0',
   MCP_CONFIG_JSON: JSON.stringify({ folders: [{ path: docs, name: 'docs', source: 'handbook' }], drive: { excludeFolders: ['HR'] } }),
 });
 
@@ -185,6 +187,21 @@ test('Drive code that walks the index leaves local documents alone, and a folder
   assert.match(await search(admin, { query: 'production deploys main branch' }), /deploy\.md/);
 });
 
+test('fuse: the first hit of one search is not buried under passages both searches rank low', () => {
+  // Meaning search puts `top` first; keyword search does not find it at all. Twenty passages are found by both,
+  // from rank 10 down. With the textbook constant (60) all twenty outrank `top`, and five results never show it.
+  const pt = (id: string) => ({ id, score: 1, payload: { file_id: id } });
+  const shared = Array.from({ length: 20 }, (_, i) => pt(`shared${i}`));
+  const hits = fuse([
+    { kind: 'keyword', points: [...Array.from({ length: 9 }, (_, i) => pt(`k${i}`)), ...shared] },
+    { kind: 'semantic', points: [pt('top'), ...Array.from({ length: 8 }, (_, i) => pt(`s${i}`)), ...shared] },
+  ]);
+  const order = hits.map((h) => h.payload.file_id);
+  assert.ok(order.indexOf('top') < 2, `top is at ${order.indexOf('top')}`);
+  assert.ok(order.indexOf('k0') < 2);
+  assert.ok(order.indexOf('shared0') > order.indexOf('top'));
+});
+
 test('fuse: a chunk found by both searches outranks one found by either', () => {
   const pt = (id: number) => ({ id, score: 1, payload: { file_id: `f${id}` } });
   const hits = fuse([
@@ -224,6 +241,29 @@ test('when the embedding endpoint is down, search still answers from keywords an
   } finally {
     delete process.env.EMBEDDING_BASE_URL;
     delete process.env.EMBED_QUERY_RETRIES;
+  }
+});
+
+test('a scan does not wait for the embedding model: text is searchable at once, vectors follow', async () => {
+  const index = (await getLocalIndex())!;
+  writeFileSync(join(docs, 'guides', 'oncall.md'), '# On-call\n\nThe on-call engineer acknowledges a page within ten minutes.\n');
+  process.env.EMBEDDING_BASE_URL = 'http://127.0.0.1:9/v1'; // a model is configured, and it is down
+  try {
+    const r = (await scanFolders())!;
+    assert.deepEqual([r.indexed, r.errored], [1, 0]); // the file is indexed although no vector could be made
+    assert.match(await search(admin, { query: 'who acknowledges a page' }), /oncall\.md/);
+    const s = await index.stats(DRIVE_COLLECTION);
+    assert.ok(s.withVectors < s.chunks);
+  } finally {
+    delete process.env.EMBEDDING_BASE_URL;
+  }
+  process.env.EMBEDDING_BASE_URL = `http://127.0.0.1:${(model.address() as AddressInfo).port}/v1`; // the model is back
+  try {
+    await scanFolders();
+    const s = await index.stats(DRIVE_COLLECTION);
+    assert.equal(s.withVectors, s.chunks);
+  } finally {
+    delete process.env.EMBEDDING_BASE_URL;
   }
 });
 
