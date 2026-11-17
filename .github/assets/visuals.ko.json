@@ -38,10 +38,16 @@
       "cols": 2,
       "tiles": [
         {
+          "icon": "search",
+          "title": "지식 검색",
+          "tag": "knowledge",
+          "desc": "로컬 폴더와 Drive 문서를 한 번에 검색합니다. 키 없이 키워드로 찾고, 임베딩 모델을 넣으면 뜻으로도 찾습니다."
+        },
+        {
           "icon": "folder-search",
           "title": "Google Drive",
           "tag": "drive",
-          "desc": "파일을 검색하고 읽고 목록을 봅니다. Qdrant 색인과 OpenAI 임베딩으로 의미 검색도 합니다."
+          "desc": "파일을 검색하고 읽고 목록을 봅니다. 서비스 계정에 공유한 문서는 지식 색인에 들어갑니다."
         },
         {
           "icon": "slack",

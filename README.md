@@ -12,7 +12,7 @@
 <p align="center">
   <b>Build your team's own MCP server. Install with one command, add a tool with one file.</b><br>
   API keys, Google sign-in, per-person permissions and an audit log are already done.<br>
-  Google Drive, Slack, GitHub and Railway come built in.
+  Document search (local folders, Google Drive), Slack, GitHub and Railway come built in.
 </p>
 
 <p align="center">
@@ -57,6 +57,17 @@ npm run setup
 Or let an AI agent do it. The project includes [`AGENTS.md`](packages/create-knowledge-mcp/template/AGENTS.md), a setup
 guide for agents: open the folder in Claude Code and say "set this server up, follow AGENTS.md". The agent runs the
 setup commands, asks before creating anything in your accounts, and never handles your secrets.
+
+**Search your documents first.** A folder of documents is enough: no account and no key.
+
+```bash
+npm run setup -- folder ~/Documents/handbook   # Markdown, text, PDF, Word, PowerPoint, Excel
+npm run dev
+```
+
+The server indexes the folder when it starts, and `search_knowledge` answers by keywords, in any language.
+An embedding model adds search by meaning later, without reading the documents again. Google Drive documents
+join the same index once Drive is connected.
 
 The project comes with an example plugin, `src/plugins/notes.ts`. Point a client at
 `http://localhost:8080/mcp` with `Authorization: Bearer <key>` and you will see `notes_add` and `notes_list`.
@@ -246,7 +257,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/plugins-dark.svg">
-  <img alt="Built-in plugins: Google Drive, Slack, GitHub and Railway" src=".github/assets/plugins-light.svg" width="100%">
+  <img alt="Built-in plugins: Knowledge, Google Drive, Slack, GitHub and Railway" src=".github/assets/plugins-light.svg" width="100%">
 </picture>
 
 <details>
@@ -255,8 +266,8 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Plugin | Tools | Needs |
 | --- | --- | --- |
+| `knowledge` | `search_knowledge`, `read_document` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token. Share a folder or a document with that account and it is searchable |
-| `drive` | `semantic_search_drive` | An embedding key (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`). Nothing else: vectors are stored in a local file and the server builds the index on first start. Set `QDRANT_URL` to use Qdrant instead |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
@@ -266,16 +277,30 @@ Each turns on when its env vars are set. All built-in tools only read.
 </details>
 
 <details>
-<summary>Drive indexing for semantic search</summary>
+<summary>The search index</summary>
 <br>
+
+`search_knowledge` searches one index that every source feeds. It needs nothing but a source.
+
+| Search mode | When | What it finds |
+| --- | --- | --- |
+| Keywords | Always, with nothing configured | Documents that contain the words of the question. Korean, Japanese and Chinese are matched by character pairs, so a word is found with any ending attached |
+| Keywords + meaning | An embedding model is set (`OPENAI_API_KEY`, or `EMBEDDING_BASE_URL` for another provider or a local model) | Also documents that say the same thing in other words. The two result lists are merged by rank. When the embedding endpoint is down, search answers from keywords and says so |
+| Meaning only | `QDRANT_URL` is set | Vectors live in Qdrant, which holds no keyword index here. An embedding model is required |
 
 | Task | How |
 | --- | --- |
-| First full index | Automatic: the server builds it the first time it starts with an empty index, over HTTP or in a stdio session (`DRIVE_AUTO_INDEX=false` turns that off). The automatic run never uses paid OCR; scanned files are added by `knowledge-mcp drive reindex` |
-| Where vectors live | `<data dir>/vectors.db` by default, good for tens of thousands of chunks. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
-| Keep it fresh | The HTTP server syncs Drive changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`). A stdio session syncs once when it starts. A lock file keeps two processes from syncing at the same time |
-| Clean up | A full run deletes vectors of files no longer listed, such as files moved into an excluded folder |
-| Start over | `--recreate` empties the collection first. `--dry-run` only counts chunks. It skips OCR, so it never charges Mathpix |
+| Add a local folder | `knowledge-mcp setup folder <path>`, or `folders` in the config. The HTTP server scans it at start and every 10 minutes (`KNOWLEDGE_SCAN_INTERVAL_MIN`); a stdio session scans once when it starts; `knowledge-mcp knowledge scan` scans now. Unchanged files are not opened, deleted files leave the index |
+| Add Drive documents | Connect Drive. The server builds the first index when it starts with an empty one (`DRIVE_AUTO_INDEX=false` turns that off), then syncs changes every 30 minutes (`DRIVE_SYNC_INTERVAL_MIN`); a stdio session syncs once when it starts |
+| Add search by meaning later | Set the embedding model and restart. Stored passages get their vectors on the next scan or sync; no document is read again |
+| Change the embedding model | Set the new model, then `knowledge-mcp knowledge reembed`: it drops the old vectors and makes new ones from the stored text. Until then search answers by keywords, because vectors of two models are never mixed |
+| What leaves the machine | Nothing for keyword search. With an embedding model, passage text and each question go to that model's endpoint |
+| Where it lives | `<data dir>/vectors.db`: the text, the keyword index and the vectors. Good for tens of thousands of passages. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
+| Scanned files | The automatic runs never use paid OCR. `knowledge-mcp drive reindex` adds scanned Drive files when Mathpix is configured; scanned files in local folders are left out |
+| Clean up | A full `drive reindex` deletes Drive documents no longer listed, such as files moved into an excluded folder |
+| Start over | `drive reindex --recreate` empties the index first, local folders included (they are indexed again by the next scan). `--dry-run` only counts passages and skips OCR |
+
+A lock file keeps two processes on one data directory from indexing at the same time.
 
 | Format | How text is extracted |
 | --- | --- |
@@ -283,11 +308,13 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Google Docs, Slides | Drive export |
 | Google Sheets | Drive export, every tab as its own section |
 | Word, PowerPoint, Excel, PDF with text | Local parsers |
-| Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, only when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
+| Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, Drive only, when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
 
-Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or indexed. Embeddings use OpenAI
-`text-embedding-3-small` by default. Any OpenAI-compatible `/embeddings` endpoint works: set `EMBEDDING_BASE_URL`,
-`EMBEDDING_MODEL` and `EMBEDDING_DIM` (for example a local `bge-m3` behind Ollama), then reindex into a new collection.
+Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or indexed. In a local folder, dot files,
+`node_modules`, the folder names in `drive.excludeFolders` and symbolic links are skipped, and at most 20,000 files
+per folder are indexed (`KNOWLEDGE_MAX_FILES`). Embeddings use OpenAI `text-embedding-3-small` by default. Any
+OpenAI-compatible `/embeddings` endpoint works: set `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIM`
+(for example a local `bge-m3` behind Ollama).
 
 </details>
 
@@ -323,13 +350,14 @@ it, the sign-in allowlist included.
 | --- | --- |
 | `orgId` | Organization identifier carried in the auth context |
 | `branding.name` / `branding.instructions` | Name shown on the sign-in consent page and in OAuth metadata. `instructions` replaces the guide the client receives (base line plus each plugin's notes) |
+| `folders[]` | `{ path, name, source }` local folders to index and search. `path` is absolute or relative to the config file. `name` (default: the folder's own name) shows in results and document ids; `source` (default `files`) is the label for the `source` search filter. env `KNOWLEDGE_FOLDERS` adds comma-separated paths |
 | `drive.roots[]` | `{ id, name, source, metadata }` folders to index and search. `source` is a label you choose (`handbook`, `sales`, …; default `docs`) and becomes the `source` search filter. `metadata` is `path` (default: category, customer and tags from folder and file names) or `frontmatter` (Markdown with a YAML header) |
 | `drive.scope` | `shared` (default): the roots plus any folder or document that a trusted owner (`drive.trustedOwners`) shared with the service account. `roots`: only files under `drive.roots`. env `DRIVE_SCOPE` overrides |
 | `drive.trustedOwners[]` | Whose documents are shown when they are shared with the service account outside the roots: emails (`ann@acme.com`), domains (`acme.com`) or shared drives (`drive:<id>`). Empty by default, which shows nothing outside the roots. `knowledge-mcp setup` asks for it. env `DRIVE_TRUSTED_OWNERS` overrides |
 | `drive.sharedSource` | `source` label for documents shared outside the roots. Default `shared` |
-| `drive.excludeFolders[]` | Folder names skipped everywhere: index, search, read and list. Case and spacing are ignored |
+| `drive.excludeFolders[]` | Folder names skipped everywhere, in Drive and in local folders: index, search, read and list. Case and spacing are ignored |
 | `drive.customerFolders[]` | Top-level folders (in `path` metadata sources) with one subfolder per customer (`Clients/Acme/…` → customer `Acme`), for the `customer` search filter. Default `Clients`, `Customers`, `고객사` |
-| `drive.rank[]` | Optional `{ prefix, label, weight }` rules for `semantic_search_drive`, e.g. prefer `Current/` (weight 1.1) over `Archive/` (0.9). Default: none |
+| `drive.rank[]` | Optional `{ prefix, label, weight }` rules for `search_knowledge`, e.g. prefer `Current/` (weight 1.1) over `Archive/` (0.9). Default: none |
 | `qdrant.collection` | Vector collection name (env `QDRANT_COLLECTION` overrides) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Who may sign in with Google |
 | `access.viewerTools[]` | Plugin ids open to signed-in people without a users entry. Default: none |
@@ -445,7 +473,8 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
 | `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |
 | Google Sheets are read tab by tab | Indexed sheets change on their next modification. Run `knowledge-mcp drive reindex` to refresh them all now |
-| Semantic search shows at most 2 chunks per document | Set `SEMANTIC_MAX_PER_DOC` to change it |
+| `semantic_search_drive` is now `search_knowledge` | It searches every source, by keywords with no embedding model. Its permission group is `knowledge`: add `knowledge` where a person's tools or `access.viewerTools` list `drive`. `read_document` reads a result by its Document ID |
+| Search shows at most 2 passages per document | Set `KNOWLEDGE_MAX_PER_DOC` to change it |
 
 ## Upgrading from 0.2
 

@@ -4,7 +4,7 @@
 #   cp mcp.config.example.json mcp.config.json  # Drive folders, excluded folders, sign-in allowlist
 #   docker compose up -d
 #   docker compose exec knowledge-mcp knowledge-mcp keys create --email you@example.com --role admin
-#   docker compose run --rm knowledge-mcp drive reindex   # first full Drive index (semantic search)
+#   docker compose run --rm knowledge-mcp drive reindex   # optional: index Drive now, scanned files included
 #
 # The server listens on http://localhost:8080/mcp. Put it behind HTTPS before connecting remote clients.
 services:

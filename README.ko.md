@@ -12,7 +12,7 @@
 <p align="center">
   <b>우리 팀만의 MCP 서버를 만듭니다. 설치는 명령 한 줄, 도구 추가는 파일 하나입니다.</b><br>
   API 키, Google 로그인, 사람별 권한, 호출 기록은 이미 들어 있습니다.<br>
-  Google Drive, Slack, GitHub, Railway 연결도 기본으로 들어 있습니다.
+  문서 검색(로컬 폴더, Google Drive), Slack, GitHub, Railway 연결도 기본으로 들어 있습니다.
 </p>
 
 <p align="center">
@@ -57,6 +57,17 @@ npm run setup
 AI 에이전트에게 맡겨도 됩니다. 프로젝트에 에이전트용 설정 안내서 [`AGENTS.md`](packages/create-knowledge-mcp/template/AGENTS.md)가
 들어 있습니다. 폴더를 Claude Code로 열고 "AGENTS.md를 따라 이 서버를 설정해 줘"라고 하면 됩니다. 에이전트는 설정 명령을
 실행하고, 계정에 무언가를 만들기 전에 묻고, 비밀값은 다루지 않습니다.
+
+**문서 검색부터 해 보십시오.** 문서 폴더 하나면 됩니다. 계정도 키도 필요 없습니다.
+
+```bash
+npm run setup -- folder ~/Documents/handbook   # Markdown, 텍스트, PDF, Word, PowerPoint, Excel
+npm run dev
+```
+
+서버가 뜨면서 폴더를 색인하고, `search_knowledge`가 키워드로 답합니다. 한국어와 영어 모두 됩니다.
+임베딩 모델은 나중에 넣어도 됩니다. 문서를 다시 읽지 않고 뜻으로 찾는 검색이 더해집니다. Drive를 연결하면
+Drive 문서도 같은 색인에 들어갑니다.
 
 프로젝트에는 예시 플러그인 `src/plugins/notes.ts`가 들어 있습니다. 클라이언트를 `http://localhost:8080/mcp`에
 `Authorization: Bearer <키>`로 연결하면 `notes_add`와 `notes_list`가 보입니다.
@@ -246,7 +257,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/assets/ko/plugins-dark.svg">
-  <img alt="기본 플러그인: Google Drive, Slack, GitHub, Railway" src=".github/assets/ko/plugins-light.svg" width="100%">
+  <img alt="기본 플러그인: 지식 검색, Google Drive, Slack, GitHub, Railway" src=".github/assets/ko/plugins-light.svg" width="100%">
 </picture>
 
 <details>
@@ -255,8 +266,8 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
+| `knowledge` | `search_knowledge`, `read_document` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다 |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token. 폴더나 문서를 그 계정에 공유하면 검색됩니다 |
-| `drive` | `semantic_search_drive` | 임베딩 키 하나(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자). 그 밖에는 필요 없습니다. 벡터는 로컬 파일에 저장하고, 서버가 처음 뜰 때 색인을 만듭니다. Qdrant를 쓰려면 `QDRANT_URL`을 정하십시오 |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
@@ -266,16 +277,30 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 </details>
 
 <details>
-<summary>의미 검색용 Drive 색인</summary>
+<summary>검색 색인</summary>
 <br>
+
+`search_knowledge`는 모든 출처가 채우는 색인 하나를 검색합니다. 출처만 있으면 됩니다.
+
+| 검색 방식 | 언제 | 무엇을 찾나 |
+| --- | --- | --- |
+| 키워드 | 항상. 아무것도 설정하지 않아도 됩니다 | 질문에 든 낱말이 들어 있는 문서. 한글, 일본어, 중국어는 두 글자씩 잘라 맞추므로 조사가 붙어도 찾습니다 |
+| 키워드와 뜻 | 임베딩 모델을 정했을 때(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자나 로컬 모델) | 같은 내용을 다른 말로 쓴 문서도 찾습니다. 두 결과를 순위로 합칩니다. 임베딩 주소가 죽으면 키워드로 답하고 그 사실을 알립니다 |
+| 뜻만 | `QDRANT_URL`을 정했을 때 | 벡터를 Qdrant에 둡니다. 여기에는 키워드 색인이 없어 임베딩 모델이 꼭 있어야 합니다 |
 
 | 작업 | 방법 |
 | --- | --- |
-| 처음 전체 색인 | 자동입니다. 색인이 빈 채로 서버가 처음 뜨면 스스로 만듭니다. HTTP 서버와 stdio 세션 모두 해당합니다(`DRIVE_AUTO_INDEX=false`로 끕니다). 자동 실행은 유료 OCR을 쓰지 않습니다. 스캔 파일은 `knowledge-mcp drive reindex`로 넣습니다 |
-| 벡터 저장 위치 | 기본은 `<data dir>/vectors.db`입니다. 수만 조각까지 충분합니다. 더 큰 색인이나 서버 여러 대는 `QDRANT_URL`을 정하고 다시 색인하십시오 |
-| 최신 상태 유지 | HTTP 서버가 30분마다 Drive 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`). stdio 세션은 시작할 때 한 번 반영합니다. 잠금 파일이 두 프로세스의 동시 동기화를 막습니다 |
-| 정리 | 전체 실행은 목록에서 빠진 파일의 벡터를 지웁니다. 제외 폴더로 옮긴 파일이 여기에 해당합니다 |
-| 처음부터 다시 | `--recreate`는 컬렉션을 비우고 시작합니다. `--dry-run`은 청크 수만 셉니다. OCR을 건너뛰어 Mathpix 요금이 나가지 않습니다 |
+| 로컬 폴더 추가 | `knowledge-mcp setup folder <경로>` 또는 설정의 `folders`. HTTP 서버는 뜰 때와 10분마다 훑습니다(`KNOWLEDGE_SCAN_INTERVAL_MIN`). stdio 세션은 시작할 때 한 번 훑습니다. `knowledge-mcp knowledge scan`은 지금 훑습니다. 바뀌지 않은 파일은 열지 않고, 지운 파일은 색인에서 빠집니다 |
+| Drive 문서 추가 | Drive를 연결합니다. 색인이 빈 채로 서버가 뜨면 처음 색인을 스스로 만들고(`DRIVE_AUTO_INDEX=false`로 끕니다), 그 뒤 30분마다 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`). stdio 세션은 시작할 때 한 번 반영합니다 |
+| 뜻 검색을 나중에 추가 | 임베딩 모델을 정하고 서버를 다시 띄웁니다. 저장된 조각은 다음 훑기나 동기화 때 벡터를 받습니다. 문서를 다시 읽지 않습니다 |
+| 임베딩 모델 바꾸기 | 새 모델을 정한 뒤 `knowledge-mcp knowledge reembed`를 실행합니다. 옛 벡터를 버리고 저장된 글로 새 벡터를 만듭니다. 그 전까지는 키워드로 답합니다. 두 모델의 벡터는 섞지 않습니다 |
+| 밖으로 나가는 것 | 키워드 검색은 아무것도 내보내지 않습니다. 임베딩 모델을 정하면 조각 글과 질문이 그 모델의 주소로 갑니다 |
+| 저장 위치 | `<data dir>/vectors.db`. 글, 키워드 색인, 벡터가 한 파일에 있습니다. 수만 조각까지 충분합니다. 더 큰 색인이나 서버 여러 대는 `QDRANT_URL`을 정하고 다시 색인하십시오 |
+| 스캔 파일 | 자동 실행은 유료 OCR을 쓰지 않습니다. Mathpix를 설정했다면 `knowledge-mcp drive reindex`가 Drive의 스캔 파일을 넣습니다. 로컬 폴더의 스캔 파일은 넣지 않습니다 |
+| 정리 | `drive reindex` 전체 실행은 목록에서 빠진 Drive 문서를 지웁니다. 제외 폴더로 옮긴 파일이 여기에 해당합니다 |
+| 처음부터 다시 | `drive reindex --recreate`는 색인을 비우고 시작합니다. 로컬 폴더 문서도 비워지고, 다음 훑기 때 다시 색인됩니다. `--dry-run`은 조각 수만 세고 OCR을 건너뜁니다 |
+
+잠금 파일이 같은 데이터 폴더를 쓰는 두 프로세스의 동시 색인을 막습니다.
 
 | 형식 | 글을 뽑는 방법 |
 | --- | --- |
@@ -283,11 +308,13 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | Google 문서, 슬라이드 | Drive 내보내기 |
 | Google 스프레드시트 | Drive에서 내보내 탭마다 한 절로 읽습니다 |
 | Word, PowerPoint, Excel, 글자가 든 PDF | 서버 안의 파서 |
-| 스캔 PDF, PNG, JPEG, WebP | Mathpix OCR. `MATHPIX_APP_ID`, `MATHPIX_APP_KEY`가 있을 때만 |
+| 스캔 PDF, PNG, JPEG, WebP | Mathpix OCR. Drive 파일만, `MATHPIX_APP_ID`와 `MATHPIX_APP_KEY`가 있을 때만 |
 
-`DRIVE_MAX_FILE_BYTES`(기본 50MB)보다 큰 파일은 읽거나 색인하지 않습니다. 임베딩은 OpenAI
-`text-embedding-3-small`을 기본으로 씁니다. OpenAI 호환 `/embeddings` 주소라면 무엇이든 쓸 수 있습니다. `EMBEDDING_BASE_URL`,
-`EMBEDDING_MODEL`, `EMBEDDING_DIM`을 정한 뒤(예: Ollama 뒤의 로컬 `bge-m3`) 새 컬렉션으로 다시 색인하십시오.
+`DRIVE_MAX_FILE_BYTES`(기본 50MB)보다 큰 파일은 읽거나 색인하지 않습니다. 로컬 폴더에서는 점으로 시작하는 파일,
+`node_modules`, `drive.excludeFolders`에 적은 폴더 이름, 심볼릭 링크를 건너뛰고, 폴더마다 2만 개까지 색인합니다
+(`KNOWLEDGE_MAX_FILES`). 임베딩은 OpenAI `text-embedding-3-small`을 기본으로 씁니다. OpenAI 호환 `/embeddings`
+주소라면 무엇이든 쓸 수 있습니다. `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`을 정하십시오(예: Ollama 뒤의
+로컬 `bge-m3`).
 
 </details>
 
@@ -322,13 +349,14 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | --- | --- |
 | `orgId` | 인증 정보에 실리는 조직 식별자 |
 | `branding.name` / `branding.instructions` | 로그인 동의 화면과 OAuth 메타데이터에 보이는 이름. `instructions`를 적으면 클라이언트가 받는 안내(기본 문장과 플러그인별 안내)를 대신합니다 |
+| `folders[]` | 색인하고 검색할 로컬 폴더 `{ path, name, source }`. `path`는 절대 경로이거나 설정 파일 기준 상대 경로입니다. `name`(기본: 폴더 이름)은 결과와 문서 id에 보입니다. `source`(기본 `files`)는 검색의 `source` 필터 이름입니다. 환경변수 `KNOWLEDGE_FOLDERS`에 쉼표로 나눈 경로를 더 적을 수 있습니다 |
 | `drive.roots[]` | 색인하고 검색할 폴더 `{ id, name, source, metadata }`. `source`는 직접 정하는 이름입니다(`handbook`, `sales` 등, 기본 `docs`). 검색의 `source` 필터가 됩니다. `metadata`는 `path`(기본. 폴더와 파일 이름에서 분류, 고객사, 태그를 얻음) 또는 `frontmatter`(YAML 머리말이 있는 Markdown)입니다 |
 | `drive.scope` | `shared`(기본): root와, 신뢰하는 소유자(`drive.trustedOwners`)가 서비스 계정에 따로 공유한 폴더나 문서가 범위입니다. `roots`: `drive.roots` 아래 파일만 봅니다. env `DRIVE_SCOPE`가 우선합니다 |
 | `drive.trustedOwners[]` | root 밖에서 서비스 계정에 공유된 문서 가운데 누구의 문서를 보여 줄지 정합니다. 이메일(`ann@acme.com`), 도메인(`acme.com`), 공유 드라이브(`drive:<id>`)를 적습니다. 기본은 빈 목록이고, 그때는 root 밖 문서를 보여 주지 않습니다. `knowledge-mcp setup`이 물어봅니다. env `DRIVE_TRUSTED_OWNERS`가 우선합니다 |
 | `drive.sharedSource` | root 밖 공유 문서에 붙는 `source` 이름. 기본 `shared` |
-| `drive.excludeFolders[]` | 색인, 검색, 읽기, 목록 어디서든 건너뛸 폴더 이름. 대소문자와 공백은 무시합니다 |
+| `drive.excludeFolders[]` | Drive와 로컬 폴더 모두에서, 색인, 검색, 읽기, 목록 어디서든 건너뛸 폴더 이름. 대소문자와 공백은 무시합니다 |
 | `drive.customerFolders[]` | 고객사마다 하위 폴더를 둔 최상위 폴더(`path` 메타 출처에서)(`Clients/Acme/…` → 고객사 `Acme`). 검색의 `customer` 필터에 씁니다. 기본 `Clients`, `Customers`, `고객사` |
-| `drive.rank[]` | `semantic_search_drive`의 선택 규칙 `{ prefix, label, weight }`. 예: `Current/`(가중치 1.1)를 `Archive/`(0.9)보다 앞에. 기본은 없음 |
+| `drive.rank[]` | `search_knowledge`의 선택 규칙 `{ prefix, label, weight }`. 예: `Current/`(가중치 1.1)를 `Archive/`(0.9)보다 앞에. 기본은 없음 |
 | `qdrant.collection` | 벡터 컬렉션 이름(환경변수 `QDRANT_COLLECTION`이 먼저) |
 | `oauth.allowedDomains[]` / `oauth.allowedEmails[]` | Google 로그인을 허용할 대상 |
 | `access.viewerTools[]` | 등록되지 않은 로그인 사용자에게 열 플러그인 id. 기본은 없음 |
@@ -441,7 +469,8 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 | zod 4 | 플러그인이 쓰는 `z`가 zod 4가 됩니다. `z.record(값스키마)`는 `z.record(z.string(), 값스키마)`로, 안쪽 기본값에 기대는 객체의 `.default({})`는 `.prefault({})`로 고치십시오 |
 | `source`가 자유 이름 | `dev`와 `biz`는 옛 뜻 그대로 동작합니다. `--dev-only`, `--biz-only`도 그대로 되고, 일반형은 `--source <이름>`입니다 |
 | Google 스프레드시트를 탭마다 읽음 | 색인된 시트는 다음에 수정될 때 바뀝니다. 지금 모두 새로 하려면 `knowledge-mcp drive reindex`를 실행하십시오 |
-| 의미 검색이 문서당 2조각까지만 보여 줌 | `SEMANTIC_MAX_PER_DOC`로 바꿉니다 |
+| `semantic_search_drive`가 `search_knowledge`로 바뀜 | 모든 출처를 검색하고, 임베딩 모델 없이 키워드로 찾습니다. 권한 그룹은 `knowledge`입니다. 사람별 tools나 `access.viewerTools`에 `drive`를 적은 곳에 `knowledge`를 더하십시오. 결과의 Document ID는 `read_document`로 읽습니다 |
+| 검색이 문서당 2조각까지만 보여 줌 | `KNOWLEDGE_MAX_PER_DOC`로 바꿉니다 |
 
 ## 0.2에서 올리기
 

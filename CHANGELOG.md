@@ -6,6 +6,12 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **Search needs no key: `search_knowledge` replaces `semantic_search_drive`.** The built-in index now holds a
+  keyword index (BM25) next to the vectors, so search works with nothing configured and in any language (Korean,
+  Japanese and Chinese are matched by character pairs). An embedding model adds search by meaning; the two result
+  lists are merged by rank, and when the embedding endpoint is down search answers from keywords and says so.
+  `read_document` reads a result by its Document ID. Both tools belong to the new plugin `knowledge`: add
+  `knowledge` where a person's tools or `access.viewerTools` list `drive`.
 - **Documents shared by a trusted owner are in scope, wherever they are.** A folder or document that an owner in
   `drive.trustedOwners` shared with the service account can be searched, read and indexed without being under
   `drive.roots`. The list is empty by default, so an upgrade changes nothing until you add your organization
@@ -20,11 +26,18 @@ Changes that affect people who run or extend the server. Dates are release dates
   meaning. `drive reindex --source <label>` replaces `--dev-only` and `--biz-only`, which still work.
 - **Full-text search returns the best match first.** `search_drive` no longer forces newest-first on full-text
   queries. Title search stays newest-first.
-- **Semantic search shows at most 2 chunks per document** (`SEMANTIC_MAX_PER_DOC`), so one long document no longer
-  fills every result. Each result says how many more matching chunks its document has.
+- **Search shows at most 2 passages per document** (`KNOWLEDGE_MAX_PER_DOC`), so one long document no longer
+  fills every result. Each result says how many more matching passages its document has.
 
 ### Added
 
+- **Local folders as a source.** `knowledge-mcp setup folder <path>` (or `folders` in the config, or the first
+  question of the setup wizard) makes a folder of Markdown, text, PDF, Word, PowerPoint and Excel files searchable:
+  no account, no key. The server scans it when it starts and on a timer, opens only files that changed, and removes
+  documents whose file is gone. A document id cannot be used to read outside the folder.
+- **Add or change the embedding model any time.** Passages indexed without a model get their vectors on the next
+  scan or sync; no document is read again. After changing the model, `knowledge-mcp knowledge reembed` makes new
+  vectors from the stored text. Vectors of two models are never mixed: until then search answers by keywords.
 - **Guided setup: `knowledge-mcp setup`.** Asks which services to connect, checks every key against the real
   service as it is entered (Drive shows what is shared with the account, the embedding size is read from the
   endpoint), writes `.env` and `mcp.config.json`, creates the admin key and offers to add the server to Claude
@@ -35,18 +48,19 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **Setup for scripts and AI agents.** `setup check` verifies every configured service live. `setup drive --gcloud`,
   `setup drive --key`, `setup github --from-gh` and `setup embeddings` ask nothing and never take a secret as an
   argument. A generated project includes `AGENTS.md`, a setup guide an agent can follow.
-- **Semantic search without a vector database.** Vectors are stored in `<data dir>/vectors.db` when `QDRANT_URL`
-  is not set, so an embedding key is the only thing to supply. Qdrant stays available for larger indexes.
+- **No vector database to run.** The index (text, keyword index, vectors) is the file `<data dir>/vectors.db`
+  when `QDRANT_URL` is not set. Qdrant stays available for larger indexes; it holds vectors only, so it needs an
+  embedding model.
 - **The first index builds itself.** The server indexes Drive the first time it starts with an empty index, over
-  HTTP or in a stdio session. It checks the embedding endpoint first and never uses paid OCR on its own
+  HTTP or in a stdio session. It checks the embedding endpoint first when one is set and never uses paid OCR on its own
   (`drive reindex` does; `--no-ocr` skips it). `DRIVE_AUTO_INDEX=false` turns the automatic build off.
 - **stdio sessions stay current and cannot be broken by a stray `console.log`.** A session syncs Drive once when it
   starts (new plugin hook `catchUp`), a lock file keeps parallel processes from syncing twice, and anything a
   plugin prints to stdout is sent to stderr so the protocol stream stays intact.
-- Semantic search results show the document date, or the modified date with the document's age.
+- Search results show the document date, or the modified date with the document's age.
 - **Any OpenAI-compatible embedding endpoint**: `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`,
   `EMBEDDING_API_KEY`. A local server needs no key. The default is still OpenAI `text-embedding-3-small`.
-  A collection whose vector size differs from `EMBEDDING_DIM` stops indexing with the fix in the message.
+  With Qdrant, a collection whose vector size differs from `EMBEDDING_DIM` stops indexing with the fix in the message.
 - `drive.sharedSource`: the `source` label for documents shared outside the roots (default `shared`).
 
 ### Fixed
