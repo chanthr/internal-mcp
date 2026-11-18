@@ -11,8 +11,8 @@
  *   started by another npm script              npx knowledge-mcp setup check   (the binary in node_modules)
  *   anything else                             knowledge-mcp setup check
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
 
 const BINARY = 'knowledge-mcp';
 const PACKAGE = '@chnxthr/knowledge-mcp';
@@ -71,4 +71,39 @@ export function stdioCommand(dir: string): string[] {
   const built = join(dir, 'dist', 'server.js');
   if (existsSync(built)) return ['node', built, 'serve', '--stdio'];
   return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
+}
+
+/**
+ * The entry an AI client is given to start this server over stdio from the folder `dir`.
+ *
+ * A desktop app does not have the PATH of a terminal: started from the Dock it finds no `node` and no `npx` that
+ * a version manager installed, and the server never starts ("spawn npx ENOENT"). So the entry names this very
+ * Node by its full path, and nothing is looked up:
+ *
+ *   a project with src/server.ts    <node> <dir>/node_modules/tsx/dist/cli.mjs <dir>/src/server.ts serve --stdio
+ *   a built project                 <node> <dir>/dist/server.js serve --stdio
+ *   no project (started by npx)     <node's folder>/npx -y @chnxthr/knowledge-mcp serve --stdio
+ *                                   with MCP_HOME=<dir>, and a PATH that holds node (npx is a script that asks for it)
+ */
+export function stdioEntry(dir: string, node: string = process.execPath, platform: NodeJS.Platform = process.platform): { command: string; args: string[]; env?: Record<string, string> } {
+  const own = join(dir, 'src', 'server.ts');
+  const tsx = join(dir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  if (existsSync(own) && existsSync(tsx)) return { command: node, args: [tsx, own, 'serve', '--stdio'] };
+  const built = join(dir, 'dist', 'server.js');
+  if (existsSync(built)) return { command: node, args: [built, 'serve', '--stdio'] };
+  const args = ['-y', PACKAGE, 'serve', '--stdio'];
+  // Windows starts npx through a .cmd file, and its apps do get the PATH: the plain name is right there.
+  if (platform === 'win32') return { command: 'npx', args, env: { MCP_HOME: dir } };
+  let bin = dirname(node);
+  try {
+    bin = dirname(realpathSync(node));
+  } catch {
+    /* keep the folder as given */
+  }
+  const npx = join(bin, 'npx');
+  return {
+    command: existsSync(npx) ? npx : 'npx',
+    args,
+    env: { MCP_HOME: dir, PATH: [bin, '/usr/local/bin', '/usr/bin', '/bin'].filter((d, i, all) => all.indexOf(d) === i).join(delimiter) },
+  };
 }

@@ -103,11 +103,11 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 
 | 화면 | 하는 일 |
 | --- | --- |
-| Documents | 폴더를 추가하고, Google Drive를 연결하고, 의미 검색을 켭니다 |
+| Documents | 폴더를 추가하고, Google Drive를 연결하고, 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
 | Databases and APIs | Postgres, SQLite, HTTP API를 연결합니다. 질의를 한 번 써서 도구로 저장합니다. 화면이 테이블 목록을 보여 주고, 저장하기 전에 실제 데이터베이스에서 질의를 점검합니다 |
 | Apps | Slack, GitHub, Railway를 토큰으로 연결합니다 |
 | Tools | AI 클라이언트가 부를 수 있는 도구 전부입니다. 값을 넣고 실행하면 클라이언트가 받는 결과가 그대로 보입니다 |
-| Connect a client | Claude Code, Claude Desktop, Cursor, VS Code에 넣을 명령과 설정입니다 |
+| Connect a client | 버튼 하나로 Claude Code, Claude Desktop, Cursor, VS Code에 이 서버를 추가합니다. 이미 추가된 곳도 보여 줍니다. 직접 넣을 항목도 복사할 수 있습니다 |
 | People and keys | 키를 만들고 취소합니다. 사람마다 쓸 수 있는 도구를 정합니다 |
 | Activity | 최근 도구 호출입니다. 누가, 언제, 얼마나 걸렸고, 성공했는지 보여 줍니다 |
 
@@ -588,7 +588,9 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 
 ## 클라이언트 연결
 
-콘솔의 **Connect a client** 화면이 내 폴더와 서버 이름에 맞춘 명령을 만들어 줍니다.
+콘솔의 **Connect a client** 화면이 대신 해 줍니다. 클라이언트마다 버튼이 하나 있고, 내 폴더와 서버 이름에 맞춘
+항목을 넣습니다. 데스크톱 앱에는 터미널의 PATH가 없습니다. 그래서 콘솔이 쓰는 항목은 Node를 전체 경로로
+가리키고, 서버가 거기서도 시작됩니다.
 
 | 클라이언트 | 방법 |
 | --- | --- |

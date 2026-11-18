@@ -109,6 +109,24 @@ export async function checkEmbedding(opts: { baseUrl?: string; model?: string; a
   return { dim: vec.length, model };
 }
 
+/** Names an embedding model usually goes by, for putting the likely ones first in a list of everything an endpoint has. */
+const EMBEDDING_NAME = /embed|bge|e5|gte|minilm|nomic|arctic|mxbai|jina|voyage/i;
+
+/**
+ * The models an OpenAI-compatible endpoint offers (GET <base>/models), likely embedding models first.
+ * OpenAI itself is answered from what it is known to have: its list is long and names no purpose.
+ */
+export async function listEmbeddingModels(opts: { baseUrl?: string; apiKey?: string }): Promise<string[]> {
+  const base = opts.baseUrl?.trim().replace(/\/+$/, '');
+  if (!base || /^https:\/\/api\.openai\.com\/v1$/i.test(base)) return ['text-embedding-3-small', 'text-embedding-3-large'];
+  const { status, json } = await getJson(`${base}/models`, { headers: opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : {} }, 'Embeddings');
+  if (status === 401 || status === 403) throw new Error(`Embeddings: the key was rejected (${status}).`);
+  const list: unknown = json?.data ?? json?.models;
+  if (status !== 200 || !Array.isArray(list)) throw new Error(`Embeddings: ${base}/models did not answer with a list of models (${status}). Type the model name instead.`);
+  const names = [...new Set(list.map((m) => String((m as { id?: unknown; name?: unknown })?.id ?? (m as { name?: unknown })?.name ?? '')).filter(Boolean))].slice(0, 500);
+  return [...names.filter((n) => EMBEDDING_NAME.test(n)).sort(), ...names.filter((n) => !EMBEDDING_NAME.test(n)).sort()];
+}
+
 /** Slack: who the token belongs to. `kind` tells a bot token from a user token. */
 export async function checkSlack(token: string, opts: { apiBase?: string } = {}): Promise<{ team: string; user: string; kind: 'bot' | 'user' }> {
   const base = (opts.apiBase ?? 'https://slack.com/api').replace(/\/+$/, '');

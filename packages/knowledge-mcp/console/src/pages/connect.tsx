@@ -1,64 +1,94 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { call } from '../api';
-import { Page, Section, useServer } from '../app';
+import { Page, Row, Section, useAction, useServer } from '../app';
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { CodeBlock } from '../ui/code-block';
-import { SegmentedControl } from '../ui/segmented-control';
+import { Spinner } from '../ui/spinner';
 
-interface Snippets {
+interface Client {
+  id: string;
+  name: string;
+  installed: boolean;
+  added: boolean | null;
+  how: 'command' | 'file' | 'link';
+  does: string;
+  link?: string;
+  after: string;
+  manual: { text: string; language: string; file?: string };
+}
+interface Clients {
   name: string;
   url: string;
-  claudeCode: string;
-  claudeDesktop: string;
-  cursor: string;
-  vscode: string;
+  clients: Client[];
   http: string;
 }
-type Client = 'claude-code' | 'claude-desktop' | 'cursor' | 'vscode' | 'other';
-
-const WHERE: Record<Client, { text: string; language: string; file?: string; pick: (s: Snippets) => string }> = {
-  'claude-code': { text: 'Run this once in a terminal. The server is then there in every project.', language: 'bash', pick: (s) => s.claudeCode },
-  'claude-desktop': { text: 'Settings, Developer, Edit Config. Add this and restart Claude.', language: 'json', file: 'claude_desktop_config.json', pick: (s) => s.claudeDesktop },
-  cursor: { text: 'Put this in the project, or in your home folder for every project.', language: 'json', file: '.cursor/mcp.json', pick: (s) => s.cursor },
-  vscode: { text: 'Put this in the project.', language: 'json', file: '.vscode/mcp.json', pick: (s) => s.vscode },
-  other: { text: 'Any client that speaks MCP over HTTP. It needs a key: create one under People and keys.', language: 'json', pick: (s) => s.http },
-};
 
 export function Connect() {
   const { go } = useServer();
-  const [s, setS] = useState<Snippets | null>(null);
-  const [client, setClient] = useState<Client>('claude-code');
-  useEffect(() => void call<Snippets>('GET', '/clients').then(setS).catch(() => setS(null)), []);
-  const w = WHERE[client];
+  const [data, setData] = useState<Clients | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  const load = useCallback(
+    () =>
+      call<Clients>('GET', '/clients')
+        .then(setData)
+        .catch((e) => setFailed(e instanceof Error ? e.message : String(e))),
+    [],
+  );
+  useEffect(() => void load(), [load]);
 
   return (
     <Page title="Connect a client" text="On this machine a client starts the server itself, so no key is needed.">
       <Section title="This machine">
-        <div className="stack">
-          <SegmentedControl<Client>
-            aria-label="Client"
-            variant="tray"
-            value={client}
-            onChange={setClient}
-            options={[
-              { value: 'claude-code', label: 'Claude Code' },
-              { value: 'claude-desktop', label: 'Claude Desktop' },
-              { value: 'cursor', label: 'Cursor' },
-              { value: 'vscode', label: 'VS Code' },
-              { value: 'other', label: 'Over HTTP' },
-            ]}
-          />
-          <p className="muted">{w.text}</p>
-          {s && <CodeBlock code={w.pick(s)} language={w.language} filename={w.file} wrap />}
-          {client === 'other' && <div><Button size="sm" variant="secondary" onClick={() => go('people')}>Create a key</Button></div>}
+        <div className="rows">
+          {failed && <Row title="The clients could not be listed" help={failed} />}
+          {!data && !failed && <Row title={<span className="actions"><Spinner /> Looking for clients</span>} />}
+          {data?.clients.map((c) => <ClientRow key={c.id} client={c} onChanged={load} />)}
         </div>
       </Section>
-      <Section title="Other people, Claude on the web, ChatGPT" text="They reach the server over the internet.">
-        <p className="muted">
-          Put the server behind HTTPS (the README has a Docker image and deploy notes), then give each person a key. Sign-in with Google replaces
-          keys for Claude on the web.
-        </p>
+      <Section title="Other people, Claude on the web, ChatGPT" text="They reach the server over the internet, with a key each.">
+        <div className="stack">
+          <p className="muted">
+            Put the server behind HTTPS (the README has a Docker image and deploy notes), then give each person a key. Sign-in with Google replaces
+            keys for Claude on the web.
+          </p>
+          {data && <CodeBlock code={data.http} language="json" wrap />}
+          <div><Button size="sm" variant="secondary" onClick={() => go('people')}>Create a key</Button></div>
+        </div>
       </Section>
     </Page>
+  );
+}
+
+/** One client: whether this server is in it, one button that puts it there, and the same thing by hand on request. */
+function ClientRow({ client: c, onChanged }: { client: Client; onChanged: () => Promise<unknown> }) {
+  const [open, setOpen] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const add = useAction();
+  const run = () =>
+    void add.run(async () => {
+      setDone((await call<{ message: string }>('POST', `/clients/${c.id}/add`)).message);
+      await onChanged();
+    });
+
+  const status = add.error ?? done ?? (!c.installed ? 'Not found on this machine. The entry is there for when it is.' : c.added ? `Connected. ${c.after}` : c.does);
+  return (
+    <>
+      <Row title={c.name} help={<span className={add.error ? 'error' : undefined}>{status}</span>}>
+        {c.added && <Badge size="md" tone="success">Connected</Badge>}
+        <button type="button" className="link" aria-expanded={open} onClick={() => setOpen((o) => !o)}>{open ? 'Hide the entry' : 'Show the entry'}</button>
+        {c.how === 'link' ? (
+          // Cursor adds a server through its own link, and asks the person there.
+          <Button size="sm" variant="secondary" disabled={!c.installed} onClick={() => c.link && (window.location.href = c.link)}>Open in Cursor</Button>
+        ) : (
+          <Button size="sm" variant="secondary" loading={add.busy} disabled={!c.installed} onClick={run}>{c.added ? 'Add again' : 'Add'}</Button>
+        )}
+      </Row>
+      {open && (
+        <div className="row-form">
+          <CodeBlock code={c.manual.text} language={c.manual.language} filename={c.manual.file} wrap />
+        </div>
+      )}
+    </>
   );
 }

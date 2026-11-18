@@ -104,11 +104,11 @@ npm run dev                    # in a generated project: the address is in the f
 
 | Page | What you do there |
 | --- | --- |
-| Documents | Add a folder, connect Google Drive, turn on search by meaning |
+| Documents | Add a folder, connect Google Drive, turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
 | Apps | Connect Slack, GitHub and Railway with a token |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
-| Connect a client | The line or the config entry for Claude Code, Claude Desktop, Cursor and VS Code |
+| Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
 | People and keys | Create and revoke keys, and limit a person to some tools |
 | Activity | The latest tool calls: who, when, how long, and whether it worked |
 
@@ -595,7 +595,9 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 
 ## Connect a client
 
-The console's **Connect a client** page writes these lines for your folder and your server name.
+The console's **Connect a client** page does this for you: one button per client, with the entry made for your
+folder and your server name. A desktop app does not have the PATH of your terminal, so the entry it writes names
+Node by its full path and the server starts there too.
 
 | Client | How |
 | --- | --- |

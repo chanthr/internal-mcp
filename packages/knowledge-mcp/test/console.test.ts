@@ -346,12 +346,16 @@ test('activity, the client snippets and the live check', async () => {
   assert.ok(all.some((c) => c.email === 'console@localhost' && c.tool === 'shop_query' && !c.ok && c.error));
 
   const clients = (await api('GET', '/clients')).json;
-  // This folder is not a project, so the server comes through npx and the entry names the folder.
-  assert.equal(clients.claudeCode, `claude mcp add --scope user ${clients.name} -e MCP_HOME=${dir} -- npx -y @chnxthr/knowledge-mcp serve --stdio`);
-  assert.deepEqual(JSON.parse(clients.cursor).mcpServers[clients.name].env, { MCP_HOME: dir });
   assert.equal(clients.url, `http://localhost:${server.port}/mcp`);
-  assert.deepEqual(Object.keys(JSON.parse(clients.claudeDesktop).mcpServers), [clients.name]);
-  assert.equal(JSON.parse(clients.vscode).servers[clients.name].type, 'stdio');
+  assert.deepEqual(clients.clients.map((c: { id: string }) => c.id), ['claude-code', 'claude-desktop', 'cursor', 'vscode']);
+  // This folder is not a project, so the server comes through npx and the entry names the folder.
+  const byHand = clients.clients[0].manual.text as string;
+  assert.match(byHand, new RegExp(`^claude mcp add --scope user ${clients.name} -e MCP_HOME=\\S*${dir.split('/').pop()} .* -- \\S*npx -y @chnxthr/knowledge-mcp serve --stdio$`));
+  assert.equal(JSON.parse(clients.clients[1].manual.text).mcpServers[clients.name].env.MCP_HOME, dir);
+  assert.match(clients.clients[2].link, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=/);
+  // Which client is the only thing a request chooses. (Cursor adds a server itself, through its link.)
+  assert.equal((await api('POST', '/clients/terminal/add')).status, 400);
+  assert.match((await api('POST', '/clients/cursor/add')).json.error, /use the link/);
 
   const check = (await api('GET', '/check')).json.lines;
   assert.ok(check.some((l: { ok: boolean | null; what: string; text: string }) => l.ok === true && l.what === 'shop' && /SQLite/.test(l.text)));
@@ -360,6 +364,172 @@ test('activity, the client snippets and the live check', async () => {
 });
 
 // ── The supervisor: a saved change restarts the server, and the server never outlives it ──
+test('clients: what is on this machine, and adding the server to each without disturbing what is there', async () => {
+  const { describeClients, addToClient, cursorLink, claudeDesktopConfig } = await import('../src/admin/clients.js');
+  const home = mkdtempSync(join(tmpdir(), 'kmcp-clients-'));
+  const bin = join(home, 'bin');
+  mkdirSync(bin);
+  for (const name of ['claude', 'code']) writeFileSync(join(bin, name), '');
+  const calls: string[][] = [];
+  let status = 0;
+  const ctx = {
+    home,
+    platform: 'darwin' as const,
+    env: { PATH: bin },
+    exec: (cmd: string, args: string[]) => (calls.push([cmd, ...args]), { status, stdout: '', stderr: status ? 'no such option' : '' }),
+  };
+  const entry = { name: 'team', command: '/opt/node/bin/npx', args: ['-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'], env: { MCP_HOME: '/srv/team mcp' } };
+  const seen = () => describeClients(entry, ctx).map((c) => [c.id, c.installed, c.added]);
+
+  // Two command lines are there, the two desktop apps are not.
+  assert.deepEqual(seen(), [['claude-code', true, false], ['claude-desktop', false, false], ['cursor', false, false], ['vscode', true, null]]);
+  assert.throws(() => addToClient('claude-desktop', entry, ctx), /was not found on this machine/);
+
+  // Claude Desktop keeps its servers in a file: one entry goes in, the rest stays, and the file as it was is kept.
+  const file = claudeDesktopConfig(ctx);
+  mkdirSync(join(file, '..'), { recursive: true });
+  const before = JSON.stringify({ mcpServers: { other: { command: 'x' } }, theme: 'dark' });
+  writeFileSync(file, before);
+  assert.match(addToClient('claude-desktop', entry, ctx), /Added to Claude Desktop as "team"\. Quit Claude Desktop/);
+  const saved = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual([Object.keys(saved.mcpServers), saved.theme], [['other', 'team'], 'dark']);
+  assert.deepEqual(saved.mcpServers.team, { command: entry.command, args: entry.args, env: entry.env });
+  assert.equal(readFileSync(`${file}.before-team`, 'utf8'), before);
+  assert.deepEqual(seen()[1], ['claude-desktop', true, true]);
+  // A file that is not JSON is somebody's work in progress: it is left exactly as it is.
+  writeFileSync(file, '{ "mcpServers": ');
+  assert.throws(() => addToClient('claude-desktop', entry, ctx), /is not valid JSON, so it was left alone/);
+  assert.equal(readFileSync(file, 'utf8'), '{ "mcpServers": ');
+
+  // Claude Code and VS Code have a command for it. One of ours that is already there is replaced, not doubled.
+  addToClient('claude-code', entry, ctx);
+  assert.deepEqual(calls.pop(), ['claude', 'mcp', 'add', '--scope', 'user', 'team', '-e', 'MCP_HOME=/srv/team mcp', '--', entry.command, ...entry.args]);
+  writeFileSync(join(home, '.claude.json'), JSON.stringify({ mcpServers: { team: {} } }));
+  calls.length = 0;
+  addToClient('claude-code', entry, ctx);
+  assert.deepEqual(calls.map((c) => c.slice(0, 3).join(' ')), ['claude mcp remove', 'claude mcp add']);
+  addToClient('vscode', entry, ctx);
+  assert.deepEqual(JSON.parse(calls.pop()![2]), { name: 'team', type: 'stdio', command: entry.command, args: entry.args, env: entry.env });
+  status = 1;
+  assert.throws(() => addToClient('vscode', entry, ctx), /`code --add-mcp` did not work: no such option/);
+
+  // Cursor installs from its own link, which carries the entry and nothing else.
+  const link = new URL(cursorLink(entry));
+  assert.equal(link.searchParams.get('name'), 'team');
+  assert.deepEqual(JSON.parse(Buffer.from(link.searchParams.get('config')!, 'base64').toString()), { command: entry.command, args: entry.args, env: entry.env });
+});
+
+/** An embedding endpoint for the tests below: it lists models, and answers with vectors of three numbers. */
+const fakeModels = async () => {
+  const { createServer: http } = await import('node:http');
+  const seen: Array<{ path: string; auth: string | undefined; model?: string }> = [];
+  const srv = http((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const parsed = body ? JSON.parse(body) : {};
+      seen.push({ path: req.url ?? '', auth: req.headers.authorization, model: parsed.model });
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/v1/models') return void res.end(JSON.stringify({ data: [{ id: 'chat-large' }, { id: 'nomic-embed-text' }, { id: 'bge-m3' }] }));
+      if (req.url === '/v1/embeddings') {
+        const inputs: string[] = Array.isArray(parsed.input) ? parsed.input : [parsed.input];
+        return void res.end(JSON.stringify({ data: inputs.map((_, index) => ({ index, embedding: [0.1, 0.2, 0.3] })) }));
+      }
+      res.statusCode = 404;
+      res.end('{}');
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}/v1`, seen, close: () => new Promise((r) => srv.close(() => r(null))) };
+};
+
+test('embedding model: the models of an endpoint are listed, and a saved key goes only where it was saved for', async () => {
+  const fake = await fakeModels();
+  try {
+    const listed = await api('POST', '/embeddings/models', { baseUrl: fake.base });
+    assert.deepEqual(listed.json.models, ['bge-m3', 'nomic-embed-text', 'chat-large']); // the likely ones first
+    assert.deepEqual((await api('POST', '/embeddings/models', {})).json.models, ['text-embedding-3-small', 'text-embedding-3-large']);
+    // A key saved for another endpoint is not sent to this one. A key saved for this one is.
+    Object.assign(process.env, { EMBEDDING_API_KEY: 'key-of-another-endpoint-000', EMBEDDING_BASE_URL: 'https://embeddings.example.com/v1' });
+    await api('POST', '/embeddings/models', { baseUrl: fake.base });
+    assert.equal(fake.seen.at(-1)!.auth, undefined);
+    process.env.EMBEDDING_BASE_URL = fake.base;
+    await api('POST', '/embeddings/models', { baseUrl: `${fake.base}/` });
+    assert.equal(fake.seen.at(-1)!.auth, 'Bearer key-of-another-endpoint-000');
+
+    // Saving asks the model first and writes what it answered with.
+    const saved = await api('POST', '/services/embeddings', { baseUrl: fake.base, model: 'bge-m3' });
+    assert.deepEqual([saved.status, saved.json.found], [200, 'bge-m3 (3 dimensions)']);
+    assert.match(envFile(), new RegExp(`^EMBEDDING_BASE_URL=${fake.base}$`, 'm'));
+    assert.match(envFile(), /^EMBEDDING_MODEL=bge-m3$\n^EMBEDDING_DIM=3$/m);
+    assert.ok(!envFile().includes('key-of-another-endpoint'), 'a key that was not typed in is not written');
+  } finally {
+    delete process.env.EMBEDDING_API_KEY;
+    delete process.env.EMBEDDING_BASE_URL;
+    await api('DELETE', '/services/embeddings');
+    await fake.close();
+  }
+  delete process.env.OPENAI_API_KEY;
+  assert.match((await api('POST', '/services/embeddings', { model: 'text-embedding-3-large' })).json.error, /OpenAI needs an API key/);
+  // Nothing is configured in this process, so there is nothing to make vectors with: the job says so and changes nothing.
+  assert.equal((await api('POST', '/index/reembed')).status, 200);
+  await until('the job to end', async () => (await api('GET', '/state')).json.index.job?.running === false);
+  assert.match((await api('GET', '/state')).json.index.job.error, /No embedding model is configured/);
+});
+
+test('changing the embedding model: search by meaning pauses, and new vectors are made from the console', async () => {
+  const fake = await fakeModels();
+  const home = mkdtempSync(join(tmpdir(), 'kmcp-model-'));
+  mkdirSync(join(home, 'docs'));
+  writeFileSync(join(home, 'docs', 'leave.md'), '# Leave\n\nAnnual leave is requested three days ahead.\n');
+  writeFileSync(join(home, 'mcp.config.json'), JSON.stringify({ folders: [{ path: join(home, 'docs') }] }));
+  const port = await freePort();
+  const start = (model: string) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'serve'], {
+      env: { ...process.env, MCP_DATA_DIR: join(home, 'data'), MCP_CONFIG_PATH: join(home, 'mcp.config.json'), PORT: String(port), EMBEDDING_BASE_URL: fake.base, EMBEDDING_MODEL: model, EMBEDDING_DIM: '3' },
+      stdio: 'ignore',
+    });
+    started.push(child);
+    return child;
+  };
+  const stop = (child: ChildProcess) => new Promise<void>((r) => (child.once('exit', () => r()), child.kill('SIGTERM')));
+  const state = async () => {
+    const res = await fetch(`http://localhost:${port}/console/api/state`, { headers: { Authorization: `Bearer ${readFileSync(join(home, 'data', 'console-token'), 'utf8').trim()}` } });
+    type Index = { chunks: number; withVectors: number; problem: string | null; vectorsFrom: string | null; job: { running: boolean; error: string | null } | null };
+    return ((await res.json()) as { index: Index }).index;
+  };
+  try {
+    let child = start('bge-m3');
+    await until('the first vectors', async () => {
+      const i = await state();
+      return i.chunks > 0 && i.withVectors === i.chunks;
+    });
+    assert.equal((await state()).problem, null);
+    await stop(child);
+
+    // Another model: its vectors cannot be compared with the stored ones, so nothing is searched by meaning.
+    child = start('nomic-embed-text');
+    await until('the server to be back', async () => (await state()).chunks > 0);
+    const paused = await state();
+    assert.equal(paused.vectorsFrom, 'bge-m3');
+    assert.match(paused.problem ?? '', /vectors made by bge-m3/);
+
+    const token = readFileSync(join(home, 'data', 'console-token'), 'utf8').trim();
+    const asked = fake.seen.length;
+    assert.equal((await fetch(`http://localhost:${port}/console/api/index/reembed`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } })).status, 200);
+    await until('the new vectors', async () => {
+      const i = await state();
+      return i.job?.running === false && i.withVectors === i.chunks;
+    });
+    const done = await state();
+    assert.deepEqual([done.problem, done.job?.error, done.vectorsFrom], [null, null, 'nomic-embed-text']);
+    assert.ok(fake.seen.slice(asked).some((r) => r.path === '/v1/embeddings' && r.model === 'nomic-embed-text'));
+    await stop(child);
+  } finally {
+    await fake.close();
+  }
+});
+
 const freePort = () =>
   new Promise<number>((resolve) => {
     const s = createServer();

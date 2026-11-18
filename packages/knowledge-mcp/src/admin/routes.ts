@@ -23,17 +23,19 @@ import { home } from '../core/paths.js';
 import { authStore } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
-import { cli, stdioCommand } from '../core/invocation.js';
+import { cli, stdioEntry } from '../core/invocation.js';
+import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
 import { pingTool } from '../plugin/ping.js';
 import { VERSION } from '../version.js';
 import { checkConnection, sqlAdapterFor } from '../connections/index.js';
 import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, stringsIn, type ConnectionConfig } from '../connections/schema.js';
-import { embeddingsConfigured, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
+import { embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
+import { reembed } from '../plugins/knowledge/reembed.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, validTrustEntry } from '../plugins/drive/trust.js';
-import { checkDriveCredentials, checkEmbedding, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
+import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
 import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList } from '../setup/commands.js';
 import { readEnvKeys, readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { countDocuments } from '../setup/wizard.js';
@@ -84,6 +86,9 @@ function redeemOpenCode(given: string): boolean {
   _open = null; // once
   return true;
 }
+
+/** The one job the console starts that outlives its request: new vectors for the whole index. */
+let vectorJob: { running: boolean; done: number; total: number; error: string | null } | null = null;
 
 const SERVICE_ENV: Record<string, string[]> = {
   drive: ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_OAUTH_REFRESH_TOKEN'],
@@ -186,6 +191,17 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       }
     }, 'a full address that starts with http:// or https://');
 
+  const modelName = visible(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, 'a model name');
+  /**
+   * The embedding key that is already saved, for the endpoint it was saved for and no other: a key is never sent
+   * to an address it was not given for.
+   */
+  const savedEmbeddingKey = (baseUrl: string | undefined): string | undefined => {
+    const savedBase = process.env.EMBEDDING_BASE_URL?.trim().replace(/\/+$/, '') || undefined;
+    if (!baseUrl) return process.env.OPENAI_API_KEY?.trim() || (savedBase ? undefined : process.env.EMBEDDING_API_KEY?.trim()) || undefined;
+    return baseUrl === savedBase ? process.env.EMBEDDING_API_KEY?.trim() || undefined : undefined;
+  };
+
   // ── What is set up ──
   api.get(
     '/state',
@@ -198,7 +214,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (local) {
         const s = await local.stats(DRIVE_COLLECTION);
         const problem = embeddingsConfigured() ? await vectorProblem() : null;
-        index = { ...s, meaning: embeddingsConfigured() && !problem, problem };
+        const made = await local.embeddingState(DRIVE_COLLECTION);
+        // `problem` is a sentence for the terminal. The page says it in its own words from these two facts.
+        index = { ...s, meaning: embeddingsConfigured() && !problem, problem, vectorsFrom: made && made.vectors > 0 ? made.model ?? 'another model' : null, job: vectorJob };
       }
       const tools = registry
         .listTools(pingTool)
@@ -225,7 +243,13 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           slack: { set: isSet(SERVICE_ENV.slack) },
           github: { set: isSet(SERVICE_ENV.github) },
           railway: { set: isSet(SERVICE_ENV.railway) },
-          embeddings: { set: embeddingsConfigured(), model: embeddingsConfigured() ? EMBEDDING_MODEL : null, baseUrl: process.env.EMBEDDING_BASE_URL?.trim() || null },
+          embeddings: {
+            set: embeddingsConfigured(),
+            model: embeddingsConfigured() ? EMBEDDING_MODEL : null,
+            dim: embeddingsConfigured() ? EMBEDDING_DIM : null,
+            baseUrl: process.env.EMBEDDING_BASE_URL?.trim() || null,
+            keySet: !!(process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim()),
+          },
         },
         connections: Object.entries(cfg.connections).map(([name, c]) => connectionView(name, c, cfg.tools.filter((t) => t.connection === name).length)),
         declaredTools: cfg.tools,
@@ -304,16 +328,19 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       }
       if (id === 'embeddings') {
         const body = z
-          .object({ baseUrl: webUrl(500).optional(), model: visible(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, 'a model name').optional().or(z.literal('')), apiKey: visible(500).optional() })
+          .object({ baseUrl: webUrl(500).optional().or(z.literal('')), model: modelName.optional().or(z.literal('')), apiKey: visible(500).optional() })
           .parse(req.body);
-        const baseUrl = body.baseUrl?.trim() || undefined;
-        const apiKey = body.apiKey?.trim() || undefined;
-        const r = await checkEmbedding({ baseUrl, model: body.model?.trim() || undefined, apiKey });
+        const baseUrl = body.baseUrl?.replace(/\/+$/, '') || undefined;
+        const typed = body.apiKey || undefined;
+        const apiKey = typed ?? savedEmbeddingKey(baseUrl);
+        if (!baseUrl && !apiKey) return refuse(res, 422, 'OpenAI needs an API key.');
+        const r = await checkEmbedding({ baseUrl, model: body.model || undefined, apiKey });
+        const standard = !baseUrl && r.model === 'text-embedding-3-small';
         updateEnvFile(
           envPath,
           baseUrl
-            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...(apiKey ? { EMBEDDING_API_KEY: apiKey } : {}) }
-            : { OPENAI_API_KEY: apiKey, EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: undefined, EMBEDDING_DIM: undefined },
+            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...(typed ? { EMBEDDING_API_KEY: typed } : {}) }
+            : { ...(typed ? { OPENAI_API_KEY: typed } : {}), EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: standard ? undefined : r.model, EMBEDDING_DIM: standard ? undefined : String(r.dim) },
         );
         return change(res, { found: `${r.model} (${r.dim} dimensions)` });
       }
@@ -332,6 +359,35 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         });
       }
       refuse(res, 404, 'There is no such service.');
+    }),
+  );
+  api.post(
+    '/embeddings/models',
+    wrap(async (req, res) => {
+      const body = z.object({ baseUrl: webUrl(500).optional().or(z.literal('')), apiKey: visible(500).optional() }).parse(req.body);
+      const baseUrl = body.baseUrl?.replace(/\/+$/, '') || undefined;
+      res.json({ models: await listEmbeddingModels({ baseUrl, apiKey: body.apiKey || savedEmbeddingKey(baseUrl) }) });
+    }),
+  );
+  api.post(
+    '/index/reembed',
+    wrap(async (_req, res) => {
+      if (vectorJob?.running) return refuse(res, 409, 'New vectors are already being made.');
+      const job: NonNullable<typeof vectorJob> = { running: true, done: 0, total: 0, error: null };
+      vectorJob = job;
+      // Runs on after the answer: the page reads its progress from /state. A restart stops it, and the passages
+      // still without a vector are picked up when the server is back (the folder scan fills them in).
+      void reembed((done, total) => Object.assign(job, { done, total }))
+        .then((r) => {
+          if (!r.ok) job.error = r.why;
+        })
+        .catch((e) => {
+          job.error = msg(e);
+        })
+        .finally(() => {
+          job.running = false;
+        });
+      res.json({ ok: true });
     }),
   );
   api.delete(
@@ -531,27 +587,29 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   );
 
   // ── How to connect an AI client ──
+  /** This server as a client's entry: its name, and how to start it from this folder. */
+  const clientEntry = (): Entry => {
+    const name = (getConfig().branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'knowledge';
+    return { name, ...stdioEntry(settingsDir()) };
+  };
   api.get(
     '/clients',
     wrap(async (req, res) => {
-      const dir = settingsDir();
-      const [command, ...args] = stdioCommand(dir);
-      const name = (getConfig().branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'knowledge';
+      const entry = clientEntry();
       const url = `http://${req.headers.host}/mcp`;
-      // Through npx there is no project folder to find the settings by, and the client starts the server from
-      // wherever it happens to be: the entry names the folder. A project's own server finds it by itself.
-      const env = command === 'npx' ? { MCP_HOME: dir } : undefined;
-      const stdio = { command, args, ...(env ? { env } : {}) };
-      const quote = (a: string) => (/[^A-Za-z0-9_@%+=:,./-]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a);
       res.json({
-        name,
+        name: entry.name,
         url,
-        claudeCode: ['claude', 'mcp', 'add', '--scope', 'user', name, ...(env ? ['-e', `MCP_HOME=${dir}`] : []), '--', command, ...args].map(quote).join(' '),
-        claudeDesktop: JSON.stringify({ mcpServers: { [name]: stdio } }, null, 2),
-        cursor: JSON.stringify({ mcpServers: { [name]: stdio } }, null, 2),
-        vscode: JSON.stringify({ servers: { [name]: { type: 'stdio', ...stdio } } }, null, 2),
-        http: JSON.stringify({ mcpServers: { [name]: { url, headers: { Authorization: 'Bearer <key>' } } } }, null, 2),
+        clients: describeClients(entry),
+        http: JSON.stringify({ mcpServers: { [entry.name]: { url, headers: { Authorization: 'Bearer <key>' } } } }, null, 2),
       });
+    }),
+  );
+  api.post(
+    '/clients/:id/add',
+    wrap(async (req, res) => {
+      const id = z.enum(CLIENT_IDS).parse(req.params.id);
+      res.json({ ok: true, message: addToClient(id, clientEntry()) });
     }),
   );
 

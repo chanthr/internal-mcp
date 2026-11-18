@@ -127,7 +127,17 @@ export interface State {
   editable: boolean;
   canRestart: boolean;
   store: { kind: string; location: string };
-  index: { chunks: number; withVectors: number; documents: number; meaning: boolean; problem: string | null } | null;
+  index: {
+    chunks: number;
+    withVectors: number;
+    documents: number;
+    meaning: boolean;
+    /** Set when the vectors in the index were made by another model than the one configured. */
+    problem: string | null;
+    vectorsFrom: string | null;
+    /** New vectors being made for the whole index, started from this page. */
+    job: { running: boolean; done: number; total: number; error: string | null } | null;
+  } | null;
   plugins: PluginStatus[];
   folders: Array<{ path: string; name: string | null; documents: number | null }>;
   services: {
@@ -135,7 +145,7 @@ export interface State {
     slack: { set: boolean };
     github: { set: boolean };
     railway: { set: boolean };
-    embeddings: { set: boolean; model: string | null; baseUrl: string | null };
+    embeddings: { set: boolean; model: string | null; dim: number | null; baseUrl: string | null; keySet: boolean };
   };
   connections: ConnectionView[];
   declaredTools: DeclaredTool[];

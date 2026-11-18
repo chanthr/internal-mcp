@@ -6,6 +6,8 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **`setup check` asks every service at the same time.** The lines come out in the same order; the wait is the
+  slowest service, not the sum of all.
 - **Search needs no key: `search_knowledge` replaces `semantic_search_drive`.** The built-in index now holds a
   keyword index (BM25) next to the vectors, so search works with nothing configured and in any language (Korean,
   Japanese and Chinese are matched by character pairs). An embedding model adds search by meaning; the two result
@@ -34,8 +36,9 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **A console in the browser.** Start the server in a terminal and open the address it prints
   (`npx @chnxthr/knowledge-mcp` in any folder opens it for you). Add folders, connect Drive, Slack, GitHub,
   Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
-  back, copy the entry for Claude Code, Claude Desktop, Cursor or VS Code, manage people and keys, and see the
-  latest calls. It writes the same `.env` and `mcp.config.json` as the setup commands, through the same live
+  back, add the server to Claude Code, Claude Desktop, Cursor or VS Code with one button, pick or change the
+  embedding model (new vectors are made from the stored text, with the progress shown), manage people and keys,
+  and see the latest calls. It writes the same `.env` and `mcp.config.json` as the setup commands, through the same live
   checks, and a saved change restarts the server by itself. It is served only when the server was started in a
   terminal (or with `KNOWLEDGE_CONSOLE=on`), only to a browser on the same machine asking for `localhost`, its
   API needs a token created on first start, and the page never shows a secret. `KNOWLEDGE_CONSOLE=off` turns it
