@@ -28,6 +28,7 @@ import {
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
+import { cli } from '../core/invocation.js';
 
 export interface SetupIO {
   /** Print a line. */
@@ -279,7 +280,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
         } catch (e) {
           if (attempt >= 6) {
             io.say(`  ✗ The new key does not work yet: ${e instanceof Error ? e.message : String(e)}`);
-            io.say('    It is saved. Run `knowledge-mcp setup check` in a minute.');
+            io.say(`    It is saved. Run \`${cli('setup check')}\` in a minute.`);
             break;
           }
           await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 4000));
@@ -358,7 +359,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
         configChanged = true;
       }
       const hidden = shared.filter((s) => !isTrusted(trusted, s.owners, s.driveId));
-      if (trusted.length === 0) io.say('  No owner is trusted, so shared documents stay hidden. Add one later: knowledge-mcp setup trust <email-or-domain>');
+      if (trusted.length === 0) io.say(`  No owner is trusted, so shared documents stay hidden. Add one later: ${cli('setup trust <email-or-domain>')}`);
       else if (hidden.length) io.say(`  ${hidden.length} shared item${hidden.length === 1 ? ' stays' : 's stay'} hidden (owner not trusted): ${hidden.slice(0, 3).map((h) => h.name).join(', ')}${hidden.length > 3 ? ' …' : ''}`);
       const current: string[] = Array.isArray(config.drive?.excludeFolders) ? config.drive.excludeFolders : [];
       const ex = await io.ask(
@@ -496,7 +497,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
       io.say('  Let the assistant run any read-only query on it? It can then answer questions nobody prepared a tool for.');
       io.say('  The database refuses writes, and answers are limited in rows and time. It reads whatever this database user can read.');
       if (yes(await io.ask('  Turn it on? (y/N)', 'n'))) conn.explore = true;
-      else io.say(`  Saved without tools. Declare them under "tools" in mcp.config.json (README: "Your data as tools"). Tables: knowledge-mcp ${name} tables`);
+      else io.say(`  Saved without tools. Declare them under "tools" in mcp.config.json (README: "Your data as tools"). Tables: ${cli(`${name} tables`)}`);
       config.connections = { ...(config.connections ?? {}), [name]: conn };
       configChanged = true;
       connected.push('database');
@@ -565,7 +566,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     const email = (await io.ask('  Your email (Enter to skip):', '')).toLowerCase();
     if (email) {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        io.say('  ✗ That does not look like an email address. Skipped: run `knowledge-mcp keys create --email you@example.com --role admin` later.');
+        io.say(`  ✗ That does not look like an email address. Skipped: run \`${cli('keys create --email you@example.com --role admin')}\` later.`);
       } else {
         const { key, existed } = await opts.createAdmin(email);
         adminEmail = email;
@@ -591,8 +592,8 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   }
 
   io.say();
-  io.say(connected.length ? `Connected: ${connected.join(', ')}.` : 'No service connected yet. Run `knowledge-mcp setup` again any time.');
+  io.say(connected.length ? `Connected: ${connected.join(', ')}.` : `No service connected yet. Run \`${cli('setup')}\` again any time.`);
   if (currentFolders.length > 0 || connected.includes('drive')) io.say('The server builds the search index by itself and keeps it up to date.');
-  io.say('Check the result with `knowledge-mcp doctor`. Start the server with `knowledge-mcp serve`.');
+  io.say(`Check the result with \`${cli('doctor')}\`. Start the server with \`${cli('serve')}\`.`);
   return { envWritten, configWritten: configChanged, connected, adminEmail };
 }

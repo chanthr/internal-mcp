@@ -43,7 +43,9 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **Local folders as a source.** `knowledge-mcp setup folder <path>` (or `folders` in the config, or the first
   question of the setup wizard) makes a folder of Markdown, text, PDF, Word, PowerPoint and Excel files searchable:
   no account, no key. The server scans it when it starts and on a timer, opens only files that changed, and removes
-  documents whose file is gone. A document id cannot be used to read outside the folder.
+  documents whose file is gone. The text is indexed first and vectors are made afterwards, so keyword search covers
+  the folder within seconds even when an embedding model is set. A document id cannot be used to read outside the
+  folder.
 - **Add or change the embedding model any time.** Passages indexed without a model get their vectors on the next
   scan or sync; no document is read again. After changing the model, `knowledge-mcp knowledge reembed` makes new
   vectors from the stored text. Vectors of two models are never mixed: until then search answers by keywords.
@@ -78,6 +80,9 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **Hints name commands that run where you are.** Messages said `knowledge-mcp setup check`, which is not on the
+  PATH of a generated project. They now say `npm run setup -- check` there, `npx @chnxthr/knowledge-mcp …` under npx,
+  and `knowledge-mcp …` in the Docker image.
 - **Install warnings and audit findings are back to zero.** A new project printed "2 high severity
   vulnerabilities" (zod 3 has no patched release). Dependencies are updated and `npm audit` is clean.
 - **Google Sheets are read tab by tab.** Only the first tab was read and indexed.

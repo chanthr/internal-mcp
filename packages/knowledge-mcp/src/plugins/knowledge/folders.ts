@@ -8,6 +8,11 @@
  * A document id is `local:<folder name>/<relative path>`. Reading one resolves the id back to a file and checks that
  * it is still inside the configured folder, so an id cannot be used to read an arbitrary file.
  *
+ * A scan stores the text first and makes the vectors afterwards. Reading 500 files takes seconds; embedding them
+ * takes minutes (seven, measured with a local model). Done in that order, keyword search covers every file after
+ * the first few seconds, and search by meaning fills in behind it, instead of nothing being searchable until the
+ * last vector is made.
+ *
  * A scan compares each file's modified time with what is indexed: unchanged files are not opened, changed and new
  * files are indexed, and documents whose file is gone are removed. A scan never uses paid OCR: scanned PDFs are
  * counted and left out.
@@ -241,7 +246,7 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
             r.skipped++;
             continue;
           }
-          await indexText({ id: file.id, name: file.name, path: file.path, modifiedTime: file.modifiedTime, source: folder.source, mimeType: file.mimeType, size: file.size }, text);
+          await indexText({ id: file.id, name: file.name, path: file.path, modifiedTime: file.modifiedTime, source: folder.source, mimeType: file.mimeType, size: file.size }, text, undefined, { vectors: false });
           r.indexed++;
         } catch (e) {
           r.errored++;

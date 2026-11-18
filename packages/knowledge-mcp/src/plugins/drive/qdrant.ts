@@ -12,6 +12,7 @@
  */
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from './embeddings.js';
 import { getConfig } from '../../core/config.js';
+import { cli } from '../../core/invocation.js';
 
 export type PointId = string | number;
 export type QdrantFilter = { must?: unknown[]; should?: unknown[]; must_not?: unknown[] };
@@ -191,7 +192,7 @@ export async function vectorProblem(): Promise<string | null> {
   if (s.dim === EMBEDDING_DIM && (!s.model || s.model === EMBEDDING_MODEL)) return null;
   return (
     `the index holds vectors made by ${s.model ?? 'another embedding model'} (${s.dim} dimensions), but ${EMBEDDING_MODEL} ` +
-    `(${EMBEDDING_DIM} dimensions) is configured. Run "knowledge-mcp knowledge reembed" to make new vectors from the stored text ` +
+    `(${EMBEDDING_DIM} dimensions) is configured. Run "${cli('knowledge reembed')}" to make new vectors from the stored text ` +
     '(no document is read again), or set the previous model back'
   );
 }
@@ -221,7 +222,7 @@ export async function ensureCollection(): Promise<void> {
       throw new Error(
         `[qdrant] collection '${DRIVE_COLLECTION}' holds ${size}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. ` +
           'After changing the embedding model, reindex into a new collection: set QDRANT_COLLECTION to a new name, ' +
-          'or run "knowledge-mcp drive reindex --recreate".',
+          `or run "${cli('drive reindex --recreate')}".`,
       );
     }
     return;
