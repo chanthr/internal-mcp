@@ -16,6 +16,10 @@ TGZ="$(ls "$WORK"/chnxthr-knowledge-mcp-*.tgz)"
 # List to a file first: `tar | grep -q` fails under pipefail when grep exits early (SIGPIPE to tar).
 tar -tzf "$TGZ" > "$WORK/tarball.txt"
 grep -q 'package/dist/cli.js' "$WORK/tarball.txt"
+# The console page is built into the package: nobody who installs it has the tools to build it.
+grep -q 'package/dist/console-ui/index.html' "$WORK/tarball.txt"
+grep -q 'package/dist/console-ui/app.js' "$WORK/tarball.txt"
+grep -q 'package/dist/console-ui/THIRD-PARTY-NOTICES.txt' "$WORK/tarball.txt"
 if grep -E 'package/(src|test)/' "$WORK/tarball.txt" >/dev/null; then echo "tarball contains src or test" >&2; exit 1; fi
 
 echo "== scaffold"
@@ -34,6 +38,9 @@ node dist/server.js serve >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "http://127.0.0.1:$PORT/health"; echo
+# The installed copy serves the console page, and its API answers nobody without the token.
+curl -fsS "http://127.0.0.1:$PORT/console/" | grep -q '<div id="root">'
+test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/console/api/state")" = "401"
 KEY="$(node dist/server.js keys create --email me@example.com --role admin 2>/dev/null)"
 
 echo "== call notes_add / notes_list through MCP"

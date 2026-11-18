@@ -17,13 +17,16 @@ const dir = mkdtempSync(join(tmpdir(), 'kmcp-console-'));
 const docs = join(dir, 'docs');
 mkdirSync(docs);
 writeFileSync(join(docs, 'a.md'), '# A\n\nSome text.\n');
+const handbook = join(dir, 'handbook');
+mkdirSync(handbook);
+writeFileSync(join(handbook, 'deploy.md'), '# Deploy\n\nProduction deploys from the main branch after review.\n');
 const dbPath = join(dir, 'shop.db');
 {
   const db = new DatabaseSync(dbPath);
   db.exec("create table orders (id integer primary key, total real, status text); insert into orders values (1, 10, 'paid'), (2, 20, 'paid')");
   db.close();
 }
-writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ connections: { shop: { type: 'sqlite', path: dbPath, explore: true } } }));
+writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ folders: [{ path: handbook }], connections: { shop: { type: 'sqlite', path: dbPath, explore: true } } }));
 Object.assign(process.env, {
   MCP_STORE: 'sqlite',
   MCP_DATA_DIR: join(dir, 'data'),
@@ -90,6 +93,32 @@ test('the API needs the console token, and the token file is private', async () 
   assert.equal(preflight.headers.get('access-control-allow-origin'), null);
 });
 
+test('the page: served from this server only, with nothing loaded from elsewhere and no way to frame it', async () => {
+  const page = await fetch(`${base}/console/`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get('content-type') ?? '', /text\/html/);
+  const csp = page.headers.get('content-security-policy') ?? '';
+  for (const part of ["default-src 'self'", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'"]) assert.ok(csp.includes(part), part);
+  assert.ok(!/script-src[^;]*unsafe/.test(csp), 'no inline or evaluated script');
+  assert.equal(page.headers.get('x-frame-options'), 'DENY');
+  assert.equal(page.headers.get('referrer-policy'), 'no-referrer');
+  assert.equal(page.headers.get('cache-control'), 'no-store');
+  const html = await page.text();
+  assert.ok(!/(src|href)="(https?:)?\/\//.test(html), 'the page refers to its own files only');
+  assert.ok(!html.includes(token), 'the token is not in the page');
+  for (const file of ['app.js', 'app.css']) {
+    const res = await fetch(`${base}/console/${file}`);
+    assert.equal(res.status, 200, file);
+    assert.ok(!(await res.text()).includes(token));
+  }
+  // The page is public to this machine (it holds nothing); everything it shows comes from the API, which is not.
+  assert.equal((await fetch(`${base}/console/api/state`)).status, 401);
+  // Another site's name for this machine (DNS rebinding) gets neither.
+  const { get } = await import('node:http');
+  const status = await new Promise<number>((done, fail) => get({ host: '127.0.0.1', port: server.port, path: '/console/', headers: { Host: 'evil.example.com' } }, (r) => (r.resume(), done(r.statusCode ?? 0))).on('error', fail));
+  assert.ok(status === 403 || status === 404, String(status));
+});
+
 test('state: what is set up, without any secret', async () => {
   process.env.SLACK_BOT_TOKEN = 'xoxb-secret-value-1234567890';
   try {
@@ -110,7 +139,7 @@ test('state: what is set up, without any secret', async () => {
 test('folders, connections and tools are saved through the same checks as the setup commands', async () => {
   const added = await api('POST', '/folders', { path: docs });
   assert.deepEqual([added.status, added.json.restarting, added.json.restartNeeded], [200, false, true]); // nothing supervises a test
-  assert.deepEqual(config().folders, [{ path: docs }]);
+  assert.deepEqual(config().folders, [{ path: handbook }, { path: docs }]);
   assert.match((await api('POST', '/folders', { path: join(dir, 'nope') })).json.error, /is not a folder/);
 
   // A Postgres URL goes to .env under a name of its own, and is checked before it is saved.
@@ -154,7 +183,7 @@ test('folders, connections and tools are saved through the same checks as the se
   assert.equal((await api('DELETE', '/connections/books')).status, 200);
   assert.equal(config().connections.books, undefined);
   assert.equal((await api('DELETE', '/folders', { path: docs })).status, 200);
-  assert.deepEqual(config().folders, []);
+  assert.deepEqual(config().folders, [{ path: handbook }]);
 });
 
 test('a tool can be tried, tables can be listed, and a secret typed in is never shown again', async () => {
@@ -163,6 +192,14 @@ test('a tool can be tried, tables can be listed, and a secret typed in is never 
   assert.equal(JSON.parse(run.json.text).rows[0].n, 2);
   assert.equal((await api('POST', '/run', { name: 'shop_query', args: { sql: 'delete from orders' } })).json.ok, false);
   assert.match((await api('POST', '/run', { name: 'no_such_tool', args: {} })).json.text, /Unknown tool/);
+  // A built-in tool asks who is calling: the console calls as the local admin, like a client on this machine.
+  let found = { ok: false, text: '' };
+  for (let i = 0; i < 40 && !/deploy\.md/.test(found.text); i++) {
+    found = (await api('POST', '/run', { name: 'search_knowledge', args: { query: 'production deploys' } })).json;
+    if (!/deploy\.md/.test(found.text)) await new Promise((r) => setTimeout(r, 250)); // the first scan is still running
+  }
+  assert.equal(found.ok, true, found.text);
+  assert.match(found.text, /deploy\.md/);
   const tables = await api('GET', '/connections/shop/tables');
   assert.deepEqual(tables.json.tables, [{ name: 'orders', kind: 'table', columns: [{ name: 'id', type: 'INTEGER' }, { name: 'total', type: 'REAL' }, { name: 'status', type: 'TEXT' }] }]);
   assert.equal((await api('GET', '/connections/crm/tables')).status, 404);
@@ -174,6 +211,19 @@ test('a tool can be tried, tables can be listed, and a secret typed in is never 
   assert.ok(!slack.text.includes('typed-secret') && !envFile().includes('typed-secret'));
   const removed = await api('DELETE', '/services/slack');
   assert.equal(removed.status, 200);
+
+  // Disconnecting Drive deletes the key that was pasted into the console, and no key file that is somebody's own.
+  const pasted = join(dir, 'drive-service-account.json');
+  const own = join(dir, 'my-own-key.json');
+  writeFileSync(pasted, '{}');
+  writeFileSync(own, '{}');
+  writeFileSync(join(dir, '.env'), `${envFile()}GOOGLE_APPLICATION_CREDENTIALS=${own}\n`);
+  assert.equal((await api('DELETE', '/services/drive')).status, 200);
+  assert.ok(existsSync(own) && existsSync(pasted), 'a key file the env does not point at is left alone');
+  writeFileSync(join(dir, '.env'), `${envFile()}GOOGLE_APPLICATION_CREDENTIALS=${pasted}\n`);
+  assert.equal((await api('DELETE', '/services/drive')).status, 200);
+  assert.ok(!existsSync(pasted) && existsSync(own));
+  assert.ok(!/^GOOGLE_APPLICATION_CREDENTIALS=/m.test(envFile()));
 });
 
 test('people and keys: a key is shown once, and the list never holds it', async () => {
@@ -199,12 +249,18 @@ test('activity, the client snippets and the live check', async () => {
   const store = await getStore();
   await store.logToolCall({ tool: 'shop_query', email: 'ann@example.com', role: 'member', ok: true, error: null, durationMs: 42 });
   await store.logToolCall({ tool: 'search_knowledge', email: null, role: 'admin', ok: false, error: 'boom', durationMs: 7 });
-  const calls = (await api('GET', '/activity?limit=5')).json.calls;
+  const calls = (await api('GET', '/activity?limit=2')).json.calls;
   assert.deepEqual(calls.map((c: { tool: string; ok: boolean; durationMs: number }) => [c.tool, c.ok, c.durationMs]), [['search_knowledge', false, 7], ['shop_query', true, 42]]);
   assert.match(calls[0].at, /^\d{4}-\d{2}-\d{2}T/);
+  // What was tried from the console (in the test above) is in the same record, under the console's name.
+  const all = (await api('GET', '/activity?limit=100')).json.calls as Array<{ tool: string; email: string | null; ok: boolean; error: string | null }>;
+  assert.ok(all.some((c) => c.email === 'console@localhost' && c.tool === 'shop_query' && c.ok));
+  assert.ok(all.some((c) => c.email === 'console@localhost' && c.tool === 'shop_query' && !c.ok && c.error));
 
   const clients = (await api('GET', '/clients')).json;
-  assert.match(clients.claudeCode, /^claude mcp add [a-z0-9-]+ -- \S+/);
+  // This folder is not a project, so the server comes through npx and the entry names the folder.
+  assert.equal(clients.claudeCode, `claude mcp add --scope user ${clients.name} -e MCP_HOME=${dir} -- npx -y @chnxthr/knowledge-mcp serve --stdio`);
+  assert.deepEqual(JSON.parse(clients.cursor).mcpServers[clients.name].env, { MCP_HOME: dir });
   assert.equal(clients.url, `http://localhost:${server.port}/mcp`);
   assert.deepEqual(Object.keys(JSON.parse(clients.claudeDesktop).mcpServers), [clients.name]);
   assert.equal(JSON.parse(clients.vscode).servers[clients.name].type, 'stdio');

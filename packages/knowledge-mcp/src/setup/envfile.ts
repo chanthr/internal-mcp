@@ -14,15 +14,27 @@ export function formatEnvValue(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
 }
 
-/** Keys that are set (not commented out, not empty) in the file. */
-export function readEnvKeys(path: string): Set<string> {
-  const keys = new Set<string>();
-  if (!existsSync(path)) return keys;
+/**
+ * The values that are set (not commented out, not empty) in the file, as written by `formatEnvValue`: quotes
+ * removed. A name set twice has its last value, as when the file is loaded.
+ */
+export function readEnvValues(path: string): Map<string, string> {
+  const values = new Map<string, string>();
+  if (!existsSync(path)) return values;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (m && m[2].trim()) keys.add(m[1]);
+    const raw = m?.[2].trim();
+    if (!m || !raw) continue;
+    const single = /^'(.*)'$/.exec(raw);
+    const double = /^"(.*)"$/.exec(raw);
+    values.set(m[1], single ? single[1] : double ? double[1].replace(/\\(.)/g, (_, c: string) => (c === 'n' ? '\n' : c)) : raw);
   }
-  return keys;
+  return values;
+}
+
+/** Keys that are set (not commented out, not empty) in the file. */
+export function readEnvKeys(path: string): Set<string> {
+  return new Set(readEnvValues(path).keys());
 }
 
 /**

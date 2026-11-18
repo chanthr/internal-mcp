@@ -11,13 +11,17 @@
  *
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
-import { existsSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { configSource, getConfig } from '../core/config.js';
+import { home } from '../core/paths.js';
+import { authStore } from '../core/context.js';
+import { logToolCall } from '../store/tool_log.js';
+import type { AuthContext } from '../core/auth.js';
 import { stdioCommand } from '../core/invocation.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
@@ -30,7 +34,7 @@ import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive
 import { isTrusted, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
 import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList } from '../setup/commands.js';
-import { readEnvKeys, updateEnvFile } from '../setup/envfile.js';
+import { readEnvKeys, readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { countDocuments } from '../setup/wizard.js';
 import { consoleEnabled, consoleToken, localOnly, tokenRequired } from './auth.js';
 import { canReload, requestReload } from './supervisor.js';
@@ -40,7 +44,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Folder that holds .env and mcp.config.json: where the loaded config file is, else the working directory. */
 export function settingsDir(): string {
   const source = configSource();
-  return source.startsWith('file:') ? dirname(source.slice(5)) : process.cwd();
+  return source.startsWith('file:') ? dirname(source.slice(5)) : home() ?? process.cwd();
 }
 
 /** Can the console write the config? Not when it comes from an env var (MCP_CONFIG_JSON): there is no file to edit. */
@@ -270,6 +274,10 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const envPath = join(settingsDir(), '.env');
       const inFile = readEnvKeys(envPath);
       const outside = names.filter((n) => process.env[n]?.trim() && !inFile.has(n));
+      // The key that was pasted into the console lives in a file the console wrote: it goes with the connection.
+      // A key file somebody put elsewhere is theirs and stays.
+      const pasted = join(settingsDir(), 'drive-service-account.json');
+      if (id === 'drive' && resolve(settingsDir(), readEnvValues(envPath).get('GOOGLE_APPLICATION_CREDENTIALS') ?? '.') === pasted) rmSync(pasted, { force: true });
       updateEnvFile(envPath, Object.fromEntries(names.map((n) => [n, undefined])));
       change(res, outside.length ? { note: `${outside.join(', ')} is set outside .env (in the shell or the platform), so it stays on until it is removed there.` } : {});
     }),
@@ -436,7 +444,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       const { name, args } = z.object({ name: z.string().min(1).max(100), args: z.record(z.string(), z.unknown()).default({}) }).parse(req.body);
       const started = Date.now();
-      const r = await registry.call(name, args, { ok: true, role: 'admin', email: 'console@localhost' });
+      // The same footing as a client on this machine (stdio): the admin, with the caller set for the whole call so
+      // tools that ask who is calling (search, documents) get an answer.
+      const auth: AuthContext = { ok: true, org_id: getConfig().orgId, role: 'admin', email: 'console@localhost' };
+      const r = await authStore.run(auth, () => registry.call(name, args, auth));
+      // A call from here is a call: it reaches the same databases and services, so it is in the same record.
+      logToolCall({ tool: name, auth, ok: r.isError !== true, error: r.isError === true ? (r.content.find((c) => c.type === 'text') as { text?: string } | undefined)?.text ?? null : null, durationMs: Date.now() - started });
       const text = r.content.map((c) => (c.type === 'text' ? String((c as { text?: unknown }).text ?? '') : `[${c.type}]`)).join('\n');
       res.json({ ok: r.isError !== true, text: text.length > 60_000 ? `${text.slice(0, 60_000)}\n… [${text.length - 60_000} more characters]` : text, ms: Date.now() - started });
     }),
@@ -450,11 +463,15 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const [command, ...args] = stdioCommand(dir);
       const name = (getConfig().branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'knowledge';
       const url = `http://${req.headers.host}/mcp`;
-      const stdio = { command, args };
+      // Through npx there is no project folder to find the settings by, and the client starts the server from
+      // wherever it happens to be: the entry names the folder. A project's own server finds it by itself.
+      const env = command === 'npx' ? { MCP_HOME: dir } : undefined;
+      const stdio = { command, args, ...(env ? { env } : {}) };
+      const quote = (a: string) => (/[^A-Za-z0-9_@%+=:,./-]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a);
       res.json({
         name,
         url,
-        claudeCode: `claude mcp add ${name} -- ${[command, ...args].map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(' ')}`,
+        claudeCode: ['claude', 'mcp', 'add', '--scope', 'user', name, ...(env ? ['-e', `MCP_HOME=${dir}`] : []), '--', command, ...args].map(quote).join(' '),
         claudeDesktop: JSON.stringify({ mcpServers: { [name]: stdio } }, null, 2),
         cursor: JSON.stringify({ mcpServers: { [name]: stdio } }, null, 2),
         vscode: JSON.stringify({ servers: { [name]: { type: 'stdio', ...stdio } } }, null, 2),
@@ -524,6 +541,16 @@ export function mountConsole(app: Express, registry: Registry): boolean {
 
   const router = express.Router();
   router.use(localOnly);
+  router.use((_req, res, next) => {
+    // The page loads nothing from anywhere else, cannot be framed, and tells no other site where it was.
+    // (Styles are inline because the components carry their own.)
+    res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   router.use('/api', api);
   if (ui) {
     router.use(express.static(ui, { index: 'index.html', maxAge: 0 }));
