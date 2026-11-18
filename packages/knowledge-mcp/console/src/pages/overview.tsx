@@ -1,30 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
-import { call } from '../api';
 import { Page, Row, Section, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
 
-interface Line {
-  ok: boolean | null;
-  what: string;
-  text: string;
-}
-
 export function Overview() {
-  const { state, go } = useServer();
-  const [lines, setLines] = useState<Line[] | null>(null);
-  const [failed, setFailed] = useState<string | null>(null);
-  const check = useCallback(async () => {
-    setLines(null);
-    setFailed(null);
-    try {
-      setLines((await call<{ lines: Line[] }>('GET', '/check')).lines);
-    } catch (e) {
-      setFailed(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-  useEffect(() => void check(), [check]);
+  const { state, go, checks, check } = useServer();
+  const lines = checks && !checks.failed ? checks.lines : null;
+  const failed = checks?.failed ?? null;
 
   // What is not set up is not a failed check: the rows above say what can be added.
   const connected = lines
@@ -66,11 +48,11 @@ export function Overview() {
       <Section
         title="Checks"
         text="Everything connected, asked just now."
-        action={<Button size="sm" variant="ghost" onClick={() => void check()} disabled={lines === null && !failed}>Check again</Button>}
+        action={<Button size="sm" variant="ghost" onClick={check} disabled={checks === null}>Check again</Button>}
       >
         <div className="rows">
           {failed && <Row title="The checks could not run" help={failed} />}
-          {!failed && lines === null && <Row title={<span className="actions"><Spinner /> Checking</span>} />}
+          {checks === null && <Row title={<span className="actions"><Spinner /> Checking</span>} />}
           {connected?.length === 0 && <Row title="Nothing is connected yet" help="Checks appear here once something is." />}
           {connected?.map((l, n) => (
             <Row key={n} title={l.title} help={l.text}>

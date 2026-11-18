@@ -21,8 +21,7 @@ import type { Plugin } from './plugin/define.js';
 import { Registry } from './plugin/registry.js';
 import { builtinPlugins } from './plugins/index.js';
 import { cli, stdioCommand } from './core/invocation.js';
-import { shouldSupervise, supervise } from './admin/supervisor.js';
-import { spawn } from 'node:child_process';
+import { superviseIfServing } from './admin/launch.js';
 
 export interface RunOptions {
   /** Plugins to serve. Default: the built-in Drive, Slack, GitHub and Railway plugins. */
@@ -70,39 +69,6 @@ Usage: knowledge-mcp <command> [options]
   <plugin> <command> [args]           Run a plugin command (see doctor for the list)
 
 Docs: https://github.com/chanthr/internal-mcp`;
-
-/** Is this `serve` an HTTP server (not a stdio session)? */
-function servesHttp(argv: string[]): boolean {
-  return !argv.includes('--stdio') && (process.env.MCP_TRANSPORT || 'http').toLowerCase() !== 'stdio';
-}
-
-/**
- * Open a page in the person's browser. Best effort: a missing opener is not an error.
- * A command line is visible to every user of the machine (`ps`), so what is opened is never the address with the
- * console token: it is the one-time address of the server (see admin/routes.ts, /console/open).
- */
-function openInBrowser(url: string): void {
-  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
-  try {
-    spawn(cmd as string, args as string[], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
-  } catch {
-    /* no browser to open */
-  }
-}
-
-/**
- * Run the HTTP server under the supervisor, so a change saved in the console takes effect by itself.
- * `open`: also open the console in the browser the first time the server is up.
- */
-async function serveSupervised(open: boolean): Promise<never> {
-  return supervise(({ port, consoleUrl, openUrl }, first) => {
-    if (!consoleUrl || !first) return;
-    // The address carries the access token, so it is printed only to a terminal, never into a log file.
-    if (process.stderr.isTTY) info(`[knowledge-mcp] console · ${consoleUrl}`);
-    else info(`[knowledge-mcp] console · http://localhost:${port}/console/ (the access token is in the data directory, file console-token)`);
-    if (open && openUrl && process.stderr.isTTY && !process.env.CI) openInBrowser(openUrl);
-  });
-}
 
 async function cmdServe(registry: Registry, argv: string[]): Promise<void> {
   const { values } = parseArgs({ args: argv, options: { stdio: { type: 'boolean' }, open: { type: 'boolean' } }, allowPositionals: false });
@@ -359,9 +325,9 @@ export async function run(opts: RunOptions = {}): Promise<void> {
     if (cmd === 'setup') return await cmdSetup(rest);
     if (cmd === 'keys') return await cmdKeys(rest);
     if (cmd === 'users') return await cmdUsers(rest);
-    // An HTTP server on a person's machine runs under a small supervisor (see admin/supervisor.ts). Started with
-    // no arguments at all, the console is opened in the browser as well.
-    if (cmd === 'serve' && servesHttp(rest) && shouldSupervise()) return await serveSupervised(argv.length === 0 || rest.includes('--open'));
+    // An HTTP server on a person's machine runs under a small supervisor (see admin/launch.ts). The binary has
+    // decided this before it got here; a project's own server.ts decides it now.
+    await superviseIfServing(argv);
     const registry = new Registry(opts.plugins ?? builtinPlugins);
     if (cmd === 'serve' || cmd === '--stdio') return await cmdServe(registry, cmd === '--stdio' ? ['--stdio'] : rest);
     if (cmd === 'doctor') return await cmdDoctor(registry);

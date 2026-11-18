@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError, call, REFUSED, setToken, takeTokenFromAddress, token, type Changed, type State } from './api';
 import { Button } from './ui/button';
 import { AlertDialog } from './ui/dialog';
@@ -24,6 +24,17 @@ interface Server {
    */
   apply: <T extends Changed>(change: () => Promise<T>) => Promise<T>;
   go: (page: string) => void;
+  /**
+   * The live checks of everything connected (null while they run). They reach out to each service, so they are
+   * run once and kept: coming back to the overview does not ask every service again. A change asks again.
+   */
+  checks: { lines: CheckLine[]; failed: string | null } | null;
+  check: () => void;
+}
+export interface CheckLine {
+  ok: boolean | null;
+  what: string;
+  text: string;
 }
 const ServerContext = createContext<Server | null>(null);
 export function useServer(): Server {
@@ -68,6 +79,17 @@ export function App() {
   const [applying, setApplying] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [page, setPage] = useState(pageFromHash);
+  const [checks, setChecks] = useState<Server['checks']>(null);
+  const checking = useRef(false);
+  const check = useCallback(() => {
+    if (checking.current) return;
+    checking.current = true;
+    setChecks(null);
+    call<{ lines: CheckLine[] }>('GET', '/check')
+      .then((r) => setChecks({ lines: r.lines, failed: null }))
+      .catch((e) => setChecks({ lines: [], failed: e instanceof Error ? e.message : String(e) }))
+      .finally(() => (checking.current = false));
+  }, []);
 
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
@@ -123,14 +145,20 @@ export function App() {
         await refresh();
       }
       if (result.note) setNotice(result.note);
+      check(); // what is connected has changed
       return result;
     },
-    [refresh],
+    [refresh, check],
   );
   const go = useCallback((id: string) => {
     location.hash = `#/${id}`;
   }, []);
-  const server = useMemo<Server | null>(() => (state ? { state, refresh, apply, go } : null), [state, refresh, apply, go]);
+  const server = useMemo<Server | null>(() => (state ? { state, refresh, apply, go, checks, check } : null), [state, refresh, apply, go, checks, check]);
+  // Asked once the console is open, so the answer is there by the time the overview shows it.
+  const opened = !!state;
+  useEffect(() => {
+    if (opened) check();
+  }, [opened, check]);
 
   if (gate === 'loading') return <Gate title="Knowledge MCP"><Spinner label="Loading" /></Gate>;
   if (gate === 'token') return <TokenGate onDone={refresh} />;
