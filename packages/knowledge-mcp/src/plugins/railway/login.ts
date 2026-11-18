@@ -6,16 +6,12 @@
  * here, in a file only the owner can read: this installation's registration, the refresh token and the access
  * token in use.
  *
- * An access token lasts an hour and the refresh token changes each time it is used. Every server on this data
- * directory (the HTTP server and each stdio session a client starts) reads the same file, so a refresh is done by
- * one process at a time and the others read what it wrote.
+ * An access token lasts an hour and the refresh token changes each time it is used: keeping the file and renewing
+ * the token across processes is core/signin_store.ts.
  *
  * RAILWAY_TOKEN, when set, is used as before and this file is not looked at.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { acquireLock, releaseLock } from '../../core/lock.js';
-import { dataDir } from '../../core/paths.js';
+import { freshToken, signInFile } from '../../core/signin_store.js';
 
 /** Where Railway signs people in and answers the API for a signed-in app. An object so tests can point it at a fake. */
 export const railwayEndpoints = {
@@ -49,31 +45,11 @@ export interface RailwayLogin {
   who?: string;
 }
 
-const file = () => join(dataDir(), 'railway-login.json');
+const file = signInFile<RailwayLogin>('railway-login.json');
 
-export function readRailwayLogin(): RailwayLogin {
-  try {
-    const j = JSON.parse(readFileSync(file(), 'utf8'));
-    return j && typeof j === 'object' ? (j as RailwayLogin) : {};
-  } catch {
-    return {};
-  }
-}
-
-/** Written whole and swapped in, so another process never reads half a file. */
-export function writeRailwayLogin(login: RailwayLogin): void {
-  mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  const tmp = `${file()}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(login, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, file());
-  cached = null;
-}
-
-export function forgetRailwayLogin(): void {
-  rmSync(file(), { force: true });
-  cached = null;
-}
+export const readRailwayLogin = (): RailwayLogin => file.read() ?? {};
+export const writeRailwayLogin = (login: RailwayLogin): void => file.write(login);
+export const forgetRailwayLogin = (): void => file.forget();
 
 /** Has somebody signed in here (and not out)? */
 export function railwaySignedIn(): boolean {
@@ -159,61 +135,26 @@ export async function railwayTokenRequest(form: Record<string, string>): Promise
 }
 
 const SIGN_IN_AGAIN = 'Railway: the sign-in is no longer valid. Open the console (Apps → Railway) and sign in again, or set RAILWAY_TOKEN.';
-const LOCK = 'railway-login';
-const fresh = (expiresAt: number | undefined): boolean => !!expiresAt && expiresAt - 60_000 > Date.now();
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-let cached: { token: string; expiresAt: number } | null = null;
-let refreshing: Promise<string> | null = null;
 
 /** The token to call Railway with, and the API address it belongs to. */
 export async function railwayAuth(): Promise<{ token: string; api: string }> {
   const fixed = (process.env.RAILWAY_TOKEN || process.env.RAILWAY_MCP_TOKEN)?.trim();
   if (fixed) return { token: fixed, api: TOKEN_API };
-  if (cached && fresh(cached.expiresAt)) return { token: cached.token, api: railwayEndpoints.api };
-  refreshing ??= currentToken().finally(() => {
-    refreshing = null;
+  const token = await freshToken<RailwayLogin>({
+    file,
+    lock: 'railway-login',
+    token: (l) => (l.accessToken ? { value: l.accessToken, expiresAt: l.expiresAt } : null),
+    renew: async (l) => {
+      if (!l.refreshToken || !l.client?.id) return null;
+      const t = await railwayTokenRequest({ grant_type: 'refresh_token', refresh_token: l.refreshToken, client_id: l.client.id });
+      return { ...l, accessToken: t.accessToken, refreshToken: t.refreshToken ?? l.refreshToken, expiresAt: t.expiresAt };
+    },
+    gone: SIGN_IN_AGAIN,
   });
-  return { token: await refreshing, api: railwayEndpoints.api };
+  return { token, api: railwayEndpoints.api };
 }
 
 /** Is there anything to call Railway with? */
 export function railwayConfigured(): boolean {
   return !!(process.env.RAILWAY_TOKEN || process.env.RAILWAY_MCP_TOKEN)?.trim() || railwaySignedIn();
-}
-
-async function currentToken(): Promise<string> {
-  for (let attempt = 0; attempt < 80; attempt++) {
-    const saved = readRailwayLogin();
-    if (saved.accessToken && fresh(saved.expiresAt)) {
-      cached = { token: saved.accessToken, expiresAt: saved.expiresAt! };
-      return saved.accessToken;
-    }
-    if (!saved.refreshToken || !saved.client?.id) throw new Error(SIGN_IN_AGAIN);
-    // Another process is getting a new token right now: wait for what it writes instead of spending the same
-    // refresh token twice.
-    if (!acquireLock(LOCK, 60_000)) {
-      await sleep(250);
-      continue;
-    }
-    try {
-      const now = readRailwayLogin(); // it may have been renewed between the read and the lock
-      if (now.accessToken && fresh(now.expiresAt)) continue;
-      if (!now.refreshToken || !now.client?.id) throw new Error(SIGN_IN_AGAIN);
-      let t: RailwayTokens;
-      try {
-        t = await railwayTokenRequest({ grant_type: 'refresh_token', refresh_token: now.refreshToken, client_id: now.client.id });
-      } catch (e) {
-        // Railway says the refresh token is spent or withdrawn: only a new sign-in helps.
-        if ((e as { code?: string }).code === 'invalid_grant') throw new Error(SIGN_IN_AGAIN);
-        throw e;
-      }
-      writeRailwayLogin({ ...now, accessToken: t.accessToken, refreshToken: t.refreshToken ?? now.refreshToken, expiresAt: t.expiresAt });
-      cached = { token: t.accessToken, expiresAt: t.expiresAt };
-      return t.accessToken;
-    } finally {
-      releaseLock(LOCK);
-    }
-  }
-  throw new Error('Railway: another process has been renewing the sign-in for too long. Try again.');
 }

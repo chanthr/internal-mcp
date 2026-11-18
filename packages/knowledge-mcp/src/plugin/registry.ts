@@ -9,6 +9,7 @@ import { safeParse } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import type { AuthContext } from '../core/auth.js';
 import { getConfig, type AppConfig, BASE_INSTRUCTIONS } from '../core/config.js';
 import { UpstreamManager } from '../core/upstream.js';
+import { upstreamToken } from '../core/upstream_login.js';
 import { isSet } from '../core/env.js';
 import { getStore } from '../store/index.js';
 import { dataPlugins } from '../connections/index.js';
@@ -121,6 +122,7 @@ export class Registry {
           url: u.url,
           prefix: u.prefix ?? `${u.name.replace(/-/g, '_')}_`,
           token: u.tokenEnv ? () => process.env[u.tokenEnv!] : undefined,
+          bearer: u.signIn ? (rejected) => upstreamToken(u.name, u.url, rejected) : undefined,
           headers: u.headers,
           expose: u.expose,
         },

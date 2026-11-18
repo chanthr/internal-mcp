@@ -57,8 +57,12 @@ import {
   signOutGoogle,
   signOutRailway,
   startGoogleLogin,
+  startMcpLogin,
   startRailwayLogin,
 } from './logins.js';
+import { mcpTarget, needsSignIn, prefixOf, removeUpstream, signOutMcp, tokenEnvOf, toolsFound, upsertUpstream, upstreamEntries } from './upstreams.js';
+import { probeUpstream } from '../core/upstream.js';
+import { readUpstreamLogin, UPSTREAM_NAME, upstreamSignedIn } from '../core/upstream_login.js';
 import { canReload, requestReload } from './supervisor.js';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -133,6 +137,35 @@ function driveVia(dir: string): { via: 'key' | 'login' | null; account: string |
   return { via: 'login', account: login?.account ?? null, reads: roots.filter((r) => mine.has(String(r?.id))).map((r) => String(r.name ?? r.id)) };
 }
 
+/** Other services' MCP servers in mcp.config.json, each with what the gateway says about it right now. */
+function upstreamViews(dir: string, registry: Registry) {
+  const live = new Map(registry.upstreams.statuses().map((s) => [s.name, s]));
+  let entries: ReturnType<typeof upstreamEntries> = [];
+  try {
+    entries = upstreamEntries(dir);
+  } catch {
+    /* a config file that cannot be read is reported elsewhere */
+  }
+  return entries.map((e) => {
+    const s = live.get(e.name);
+    return {
+      name: e.name,
+      url: e.url,
+      prefix: prefixOf(e),
+      expose: Array.isArray(e.expose) ? ('list' as const) : e.expose ?? ('read' as const),
+      via: e.signIn ? ('login' as const) : e.tokenEnv ? ('token' as const) : ('open' as const),
+      // A sign-in can be gone while the entry is still there (the data folder was emptied, the address changed).
+      signedIn: e.signIn ? UPSTREAM_NAME.test(e.name) && upstreamSignedIn(e.name, e.url) : null,
+      // Not running: saved, and waiting for the server to start again.
+      running: !!s,
+      connected: s?.connected ?? false,
+      tools: s?.toolCount ?? 0,
+      hidden: s?.hidden ?? 0,
+      error: s?.error ?? null,
+    };
+  });
+}
+
 /** How Railway is connected: a token in the environment wins over a sign-in. */
 function railwayVia(): { set: boolean; via: 'token' | 'login' | null; who: string | null } {
   if (isSet(SERVICE_ENV.railway)) return { set: true, via: 'token', who: null };
@@ -175,7 +208,7 @@ const SERVER_OWN = new Set([
   'OAUTH_GOOGLE_CLIENT_SECRET', 'OAUTH_JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY', 'MCP_API_KEY', 'MCP_CONFIG_JSON',
 ]);
 /** …and the connection string of a database, which the console files under <NAME>_DATABASE_URL. */
-const serverOwn = (name: string) => SERVER_OWN.has(name.toUpperCase()) || /_DATABASE_URL$/i.test(name);
+const serverOwn = (name: string) => SERVER_OWN.has(name.toUpperCase()) || /_DATABASE_URL$/i.test(name) || /_MCP_TOKEN$/i.test(name);
 
 /**
  * Why a `${NAME}` written in the console is refused, or null.
@@ -303,7 +336,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         connections: Object.entries(cfg.connections).map(([name, c]) => connectionView(name, c, cfg.tools.filter((t) => t.connection === name).length)),
         declaredTools: cfg.tools,
         tools,
-        // A sign-in that came back from Railway or Google and waits to be saved: the page saves it when it sees this.
+        // Other services' MCP servers in the list, and how each one is doing right now.
+        upstreams: upstreamViews(dir, registry),
+        // A sign-in that came back from another site and waits to be saved: the page saves it when it sees this.
         login: loginWaiting(),
       });
     }),
@@ -476,7 +511,67 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/logins/finish',
     wrap(async (_req, res) => {
       const done = await finishLogin(settingsDir());
-      change(res, { found: done.found, note: `${done.service === 'railway' ? 'Railway' : 'Google Drive'} is connected: ${done.found}.` });
+      change(res, { found: done.found, note: `${done.label} is connected: ${done.found}.` });
+    }),
+  );
+
+  // ── Other services' MCP servers (upstreams.ts) ──
+  /** Connect and list the tools, with what went wrong said so that the form can show it. */
+  const lookAt = async (spec: Parameters<typeof probeUpstream>[0]) => {
+    try {
+      return await probeUpstream(spec);
+    } catch (e) {
+      throw new Error(`${new URL(spec.url).host} did not list its tools (${msg(e).slice(0, 200)}).`);
+    }
+  };
+  api.post(
+    '/upstreams',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const body = z.object({ name: z.string().max(40), url: z.string().max(1000), token: secret.optional() }).parse(req.body);
+      // Its name is its permission group and the start of its tool names: it cannot be one that is in use.
+      const taken = new Set([...BUILT_IN, ...Object.keys(getConfig().connections), ...Object.keys(readConfigFile(dir).connections ?? {}), ...registry.status().map((p) => p.id)]);
+      const target = mcpTarget(dir, body, taken);
+      if (body.token) {
+        const seen = await lookAt({ name: target.name, url: target.url, prefix: prefixOf(target), token: body.token });
+        const env = tokenEnvOf(target.name);
+        updateEnvFile(join(dir, '.env'), { [env]: body.token });
+        if (readUpstreamLogin(target.name)) await signOutMcp(target.name);
+        upsertUpstream(dir, { name: target.name, url: target.url, tokenEnv: env });
+        return change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });
+      }
+      // The server wants a sign-in: the page goes there, and the server is added when the sign-in is saved.
+      if (await needsSignIn(target.url)) return void res.json({ signIn: await startMcpLogin(origin(req), target) });
+      const seen = await lookAt({ name: target.name, url: target.url, prefix: prefixOf(target) });
+      upsertUpstream(dir, { name: target.name, url: target.url });
+      change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });
+    }),
+  );
+  api.patch(
+    '/upstreams/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const { expose } = z.object({ expose: z.enum(['read', 'all']) }).parse(req.body);
+      const dir = settingsDir();
+      const entry = upstreamEntries(dir).find((e) => e.name === String(req.params.name));
+      if (!entry) return refuse(res, 404, 'That server is not in the list.');
+      upsertUpstream(dir, { ...entry, expose });
+      change(res);
+    }),
+  );
+  api.delete(
+    '/upstreams/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const name = String(req.params.name);
+      const gone = removeUpstream(dir, name);
+      if (!gone) return refuse(res, 404, 'That server is not in the list.');
+      // What the console made for it goes with it: the sign-in (here and at the service) and a pasted token.
+      if (UPSTREAM_NAME.test(name)) await signOutMcp(name);
+      if (gone.tokenEnv && gone.tokenEnv === tokenEnvOf(name)) updateEnvFile(join(dir, '.env'), { [gone.tokenEnv]: undefined });
+      change(res);
     }),
   );
   api.post(

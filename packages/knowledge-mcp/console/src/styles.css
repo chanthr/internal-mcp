@@ -68,6 +68,7 @@ p { margin: 0; }
 .section { margin-top: 30px; }
 .section:first-of-type { margin-top: 0; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.section-head > button { flex: none; }
 .section-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
 .section-head p { color: var(--muted); font-size: 12px; margin-top: 2px; }
 

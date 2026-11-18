@@ -49,6 +49,11 @@ const UpstreamConfigSchema = z
     prefix: z.string().regex(/^[a-z][a-z0-9_]*_$/).optional(),
     /** Name of the env var holding the bearer token (the token itself never goes in this file). */
     tokenEnv: z.string().optional(),
+    /**
+     * true: the server was signed in to from the console, and the gateway uses that sign-in
+     * (<data dir>/mcp-logins/<name>.json), renewing it by itself. Not together with tokenEnv.
+     */
+    signIn: z.boolean().optional(),
     /** Extra request headers (no secrets — use tokenEnv). */
     headers: z.record(z.string(), z.string()).optional(),
     /** "read" (default): only read-verb tools. "all": everything. Or an explicit list of remote tool names. */

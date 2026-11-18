@@ -106,7 +106,7 @@ npm run dev                    # in a generated project: the address is in the f
 | --- | --- |
 | Documents | Add a folder, connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
-| Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token |
+| Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
 | Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
 | People and keys | Create and revoke keys, and limit a person to some tools |
@@ -128,6 +128,7 @@ offers something better, the console uses it:
 | Railway | **Sign in with Railway** | Nothing to prepare. The server registers itself with Railway, you sign in and pick the workspaces it may read, as a viewer. The sign-in renews itself |
 | Google Drive | **Sign in with Google** | An OAuth client of your own Google Cloud project, made once: client ID and secret go into the form. The server then reads your My Drive, or the folders you list, as you. Google reviews every shared app that reads Drive, which is why there is no ready-made one to offer |
 | Google Drive | **Account with gcloud** | The gcloud CLI, signed in. It creates a service account and its key; you then share folders with that account |
+| Notion, Supabase, Linear and other apps with an MCP server | **Add an app** | Nothing to prepare where the app's server follows MCP's sign-in rules: this server registers itself there and you sign in at the app. Only its tools that read are turned on, and Supabase is added in its read-only mode |
 | GitHub | **Use the gh login** | The gh CLI, signed in |
 | Slack | A link that opens Slack's "Create an app" with the read-only permissions filled in | The bot token is still copied once. Slack's sign-in needs a secret and a public https address, which a server on your machine has not |
 
@@ -545,6 +546,11 @@ Setting both Supabase variables selects Supabase. `MCP_STORE=sqlite|supabase` fo
 The server can also be a gateway: list another MCP server and its tools appear under a prefix, behind your
 keys and permissions.
 
+In the console this is **Apps → Add an app**: pick from the list (Notion, Supabase, Linear, Atlassian, Sentry,
+Vercel, Stripe, Airtable, Figma and more) or give the address of any MCP server. When the server says where to
+sign in and lets a client register itself, you are sent there to sign in; a token can be pasted where the
+service gives one. By hand, in `mcp.config.json`:
+
 ```json
 {
   "upstreams": [
@@ -563,7 +569,8 @@ keys and permissions.
 | `name` | Permission group and log name |
 | `prefix` | Tool name prefix. Default `<name>_` |
 | `tokenEnv` | Env var holding the bearer token. The token never goes in the config file |
-| `expose` | `"read"` (default) lists only tools whose first word is a read verb such as `get`, `list` or `search`. `"all"` lists everything. A list exposes exactly those remote tool names |
+| `signIn` | `true`: use the sign-in made from the console (`<data dir>/mcp-logins/<name>.json`). The gateway renews it by itself. Not together with `tokenEnv` |
+| `expose` | `"read"` (default) lists only tools that read: the ones the remote marks as read-only, and of those it does not mark, the ones whose first word is a read verb such as `get`, `list` or `search` (`notion-search` counts as `search`). A tool the remote marks as changing things stays hidden whatever its name. `"all"` lists everything. A list exposes exactly those remote tool names |
 
 If a remote tool has the same name as a local one, the local tool wins and the remote one is hidden.
 
@@ -666,7 +673,8 @@ Node by its full path and the server starts there too.
 
 8. The console changes settings and runs tools as the admin, so it is kept to the person at the machine. It exists only when the server was started in a terminal or with `KNOWLEDGE_CONSOLE=on`. Requests from another address, with a forwarding header, under a host name other than `localhost`, or marked by the browser as coming from another site are refused; the API needs the console token; the page loads nothing from outside the server. Two limits to know: a reverse proxy on the same machine that adds no forwarding header (nginx's plain `proxy_pass`) looks like a local browser, so on a server leave the console off; and every user of a shared machine can reach `localhost`, where the owner-only token file is what keeps them out.
 9. The console token is the admin's key. Its holder can change every setting, and can declare a connection that sends a secret from `.env` to an address of their choosing (that is what a connection is). The console narrows this to secrets in the folder's `.env`: it refuses a `${NAME}` that names one of the server's own credentials or a variable the server only inherited from the shell.
-10. A sign-in made from the console is kept in the data directory (`railway-login.json`, `google-login.json`), readable by the owner only, like the data file. A Google sign-in reads as you: whatever is in the folders you chose is visible to every user of the server, so choose folders meant for all of them. The address the browser comes back to after a sign-in accepts only the answer to a sign-in the console started minutes before, and saves nothing by itself.
+10. A sign-in made from the console is kept in the data directory (`railway-login.json`, `google-login.json`, `mcp-logins/`), readable by the owner only, like the data file. A Google sign-in reads as you: whatever is in the folders you chose is visible to every user of the server, so choose folders meant for all of them. The address the browser comes back to after a sign-in accepts only the answer to a sign-in the console started minutes before, and saves nothing by itself.
+11. An app added through its MCP server acts as the account that signed in, for every user who may use that app's tools here. Only tools that read are on unless you allow changes, and what counts as reading is the app's own word about each tool, so add servers you trust. What its tools return is the app's text, not instructions.
 
 ## File map
 

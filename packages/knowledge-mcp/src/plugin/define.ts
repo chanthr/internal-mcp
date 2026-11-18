@@ -82,11 +82,16 @@ export interface UpstreamSpec {
   prefix: string;
   /** Bearer token sent to the remote server. A function is read at connect time. */
   token?: string | (() => string | undefined);
+  /**
+   * A token that runs out and is renewed (a sign-in): asked for on every request. `rejected` is the token the
+   * remote has just refused with 401; the answer must be another one, or an error that says what to do.
+   */
+  bearer?: (rejected?: string) => Promise<string>;
   headers?: Record<string, string>;
   /**
-   * Which remote tools to expose. "read" (default) keeps tools whose first word is a read verb
-   * (get, list, search, ...) and blocks the rest. "all" exposes everything. A list exposes exactly
-   * those remote names (without the prefix).
+   * Which remote tools to expose. "read" (default) keeps the tools the remote marks as read-only, and of those
+   * it does not mark, the ones whose first word is a read verb (get, list, search, ...). "all" exposes
+   * everything. A list exposes exactly those remote names (without the prefix).
    */
   expose?: 'read' | 'all' | string[];
 }

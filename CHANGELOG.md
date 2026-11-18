@@ -6,6 +6,11 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **The read-only gateway goes by what a remote says about its tools.** A tool the remote marks as read-only
+  (`readOnlyHint`) is shown whatever it is called, and one it marks as changing things is hidden even when its
+  name starts with a read verb. A tool without a mark is judged by its first word as before, now skipping the
+  service's own name in front (`notion-search` reads as `search`). An upstream you already list may show a few
+  tools more or fewer; `expose` still overrides.
 - **What a model reads costs less.** `search_knowledge` shows two neighbouring parts of a document as one passage
   instead of twice the same edge, says how many terms of the question each passage holds, calls a poor keyword
   match weak, and answers a filter that matched nothing with the values that field has. `read_document` reads
@@ -42,6 +47,13 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Add an app that has an MCP server of its own.** In the console, *Apps → Add an app*: pick Notion,
+  Supabase, Linear, Atlassian, Sentry, Vercel, Stripe, Airtable, Figma and others from a list, or give the
+  address of any MCP server. Where the server follows MCP's sign-in rules, this server registers itself there
+  and you sign in at the app: nothing to create, no token to copy. The gateway uses that sign-in and renews it
+  by itself (`"signIn": true` on the entry in `upstreams`). Only the app's tools that read are turned on, with a
+  switch per app to allow the rest; Supabase is added in its read-only mode. A token can be pasted where a
+  service gives one, and an open server needs nothing.
 - **Connect a service without copying a token.** In the console: *Sign in with Railway* (the server registers
   itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself), *Sign in
   with Google* for Drive (through an OAuth client of your own Google Cloud project, made once; the server reads

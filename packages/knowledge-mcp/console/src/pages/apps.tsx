@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { call, signIn, type Changed, type State } from '../api';
-import { AskFirst, Choice, Page, Row, useAction, useServer } from '../app';
+import { call, signIn, type Changed, type State, type UpstreamView } from '../api';
+import { AskFirst, Choice, Page, Row, Section, useAction, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
+import { Select } from '../ui/select';
 import { TextField } from '../ui/text-field';
 
 type AppId = 'slack' | 'github' | 'railway';
@@ -26,17 +27,188 @@ const SLACK_MANIFEST = {
 };
 const SLACK_NEW_APP = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(SLACK_MANIFEST))}`;
 
+/**
+ * Apps that run an MCP server of their own. Each of these addresses answered an MCP request and said that a
+ * client may register itself to sign in (looked at in November 2026); any other MCP server is added by address.
+ */
+const CATALOG: Array<{ name: string; label: string; url: string; note?: string }> = [
+  { name: 'notion', label: 'Notion', url: 'https://mcp.notion.com/mcp' },
+  { name: 'supabase', label: 'Supabase', url: 'https://mcp.supabase.com/mcp?read_only=true', note: 'Added in its read-only mode: queries run as a database user that cannot change anything.' },
+  { name: 'linear', label: 'Linear', url: 'https://mcp.linear.app/mcp' },
+  { name: 'atlassian', label: 'Atlassian (Jira, Confluence)', url: 'https://mcp.atlassian.com/v1/mcp' },
+  { name: 'sentry', label: 'Sentry', url: 'https://mcp.sentry.dev/mcp' },
+  { name: 'vercel', label: 'Vercel', url: 'https://mcp.vercel.com' },
+  { name: 'stripe', label: 'Stripe', url: 'https://mcp.stripe.com' },
+  { name: 'airtable', label: 'Airtable', url: 'https://mcp.airtable.com/mcp' },
+  { name: 'figma', label: 'Figma', url: 'https://mcp.figma.com/mcp' },
+  { name: 'canva', label: 'Canva', url: 'https://mcp.canva.com/mcp' },
+  { name: 'monday', label: 'monday.com', url: 'https://mcp.monday.com/mcp' },
+  { name: 'clickup', label: 'ClickUp', url: 'https://mcp.clickup.com/mcp' },
+  { name: 'intercom', label: 'Intercom', url: 'https://mcp.intercom.com/mcp' },
+  { name: 'posthog', label: 'PostHog', url: 'https://mcp.posthog.com/mcp' },
+  { name: 'neon', label: 'Neon', url: 'https://mcp.neon.tech/mcp' },
+  { name: 'dropbox', label: 'Dropbox', url: 'https://mcp.dropbox.com/mcp' },
+];
+const OTHER = 'another';
+
 export function Apps() {
   const { state } = useServer();
   const [open, setOpen] = useState<AppId | null>(null);
+  const [adding, setAdding] = useState(false);
   const app = APPS.find((a) => a.id === open);
   return (
-    <Page title="Apps" text="Other places the assistant can look. Sign in where the app allows it, or paste a token.">
-      <div className="rows">
-        {APPS.map((a) => <AppRow key={a.id} app={a} onConnect={() => setOpen(a.id)} />)}
-      </div>
+    <Page title="Apps" text="Other places the assistant can look.">
+      <Section title="Built in" text="This server's own read-only tools. Sign in where the app allows it, or paste a token.">
+        <div className="rows">
+          {APPS.map((a) => <AppRow key={a.id} app={a} onConnect={() => setOpen(a.id)} />)}
+        </div>
+      </Section>
+      <Section
+        title="More apps"
+        text="Apps with an MCP server of their own, such as Notion or Supabase. Their tools arrive under the app's name, behind your keys and permissions."
+        action={<Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setAdding(true)}>Add an app</Button>}
+      >
+        <div className="rows">
+          {state.upstreams.length === 0 && <Row title="None yet" help="Pick one from the list, or give the address of any MCP server. You sign in at the app; no token to copy." />}
+          {state.upstreams.map((u) => <ServerRow key={u.name} server={u} />)}
+        </div>
+      </Section>
       {app && <Connect app={app} signedIn={app.id === 'railway' && state.services.railway.via === 'login'} onClose={() => setOpen(null)} />}
+      {adding && <AddServer taken={state.upstreams.map((u) => u.name)} onClose={() => setAdding(false)} />}
     </Page>
+  );
+}
+
+/** Ask the server to add an MCP server. It answers with the address to sign in at, or adds it at once. */
+async function addServer(body: { name: string; url: string; token?: string }): Promise<Changed> {
+  const r = await call<Changed | { signIn: string }>('POST', '/upstreams', body);
+  if ('signIn' in r) {
+    location.assign(r.signIn as string);
+    return new Promise<never>(() => undefined); // the page is on its way out
+  }
+  return r;
+}
+
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+function ServerRow({ server: u }: { server: UpstreamView }) {
+  const { state, apply } = useServer();
+  const act = useAction();
+  const signedOut = u.via === 'login' && u.signedIn === false;
+  const badge = !u.running
+    ? { tone: 'neutral' as const, text: 'Saved' }
+    : signedOut
+      ? { tone: 'warning' as const, text: 'Sign in needed' }
+      : u.connected
+        ? { tone: 'success' as const, text: 'Connected' }
+        : { tone: 'warning' as const, text: 'Not connected' };
+  const tools = `${u.tools} tool${u.tools === 1 ? '' : 's'}, named ${u.prefix}…`;
+  const help = !u.running
+    ? `Starts with the server. ${hostOf(u.url)}`
+    : u.connected
+      ? `${tools}${u.hidden ? ` ${u.hidden} more that change things are off.` : u.expose === 'all' ? ' Tools that change things are on.' : ''} ${hostOf(u.url)}`
+      : signedOut
+        ? `The sign-in is gone. ${hostOf(u.url)}`
+        : `${u.error ?? 'No answer yet.'} ${hostOf(u.url)}`;
+  const set = (expose: 'read' | 'all') => act.run(() => apply(() => call<Changed>('PATCH', `/upstreams/${u.name}`, { expose })));
+  return (
+    <Row title={u.name} help={act.error ?? help}>
+      <Badge size="md" tone={badge.tone}>{badge.text}</Badge>
+      {u.via === 'login' && (signedOut || (u.running && !u.connected)) && (
+        <Button size="sm" variant="secondary" loading={act.busy} disabled={!state.editable} onClick={() => void act.run(() => addServer({ name: u.name, url: u.url }).then((r) => apply(async () => r)))}>
+          Sign in
+        </Button>
+      )}
+      {u.expose === 'read' && u.hidden > 0 && state.editable && (
+        <AskFirst
+          label="Allow changes"
+          title={`Let ${u.name} change things?`}
+          text={`Its other ${u.hidden} tool${u.hidden === 1 ? '' : 's'} can create, change and delete there, as the account that signed in, for everyone who may use ${u.name} on this server.`}
+          confirm="Allow"
+          disabled={act.busy}
+          onConfirm={() => set('all')}
+        />
+      )}
+      {u.expose === 'all' && <Button size="sm" variant="ghost" disabled={act.busy || !state.editable} onClick={() => void set('read')}>Read only</Button>}
+      <AskFirst
+        label="Remove"
+        title={`Remove ${u.name}?`}
+        text={u.via === 'login' ? 'Its tools go away. The sign-in is deleted from this machine and withdrawn at the app where it allows that.' : 'Its tools go away, and a token that was pasted here is deleted from .env.'}
+        confirm="Remove"
+        disabled={act.busy || !state.editable}
+        onConfirm={() => act.run(() => apply(() => call<Changed>('DELETE', `/upstreams/${u.name}`)))}
+      />
+    </Row>
+  );
+}
+
+function AddServer({ taken, onClose }: { taken: string[]; onClose: () => void }) {
+  const { apply } = useServer();
+  const choices = CATALOG.filter((c) => !taken.includes(c.name));
+  const [pick, setPick] = useState(choices[0]?.name ?? OTHER);
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const [withToken, setWithToken] = useState(false);
+  const [token, setToken] = useState('');
+  const add = useAction();
+  const chosen = choices.find((c) => c.name === pick);
+  const target = chosen ? { name: chosen.name, url: chosen.url } : { name: name.trim(), url: url.trim() };
+  const ready = target.name.length > 0 && target.url.length > 8 && (!withToken || token.trim().length >= 10);
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => !o && onClose()}
+      title="Add an app"
+      description="You sign in at the app and choose there what it may see. Only its tools that read are turned on, and everyone who may use them on this server sees what your sign-in sees."
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button
+            loading={add.busy}
+            disabled={!ready}
+            onClick={() =>
+              void add.run(async () => {
+                const r = await addServer({ ...target, ...(withToken ? { token: token.trim() } : {}) });
+                await apply(async () => r);
+                onClose();
+              })
+            }
+          >
+            Connect
+          </Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <Select
+          label="App"
+          value={pick}
+          onChange={(v) => setPick(v)}
+          options={[...choices.map((c) => ({ value: c.name, label: c.label })), { value: OTHER, label: 'Another MCP server' }]}
+          hint={chosen ? chosen.note ?? chosen.url : 'Any server that speaks MCP over HTTP.'}
+        />
+        {!chosen && (
+          <>
+            <TextField label="Name" placeholder="wiki" hint="Lowercase letters, digits and dashes. Its tools are named after it." value={name} onChange={(e) => setName(e.target.value)} autoComplete="off" spellCheck={false} />
+            <TextField label="Address" placeholder="https://mcp.example.com/mcp" value={url} onChange={(e) => setUrl(e.target.value)} autoComplete="off" spellCheck={false} />
+          </>
+        )}
+        {withToken ? (
+          <TextField label="Token" type="password" hint="Checked by listing the tools, then saved in .env on this machine." value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+        ) : (
+          <p className="field-help">
+            <button type="button" className="link" onClick={() => setWithToken(true)}>The app gave me a token instead</button>
+          </p>
+        )}
+        {add.error && <p className="error" role="alert">{add.error}</p>}
+      </div>
+    </Dialog>
   );
 }
 

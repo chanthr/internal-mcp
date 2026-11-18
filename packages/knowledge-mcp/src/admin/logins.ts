@@ -5,6 +5,8 @@
  *             in in the browser, picking the workspaces it may read.
  *   Google    Google lets no shared app read Drive without reviewing that app, so the sign-in runs through an OAuth
  *             client of the person's own Google Cloud project: made once, then "Sign in with Google".
+ *   MCP       Another service's MCP server (Notion, Supabase, …) that follows the MCP authorization spec: it
+ *             says where to sign in and lets this server register itself (upstreams.ts).
  *   GitHub    The gh CLI is signed in on many machines already: its login is reused.
  *   gcloud    Creates the Drive service account, for those who would rather share documents with an account.
  *
@@ -37,6 +39,7 @@ import {
 import { backgroundExec, gcloudAccount, gcloudDefaultProject, gcloudProjects, ghToken, hasTool, type Exec, type GcloudProject } from '../setup/auto.js';
 import { readConfigFile } from '../setup/commands.js';
 import { readEnvValues, updateEnvFile } from '../setup/envfile.js';
+import { completeMcpSignIn, prepareMcpSignIn, saveMcpSignIn, unregister, type McpCarry, type McpResult, type McpTarget } from './upstreams.js';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -56,9 +59,9 @@ const FOLDER = 'application/vnd.google-apps.folder';
 const TIMEOUT_MS = 20_000;
 const LIFETIME_MS = 10 * 60_000;
 
-export type LoginService = 'railway' | 'google';
+export type LoginService = 'railway' | 'google' | 'mcp';
 /** The console page a sign-in returns to. */
-const PAGE: Record<LoginService, string> = { railway: '/console/#/apps', google: '/console/#/documents' };
+const PAGE: Record<LoginService, string> = { railway: '/console/#/apps', google: '/console/#/documents', mcp: '/console/#/apps' };
 
 // ── What is under way, and what came back ──
 
@@ -69,13 +72,15 @@ interface Pending {
   until: number;
   railway?: RailwayClient;
   google?: { clientId: string; clientSecret: string; folders: string[] | null };
+  mcp?: McpCarry;
 }
 const pending = new Map<string, Pending>();
 
 type Finished =
   | { service: LoginService; error: string }
   | { service: 'railway'; client: RailwayClient; tokens: RailwayTokens; who: string; sees: string }
-  | { service: 'google'; clientId: string; clientSecret: string; refreshToken: string; account: string; roots: Array<{ id: string; name: string }> };
+  | { service: 'google'; clientId: string; clientSecret: string; refreshToken: string; account: string; roots: Array<{ id: string; name: string }> }
+  | { service: 'mcp'; carry: McpCarry; result: McpResult };
 let finished: Finished | null = null;
 let finishedAt = 0;
 function keep(result: Finished): void {
@@ -91,6 +96,7 @@ function waiting(): Finished | null {
     const stale = finished;
     finished = null;
     if (!('error' in stale) && stale.service === 'railway' && stale.client.id !== readRailwayLogin().client?.id) void deleteRailwayClient(stale.client);
+    if (!('error' in stale) && stale.service === 'mcp' && stale.carry.fresh) void unregister(stale.carry.client, stale.carry.issuer);
   }
   return finished;
 }
@@ -104,6 +110,7 @@ export function loginWaiting(): { service: LoginService } | null {
 /** A registration made for a sign-in that never came back is of no use to anyone. */
 function discard(p: Pending): void {
   if (p.railway && p.railway.id !== readRailwayLogin().client?.id) void deleteRailwayClient(p.railway);
+  if (p.mcp?.fresh) void unregister(p.mcp.client, p.mcp.issuer);
 }
 function prune(): void {
   for (const [state, p] of pending) {
@@ -186,6 +193,18 @@ export async function signOutRailway(): Promise<void> {
   const login = readRailwayLogin();
   forgetRailwayLogin();
   await deleteRailwayClient(login.client);
+}
+
+// ── Another service's MCP server ──
+
+/** The address that signs a person in to the service behind an MCP server (what is specific to it: upstreams.ts). */
+export async function startMcpLogin(origin: string, target: McpTarget): Promise<string> {
+  prune();
+  const state = randomBytes(24).toString('base64url');
+  const redirectUri = `${origin}/console/login/mcp`;
+  const { url, verifier, carry } = await prepareMcpSignIn(redirectUri, target, state);
+  pending.set(state, { service: 'mcp', verifier, redirectUri, until: Date.now() + LIFETIME_MS, mcp: carry });
+  return url;
 }
 
 // ── Google ──
@@ -369,7 +388,8 @@ export async function completeLogin(service: string, query: Record<string, unkno
     return PAGE[p.service];
   }
   try {
-    keep(p.service === 'railway' ? await railwayResult(p, query.code) : await googleResult(p, query.code));
+    if (p.service === 'mcp') keep({ service: 'mcp', carry: p.mcp!, result: await completeMcpSignIn(p.mcp!, query.code, p.verifier) });
+    else keep(p.service === 'railway' ? await railwayResult(p, query.code) : await googleResult(p, query.code));
   } catch (e) {
     discard(p);
     keep({ service: p.service, error: msg(e) });
@@ -377,8 +397,11 @@ export async function completeLogin(service: string, query: Record<string, unkno
   return PAGE[p.service];
 }
 
-/** Save the sign-in that is waiting. `dir` holds .env and mcp.config.json. Throws what went wrong at the other site. */
-export async function finishLogin(dir: string): Promise<{ service: LoginService; found: string }> {
+/**
+ * Save the sign-in that is waiting. `dir` holds .env and mcp.config.json. Throws what went wrong at the other site.
+ * `label` is what the page calls the thing that is now connected.
+ */
+export async function finishLogin(dir: string): Promise<{ service: LoginService; label: string; found: string }> {
   const done = waiting();
   finished = null;
   if (!done) throw new Error('No sign-in is waiting to be saved. Start it again.');
@@ -387,8 +410,9 @@ export async function finishLogin(dir: string): Promise<{ service: LoginService;
     const before = readRailwayLogin().client;
     writeRailwayLogin({ client: done.client, refreshToken: done.tokens.refreshToken, accessToken: done.tokens.accessToken, expiresAt: done.tokens.expiresAt, who: done.who });
     if (before && before.id !== done.client.id) void deleteRailwayClient(before);
-    return { service: 'railway', found: `${done.who}, ${done.sees}` };
+    return { service: 'railway', label: 'Railway', found: `${done.who}, ${done.sees}` };
   }
+  if (done.service === 'mcp') return { service: 'mcp', label: done.result.name, found: saveMcpSignIn(dir, done.result) };
   const previous = readGoogleLogin();
   const file: GoogleLoginFile = {
     type: 'authorized_user',
@@ -405,7 +429,7 @@ export async function finishLogin(dir: string): Promise<{ service: LoginService;
   renameSync(tmp, googleLoginPath());
   writeRoots(dir, new Set(previous?.roots ?? []), done.roots);
   updateEnvFile(join(dir, '.env'), { GOOGLE_APPLICATION_CREDENTIALS: googleLoginPath() });
-  return { service: 'google', found: `${done.account}, reading ${done.roots.map((r) => r.name).join(', ')}` };
+  return { service: 'google', label: 'Google Drive', found: `${done.account}, reading ${done.roots.map((r) => r.name).join(', ')}` };
 }
 
 // ── Logins this machine already has ──

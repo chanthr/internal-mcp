@@ -151,8 +151,28 @@ export interface State {
   connections: ConnectionView[];
   declaredTools: DeclaredTool[];
   tools: ToolView[];
+  /** Other services' MCP servers in the list. */
+  upstreams: UpstreamView[];
   /** A sign-in that came back from the other site and waits to be saved. */
-  login: { service: 'railway' | 'google' } | null;
+  login: { service: 'railway' | 'google' | 'mcp' } | null;
+}
+export interface UpstreamView {
+  name: string;
+  url: string;
+  /** What its tool names start with. */
+  prefix: string;
+  /** "read": only the tools that read. "all": everything. "list": the names written in the config file. */
+  expose: 'read' | 'all' | 'list';
+  via: 'login' | 'token' | 'open';
+  /** For a sign-in: is it still there? */
+  signedIn: boolean | null;
+  /** False: saved, and waiting for the server to start again. */
+  running: boolean;
+  connected: boolean;
+  tools: number;
+  /** Tools the read-only gateway leaves out. */
+  hidden: number;
+  error: string | null;
 }
 
 /**

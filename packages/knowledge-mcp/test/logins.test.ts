@@ -1,7 +1,8 @@
 /**
  * Connecting a service by signing in instead of pasting a token: Railway (the server registers itself), Google
- * (through an OAuth client of the person's own), the login the gh CLI already has, and a service account made by
- * gcloud. The other sites are local fakes and the command lines are scripts, so nothing leaves this machine.
+ * (through an OAuth client of the person's own), another service's MCP server (it says where to sign in), the
+ * login the gh CLI already has, and a service account made by gcloud. The other sites are local fakes and the
+ * command lines are scripts, so nothing leaves this machine.
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,6 +36,8 @@ const { builtinPlugins } = await import('../src/plugins/index.js');
 const { googleEndpoints, githubEndpoint, parseGoogleClient, driveFolderIds } = await import('../src/admin/logins.js');
 const { railwayEndpoints, railwayAuth, railwayConfigured, readRailwayLogin, writeRailwayLogin } = await import('../src/plugins/railway/login.js');
 const { credentialsFromJson } = await import('../src/plugins/drive/client.js');
+const { UpstreamManager, isExposed } = await import('../src/core/upstream.js');
+const { upstreamToken, readUpstreamLogin, writeUpstreamLogin } = await import('../src/core/upstream_login.js');
 
 const server = await runHttp(new Registry(builtinPlugins));
 const base = `http://localhost:${server.port}`;
@@ -74,10 +77,10 @@ const read = (req: IncomingMessage) =>
     req.on('data', (c) => (body += c));
     req.on('end', () => resolve(body));
   });
-const fake = async (handle: (req: IncomingMessage, body: string) => { status?: number; json?: unknown }) => {
+const fake = async (handle: (req: IncomingMessage, body: string) => { status?: number; json?: unknown; headers?: Record<string, string> }) => {
   const s = createServer(async (req, res) => {
     const out = handle(req, await read(req));
-    res.writeHead(out.status ?? 200, { 'Content-Type': 'application/json' });
+    res.writeHead(out.status ?? 200, { 'Content-Type': 'application/json', ...(out.headers ?? {}) });
     res.end(out.json === undefined ? '' : JSON.stringify(out.json));
   });
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
@@ -379,3 +382,239 @@ test('gcloud: the console makes the Drive service account, without holding up th
   assert.deepEqual((await api('GET', '/logins/gcloud')).json, { installed: true, account: null, project: null, projects: [], problem: null });
   rmSync(join(bin, 'gcloud-signed-out'));
 });
+
+/**
+ * An MCP server as a service runs one: it answers MCP requests over HTTP POST, and (when it wants a sign-in) says
+ * where to sign in, lets a client register itself, and hands out tokens that run out.
+ */
+async function fakeMcpServer(kind: 'sign-in' | 'token' | 'open', opts: { selfRegistration?: boolean } = {}) {
+  const st = { registered: [] as any[], unregistered: [] as string[], revoked: [] as string[], refreshes: 0, challenge: '', valid: 'mat-1', refresh: 'mrt-1', ended: false, calls: [] as string[], tokenForms: [] as URLSearchParams[] };
+  const tools = [
+    { name: 'notion-search', description: 'Search pages', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
+    { name: 'notion-fetch', description: 'Read a page', inputSchema: { type: 'object' } }, // says nothing: its name decides
+    { name: 'list_things', description: 'List things', inputSchema: { type: 'object' } },
+    { name: 'notion-create-pages', description: 'Create pages', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false } },
+    { name: 'get_or_create_page', description: 'Reads, or makes one', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false } }, // a read verb, but it says it changes things
+    { name: 'archive_thing', description: 'Archive a thing', inputSchema: { type: 'object' } },
+  ];
+  let base = '';
+  base = await fake((req, body) => {
+    const url = (req.url ?? '').split('?')[0];
+    if (url.startsWith('/.well-known/oauth-protected-resource')) {
+      return kind === 'sign-in' ? { json: { resource: `${base}/mcp`, authorization_servers: [base], scopes_supported: ['read', 'write'] } } : { status: 404, json: {} };
+    }
+    if (url.startsWith('/.well-known/oauth-authorization-server')) {
+      if (kind !== 'sign-in') return { status: 404, json: {} };
+      return {
+        json: {
+          issuer: base,
+          authorization_endpoint: `${base}/authorize`,
+          token_endpoint: `${base}/token`,
+          ...(opts.selfRegistration === false ? {} : { registration_endpoint: `${base}/register` }),
+          revocation_endpoint: `${base}/revoke`,
+          response_types_supported: ['code'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          code_challenge_methods_supported: ['S256'],
+          token_endpoint_auth_methods_supported: ['none'],
+          scopes_supported: ['read', 'write', 'offline_access'],
+        },
+      };
+    }
+    if (url.startsWith('/.well-known/')) return { status: 404, json: {} };
+    if (url === '/register' && req.method === 'POST') {
+      const asked = JSON.parse(body);
+      st.registered.push(asked);
+      const id = `c-${st.registered.length}`;
+      return { status: 201, json: { ...asked, client_id: id, registration_client_uri: `${base}/register/${id}`, registration_access_token: `reg-${st.registered.length}` } };
+    }
+    if (url.startsWith('/register/') && req.method === 'DELETE') {
+      st.unregistered.push(`${url.split('/').pop()} ${req.headers.authorization}`);
+      return { status: 204 };
+    }
+    if (url === '/revoke') {
+      st.revoked.push(new URLSearchParams(body).get('token') ?? '');
+      return { json: {} };
+    }
+    if (url === '/token') {
+      const form = new URLSearchParams(body);
+      st.tokenForms.push(form);
+      if (form.get('grant_type') === 'authorization_code') {
+        const proven = createHash('sha256').update(form.get('code_verifier') ?? '').digest('base64url') === st.challenge;
+        if (form.get('code') !== 'the-code' || !proven) return { status: 400, json: { error: 'invalid_grant', error_description: 'bad code' } };
+        return { json: { access_token: 'mat-1', refresh_token: 'mrt-1', token_type: 'Bearer', expires_in: 3600 } };
+      }
+      if (st.ended || form.get('refresh_token') !== st.refresh) return { status: 400, json: { error: 'invalid_grant', error_description: 'the grant is gone' } };
+      st.refreshes++;
+      st.valid = `mat-${st.refreshes + 1}`;
+      st.refresh = `mrt-${st.refreshes + 1}`;
+      return { json: { access_token: st.valid, refresh_token: st.refresh, token_type: 'Bearer', expires_in: 3600 } };
+    }
+    if (url === '/mcp' && req.method === 'POST') {
+      const given = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+      const allowed = kind === 'open' || (kind === 'token' ? given === 'a-token-the-service-gave-01' : given === st.valid);
+      if (!allowed) return { status: 401, json: { error: 'unauthorized' }, headers: { 'WWW-Authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` } };
+      const m = JSON.parse(body);
+      if (m.id === undefined) return { status: 202 }; // a notification
+      if (m.method === 'initialize') return { json: { jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake', version: '1' } } } };
+      if (m.method === 'tools/list') return { json: { jsonrpc: '2.0', id: m.id, result: { tools } } };
+      if (m.method === 'tools/call') {
+        st.calls.push(`${m.params.name} ${given}`);
+        return { json: { jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: `${m.params.name} ran` }] } } };
+      }
+      return { json: { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'no such method' } } };
+    }
+    return { status: url === '/mcp' ? 405 : 404, json: {} };
+  });
+  return { base, url: `${base}/mcp`, st };
+}
+
+test('what the read-only gateway shows: what the remote says about a tool comes first, then its name', () => {
+  const spec = { name: 'notion', url: 'https://mcp.example.com/mcp', prefix: 'notion_' };
+  // The remote marks the tool: that decides, whatever it is called.
+  assert.equal(isExposed(spec, 'whoami', true), true);
+  assert.equal(isExposed(spec, 'get_or_create_page', false), false);
+  // It says nothing: the first word decides, and the service's own name in front is not a word about the tool.
+  assert.deepEqual(['get_page', 'notion-search', 'notion_fetch', 'listItems'].map((n) => isExposed(spec, n)), [true, true, true, true]);
+  assert.deepEqual(['create_page', 'notion-update-page', 'notion', 'archive'].map((n) => isExposed(spec, n)), [false, false, false, false]);
+  assert.equal(isExposed({ ...spec, name: 'wiki' }, 'notion-search'), false); // another service's name is just an unknown verb
+  // Opened up on purpose.
+  assert.equal(isExposed({ ...spec, expose: 'all' }, 'create_page', false), true);
+  assert.deepEqual([isExposed({ ...spec, expose: ['create_page'] }, 'create_page'), isExposed({ ...spec, expose: ['create_page'] }, 'get_page', true)], [true, false]);
+});
+
+test("another service's MCP server: sign in from the console, and its read tools arrive behind this server", async () => {
+  const notion = await fakeMcpServer('sign-in');
+  const file = join(data, 'mcp-logins', 'notion.json');
+  const upstreamsNow = () => config().upstreams ?? [];
+
+  // What cannot be added, said before anything is asked of the remote.
+  for (const [body, why] of [
+    [{ name: 'github', url: notion.url }, /already has/],
+    [{ name: 'Not A Name', url: notion.url }, /lowercase letters, digits and dashes/],
+    [{ name: 'notion', url: 'http://mcp.example.com/mcp' }, /must start with https/],
+    [{ name: 'notion', url: 'https://user:secret@mcp.example.com/mcp' }, /Leave the user name and password out/],
+    [{ name: 'notion', url: 'not an address' }, /not an address/],
+  ] as const) {
+    const refused = await api('POST', '/upstreams', body);
+    assert.deepEqual([refused.status, why.test(refused.json.error)], [422, true], refused.text);
+  }
+  assert.equal(notion.st.registered.length, 0);
+
+  // The server wants a sign-in: this server registers itself there and the page is sent to sign in.
+  const added = await api('POST', '/upstreams', { name: 'notion', url: notion.url });
+  assert.equal(added.status, 200, added.text);
+  const q = new URL(added.json.signIn).searchParams;
+  assert.equal(added.json.signIn.split('?')[0], `${notion.base}/authorize`);
+  assert.deepEqual(
+    [q.get('client_id'), q.get('redirect_uri'), q.get('response_type'), q.get('code_challenge_method'), q.get('resource'), q.get('scope')],
+    ['c-1', `${base}/console/login/mcp`, 'code', 'S256', notion.url, 'read write offline_access'],
+  );
+  assert.deepEqual(
+    [notion.st.registered[0].redirect_uris, notion.st.registered[0].token_endpoint_auth_method, notion.st.registered[0].application_type],
+    [[`${base}/console/login/mcp`], 'none', 'native'],
+  );
+  notion.st.challenge = q.get('code_challenge')!;
+  assert.deepEqual(upstreamsNow(), []); // nothing is in the list until the sign-in is saved
+
+  // Back from the service. The code is traded and the tools are looked at; still nothing is written.
+  assert.deepEqual(await comeBack('mcp', { code: 'the-code', state: q.get('state')! }), { status: 302, to: '/console/#/apps' });
+  assert.deepEqual([existsSync(file), upstreamsNow()], [false, []]);
+  assert.equal(notion.st.tokenForms[0].get('resource'), notion.url);
+  assert.deepEqual((await api('GET', '/state')).json.login, { service: 'mcp' });
+  const done = await api('POST', '/logins/finish');
+  assert.equal(done.status, 200, done.text);
+  assert.equal(done.json.note, 'notion is connected: 3 of its 6 tools (the rest change things and stay off).');
+  assert.ok(!done.text.includes('mat-1') && !done.text.includes('mrt-1'), 'no token goes to the page');
+  assert.equal(mode(file), 0o600);
+  assert.deepEqual(upstreamsNow(), [{ name: 'notion', url: notion.url, signIn: true }]);
+  const view = (await api('GET', '/state')).json.upstreams[0];
+  assert.deepEqual([view.name, view.prefix, view.expose, view.via, view.signedIn, view.running], ['notion', 'notion_', 'read', 'login', true, false]);
+
+  // The gateway, as the restarted server builds it: read tools only, under the service's name, called with the sign-in.
+  const bearer = (rejected?: string) => upstreamToken('notion', notion.url, rejected);
+  const gateway = new UpstreamManager([{ group: 'notion', spec: { name: 'notion', url: notion.url, prefix: 'notion_', bearer } }]);
+  await gateway.connectAll();
+  assert.deepEqual(gateway.tools().map((t) => t.tool.name), ['notion_notion-search', 'notion_notion-fetch', 'notion_list_things']);
+  assert.deepEqual(gateway.statuses()[0], { name: 'notion', connected: true, toolCount: 3, hidden: 3, error: null });
+  assert.equal(gateway.owner('notion_get_or_create_page'), null); // a read verb, but the remote says it changes things
+  assert.equal(gateway.owner('notion_notion-create-pages'), null);
+  await gateway.owner('notion_list_things')!.call({});
+  assert.equal(notion.st.calls.at(-1), 'list_things mat-1');
+
+  // The hour is up: the next call renews the sign-in by itself, and the new refresh token is the one kept.
+  writeUpstreamLogin('notion', { ...readUpstreamLogin('notion')!, expiresAt: Date.now() - 1000 });
+  await Promise.all([gateway.owner('notion_list_things')!.call({}), gateway.owner('notion_notion-search')!.call({})]);
+  assert.deepEqual([notion.st.refreshes, notion.st.calls.at(-1)!.split(' ')[1], readUpstreamLogin('notion')!.refreshToken], [1, 'mat-2', 'mrt-2']);
+  assert.equal(notion.st.tokenForms.at(-1)!.get('resource'), notion.url);
+  // The service withdrew a token before its time: the call is refused once, the sign-in is renewed, and the call goes through.
+  notion.st.valid = 'withdrawn';
+  await gateway.owner('notion_list_things')!.call({});
+  assert.deepEqual([notion.st.refreshes, notion.st.calls.at(-1)], [2, 'list_things mat-3']);
+  // A sign-in is for the address it was made for.
+  await assert.rejects(() => upstreamToken('notion', 'https://elsewhere.example.com/mcp'), /was made for .* not for this address/);
+
+  // Everything it can do, when the person asks for that. What was saved about the sign-in stays.
+  const opened = await api('PATCH', '/upstreams/notion', { expose: 'all' });
+  assert.equal(opened.status, 200, opened.text);
+  assert.deepEqual(upstreamsNow(), [{ name: 'notion', url: notion.url, signIn: true, expose: 'all' }]);
+  const all = new UpstreamManager([{ group: 'notion', spec: { name: 'notion', url: notion.url, prefix: 'notion_', bearer, expose: 'all' } }]);
+  await all.connectAll();
+  assert.equal(all.tools().length, 6);
+  assert.equal((await api('PATCH', '/upstreams/nobody', { expose: 'all' })).status, 404);
+
+  // Signing in again from the same address uses the registration that is there.
+  const again = new URL((await api('POST', '/upstreams', { name: 'notion', url: notion.url })).json.signIn).searchParams;
+  assert.deepEqual([again.get('client_id'), notion.st.registered.length], ['c-1', 1]);
+  // The same name for another address is refused: a name is one server.
+  assert.match((await api('POST', '/upstreams', { name: 'notion', url: 'https://other.example.com/mcp' })).json.error, /already in the list with another address/);
+
+  // The service ended the sign-in: the gateway says what to do.
+  notion.st.ended = true;
+  notion.st.valid = 'withdrawn';
+  await assert.rejects(() => gateway.owner('notion_list_things')!.call({}), /sign-in is no longer valid\. Open the console \(Apps\) and sign in again/);
+
+  // Remove: out of the list, the file gone, and the permission and the registration taken back at the service.
+  const removed = await api('DELETE', '/upstreams/notion');
+  assert.equal(removed.status, 200, removed.text);
+  assert.deepEqual([upstreamsNow(), existsSync(file), notion.st.revoked, notion.st.unregistered], [[], false, ['mrt-3'], ['c-1 Bearer reg-1']]);
+  assert.equal((await api('DELETE', '/upstreams/notion')).status, 404);
+});
+
+test("another service's MCP server: with a token, without anything, and one that cannot be signed in to from here", async () => {
+  const upstreamsNow = () => config().upstreams ?? [];
+  // The service gives tokens: checked by listing the tools, then kept in .env under a name of its own.
+  const withToken = await fakeMcpServer('token');
+  const wrong = await api('POST', '/upstreams', { name: 'tracker', url: withToken.url, token: 'not-the-right-token-00' });
+  assert.deepEqual([wrong.status, /did not list its tools/.test(wrong.json.error), upstreamsNow()], [422, true, []]);
+  const ok = await api('POST', '/upstreams', { name: 'tracker', url: withToken.url, token: 'a-token-the-service-gave-01' });
+  assert.equal(ok.status, 200, ok.text);
+  // Under this name "notion-fetch" is not a read verb any more: only what the remote marks, and what reads by name.
+  assert.equal(ok.json.found, '2 of its 6 tools (the rest change things and stay off)');
+  assert.ok(!ok.text.includes('a-token-the-service'));
+  assert.match(envFile(), /^TRACKER_MCP_TOKEN=a-token-the-service-gave-01$/m);
+  assert.deepEqual(upstreamsNow(), [{ name: 'tracker', url: withToken.url, tokenEnv: 'TRACKER_MCP_TOKEN' }]);
+  assert.equal((await api('GET', '/state')).json.upstreams[0].via, 'token');
+
+  // An open server needs nothing.
+  const open = await fakeMcpServer('open');
+  const plain = await api('POST', '/upstreams', { name: 'docs-site', url: open.url });
+  assert.equal(plain.status, 200, plain.text);
+  assert.deepEqual(upstreamsNow()[1], { name: 'docs-site', url: open.url });
+  // A name is one server, and a name already used by something else here is not free.
+  assert.match((await api('POST', '/upstreams', { name: 'docs-site', url: 'https://other.example.com/mcp' })).json.error, /already in the list with another address/);
+
+  // A server that wants an app made by hand first: said so, with the way out.
+  const byHand = await fakeMcpServer('sign-in', { selfRegistration: false });
+  const cannot = await api('POST', '/upstreams', { name: 'crm', url: byHand.url });
+  assert.deepEqual([cannot.status, /wants an app registered with it by hand.*paste one instead/.test(cannot.json.error)], [422, true], cannot.text);
+  // Not an MCP server at all.
+  const notMcp = await fake(() => ({ status: 404, json: {} }));
+  assert.match((await api('POST', '/upstreams', { name: 'site', url: `${notMcp}/` })).json.error, /answered 404 to an MCP request/);
+
+  // Removing the one with a token takes the token out of .env too.
+  assert.equal((await api('DELETE', '/upstreams/tracker')).status, 200);
+  assert.ok(!/^TRACKER_MCP_TOKEN=/m.test(envFile()));
+  assert.equal((await api('DELETE', '/upstreams/docs-site')).status, 200);
+  assert.deepEqual(upstreamsNow(), []);
+});
+
