@@ -9,7 +9,8 @@ All commands run in this folder. `npm run setup -- <args>` passes arguments to t
 ## Rules
 
 1. **Never ask the person to paste a secret into the chat, and never put one on a command line.** Tokens and keys
-   reach `.env` through the setup commands, or the person types them into `npm run setup` in their own terminal.
+   reach `.env` through the setup commands, or the person types them into `npm run setup` in their own terminal
+   or into the console in their browser (`npm run dev` prints its address).
 2. **Never print a secret.** Do not `cat .env` or a key file. To see what is configured, run `npm run setup -- check`.
 3. **Ask before anything is created in their accounts, and before trusting a document owner.** `setup drive --gcloud` prints its plan first and creates
    nothing without `--yes`. Show the plan, wait for a yes, then add `--yes`.
@@ -171,7 +172,8 @@ in, they run `npm run setup` in their terminal and enter a token there.
 ## Step 7: Slack and Railway (optional)
 
 These need a token the person creates in a web console, so they run `npm run setup` in their own terminal and
-pick the service. The wizard says where to get the token and checks it as they enter it.
+pick the service. The wizard says where to get the token and checks it as they enter it. The page **Apps** of
+the console (`npm run dev` prints its address) takes the same token and checks it the same way.
 
 | Service | Where the token comes from |
 | --- | --- |
@@ -199,6 +201,8 @@ Connect it to the person's AI client. For Claude Code on this machine, no key is
 ```bash
 claude mcp add __NAME__ -- "$PWD/node_modules/.bin/tsx" "$PWD/src/server.ts" serve --stdio
 ```
+
+The console's page **Connect a client** has the entry for Claude Desktop, Cursor and VS Code as well.
 
 For other people or remote clients, start the server with `npm run dev` and create a key. The key is printed
 once, so have the person run this themselves:

@@ -9,13 +9,16 @@ are built in and turn on when they are set up.
 ```bash
 npm run setup                                             # connect services: asks, checks each value, writes .env
 npm run setup -- check                                    # verify every configured service live
-npm run dev                                               # http://localhost:8080/mcp, reloads on save
+npm run dev                                               # http://localhost:8080/mcp, reloads on save. Prints the console address
 npm run doctor                                            # which plugins are on, and what each one is missing
 ```
 
 Clients send the key as `Authorization: Bearer <key>`. State (keys, users, plugin data) lives in `./data`.
 
 ## Without writing code
+
+Everything below can also be done in the browser: `npm run dev` prints the address of the console, where you add
+folders, connect databases and APIs, write and try tools, and copy the entry for your AI client.
 
 | You have | Do this |
 | --- | --- |

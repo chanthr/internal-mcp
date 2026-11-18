@@ -31,6 +31,17 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A console in the browser.** Start the server in a terminal and open the address it prints
+  (`npx @chnxthr/knowledge-mcp` in any folder opens it for you). Add folders, connect Drive, Slack, GitHub,
+  Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
+  back, copy the entry for Claude Code, Claude Desktop, Cursor or VS Code, manage people and keys, and see the
+  latest calls. It writes the same `.env` and `mcp.config.json` as the setup commands, through the same live
+  checks, and a saved change restarts the server by itself. Only a browser on the same machine asking for
+  `localhost` reaches it, its API needs a token created on first start, and secrets are never sent back.
+  `KNOWLEDGE_CONSOLE=off` turns it off; `KMCP_SUPERVISE=false` keeps the server from restarting itself.
+- **`MCP_HOME`.** One variable names the folder of `.env`, `mcp.config.json` and the data. A client's entry sets
+  it when the server is started through npx, so the settings are found whatever folder the client runs in, and
+  the `.env` of that folder is not read.
 - **Your data as tools, without a plugin file.** `connections` in the config names a Postgres database, a SQLite
   file or an HTTP API; `tools` declares one SQL query or one API request each, with typed parameters. Values are
   bound by the driver, a read-only tool runs in a read-only transaction (SQLite: a read-only file) with a row limit

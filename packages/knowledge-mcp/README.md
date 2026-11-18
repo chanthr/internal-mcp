@@ -25,9 +25,11 @@ export default definePlugin({
 });
 ```
 
-Run it without a project too:
+Run it without a project too. With no command it starts the server in the current folder and opens the console,
+a page where you add documents, connect databases and APIs, write and try tools, and connect an AI client:
 
 ```bash
+npx @chnxthr/knowledge-mcp               # the server, and the console in your browser
 npx @chnxthr/knowledge-mcp doctor        # which built-in connectors are on
 npx @chnxthr/knowledge-mcp keys create --email you@example.com --role admin
 npx @chnxthr/knowledge-mcp serve         # http://localhost:8080/mcp
