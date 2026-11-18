@@ -82,8 +82,9 @@ export function App() {
   useEffect(() => {
     void (token() ? refresh() : Promise.resolve(setGate('token')));
     const onHash = () => {
-      // An address with a token pasted into a tab that is already open: take the token and read everything again.
-      if (takeTokenFromAddress()) void refresh();
+      // An address with a token pasted into a tab that is already open: when the server accepts the token, read
+      // everything again with it.
+      void takeTokenFromAddress().then((taken) => taken && refresh());
       setPage(pageFromHash());
     };
     // The server no longer accepts the token (another server on this port, or its data folder is new): ask for one.

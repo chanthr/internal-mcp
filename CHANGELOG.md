@@ -36,9 +36,10 @@ Changes that affect people who run or extend the server. Dates are release dates
   Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
   back, copy the entry for Claude Code, Claude Desktop, Cursor or VS Code, manage people and keys, and see the
   latest calls. It writes the same `.env` and `mcp.config.json` as the setup commands, through the same live
-  checks, and a saved change restarts the server by itself. Only a browser on the same machine asking for
-  `localhost` reaches it, its API needs a token created on first start, and secrets are never sent back.
-  `KNOWLEDGE_CONSOLE=off` turns it off; `KMCP_SUPERVISE=false` keeps the server from restarting itself.
+  checks, and a saved change restarts the server by itself. It is served only when the server was started in a
+  terminal (or with `KNOWLEDGE_CONSOLE=on`), only to a browser on the same machine asking for `localhost`, its
+  API needs a token created on first start, and the page never shows a secret. `KNOWLEDGE_CONSOLE=off` turns it
+  off; `KMCP_SUPERVISE=false` keeps the server from restarting itself.
 - **`MCP_HOME`.** One variable names the folder of `.env`, `mcp.config.json` and the data. A client's entry sets
   it when the server is started through npx, so the settings are found whatever folder the client runs in, and
   the `.env` of that folder is not read.
@@ -91,6 +92,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **A value written to `.env` stays one variable.** A value with a carriage return, or a quoted value ending in a
+  backslash, could run on into the next line of the file when it was read back. Line breaks are now escaped, such
+  a value is written without quotes, and one that cannot be written safely is refused.
+- **A request body that is not JSON gets a one-line answer.** It used to be answered with a stack trace.
 - **Hints name commands that run where you are.** Messages said `knowledge-mcp setup check`, which is not on the
   PATH of a generated project. They now say `npm run setup -- check` there, `npx @chnxthr/knowledge-mcp …` under npx,
   and `knowledge-mcp …` in the Docker image.

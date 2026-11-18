@@ -51,7 +51,7 @@ export function followSupervisor(): void {
 }
 
 /** In the server: tell the supervisor that the port is open (it prints the console address once). */
-export function reportReady(info: { port: number; consoleUrl: string | null }): void {
+export function reportReady(info: { port: number; consoleUrl: string | null; openUrl: string | null }): void {
   if (canReload()) process.send!({ type: 'ready', ...info });
 }
 
@@ -66,7 +66,7 @@ export function requestReload(): boolean {
 }
 
 /** Become the supervisor: run the server as a child and start it again whenever it asks. Never returns. */
-export async function supervise(onReady: (info: { port: number; consoleUrl: string | null }, first: boolean) => void): Promise<never> {
+export async function supervise(onReady: (info: { port: number; consoleUrl: string | null; openUrl: string | null }, first: boolean) => void): Promise<never> {
   let child: ChildProcess | null = null;
   let stopping = false;
   let starts = 0;
@@ -88,8 +88,8 @@ export async function supervise(onReady: (info: { port: number; consoleUrl: stri
         stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
         env: { ...ORIGINAL_ENV, KMCP_SUPERVISED: '1' },
       });
-      child.on('message', (m: { type?: string; port?: number; consoleUrl?: string | null }) => {
-        if (m?.type === 'ready' && typeof m.port === 'number') onReady({ port: m.port, consoleUrl: m.consoleUrl ?? null }, first);
+      child.on('message', (m: { type?: string; port?: number; consoleUrl?: string | null; openUrl?: string | null }) => {
+        if (m?.type === 'ready' && typeof m.port === 'number') onReady({ port: m.port, consoleUrl: m.consoleUrl ?? null, openUrl: m.openUrl ?? null }, first);
       });
       child.on('error', (e) => {
         console.error(`[knowledge-mcp] could not start the server: ${e.message}`);

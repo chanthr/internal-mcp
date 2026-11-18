@@ -118,10 +118,12 @@ A saved change takes effect by itself: the server starts again and the page wait
 against the real service before it is written, to the same `.env` and `mcp.config.json` the commands write, so the
 console and the commands can be mixed freely.
 
-The console is for the person at the machine. It answers only a browser on this machine that asks for `localhost`,
-and its API needs a token the server creates on first start (`<data dir>/console-token`) and prints as part of the
-address. Secrets go in and never come back: the page shows that a token is set, not what it is. Behind a proxy or
-in a container it cannot be reached, and `KNOWLEDGE_CONSOLE=off` turns it off.
+The console is for the person at the machine. It is served only when the server was started in a terminal (a
+service, a container or a process manager gets none unless `KNOWLEDGE_CONSOLE=on`), it answers only a browser on
+this machine that asks for `localhost`, and its API needs a token the server creates on first start
+(`<data dir>/console-token`) and prints as part of the address. The page never shows a secret: it says that a
+token is set, not what it is. Whoever holds the console token is the admin of this server, so keep it like a
+password. `KNOWLEDGE_CONSOLE=off` turns the console off.
 
 ## How it works
 
@@ -635,7 +637,8 @@ The console's **Connect a client** page writes these lines for your folder and y
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.
 
-8. The console changes settings and runs tools as the admin, so it is kept to the person at the machine: requests from another address, through a proxy, or under a host name other than `localhost` are refused, the API needs the console token, and the page loads nothing from outside the server. Do not publish the port of a server you run in a terminal on a shared machine: every local user can reach `localhost`, and the token file (owner-only) is what keeps them out.
+8. The console changes settings and runs tools as the admin, so it is kept to the person at the machine. It exists only when the server was started in a terminal or with `KNOWLEDGE_CONSOLE=on`. Requests from another address, with a forwarding header, under a host name other than `localhost`, or marked by the browser as coming from another site are refused; the API needs the console token; the page loads nothing from outside the server. Two limits to know: a reverse proxy on the same machine that adds no forwarding header (nginx's plain `proxy_pass`) looks like a local browser, so on a server leave the console off; and every user of a shared machine can reach `localhost`, where the owner-only token file is what keeps them out.
+9. The console token is the admin's key. Its holder can change every setting, and can declare a connection that sends a secret from `.env` to an address of their choosing (that is what a connection is). The console narrows this to secrets in the folder's `.env`: it refuses a `${NAME}` that names one of the server's own credentials or a variable the server only inherited from the shell.
 
 ## File map
 

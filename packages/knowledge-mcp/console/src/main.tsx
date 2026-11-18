@@ -3,7 +3,7 @@ import './styles.css';
 import { takeTokenFromAddress } from './api';
 import { App } from './app';
 
-takeTokenFromAddress();
+await takeTokenFromAddress();
 
 // Light or dark follows the system. The controls from ./ui switch on the same attribute.
 const dark = matchMedia('(prefers-color-scheme: dark)');

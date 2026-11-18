@@ -8,18 +8,24 @@
 
 const KEY = 'knowledge-mcp-console-token';
 
-/** Returns true when the address carried a token (a new one replaces the one this browser had). */
-export function takeTokenFromAddress(): boolean {
+/**
+ * A token in the address (…/console/#token=…) is taken out of the address bar and tried on the server. It replaces
+ * the token this browser has only when the server accepts it: any site can send a browser to this address with a
+ * token of its own making, and that must not cost the person their access. Returns true when a new token is in use.
+ */
+export async function takeTokenFromAddress(): Promise<boolean> {
   const m = /[#&]token=([A-Za-z0-9_-]+)/.exec(location.hash);
   if (!m) return false;
-  try {
-    localStorage.setItem(KEY, m[1]);
-  } catch {
-    /* storage is off: the token lives for this page view */
-  }
-  memoryToken = m[1];
   history.replaceState(null, '', location.pathname + location.search);
-  return true;
+  if (m[1] === token()) return false;
+  let accepted = false;
+  try {
+    accepted = (await fetch('./api/state', { headers: { Authorization: `Bearer ${m[1]}` } })).ok;
+  } catch {
+    /* the server is not answering: keep what we have */
+  }
+  if (accepted) setToken(m[1]);
+  return accepted;
 }
 
 /** Fired on the window when the server refuses the token, so the page asks for one instead of showing errors. */

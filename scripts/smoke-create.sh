@@ -34,6 +34,7 @@ grep -q '✓ notes' "$WORK/doctor.txt"
 
 echo "== serve"
 export MCP_DATA_DIR="$WORK/data" PORT=18931
+export KNOWLEDGE_CONSOLE=on   # no terminal here, and without one the console is off
 node dist/server.js serve >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done

@@ -7,11 +7,23 @@
  */
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
-/** Quote a value when dotenv would otherwise misread it (spaces, `#`, quotes, line breaks). */
+/**
+ * Write a value so that dotenv reads back exactly one variable.
+ *
+ * dotenv ends a quoted value at the next quote that has no backslash before it, and turns a carriage return into
+ * a line break. So two things would let a value run on into the lines below it and define variables of its own:
+ * a quoted value that ends in a backslash, and a raw line break. Neither is written: line breaks are escaped, a
+ * value ending in a backslash is written without quotes, and a value that cannot be written safely is refused.
+ */
 export function formatEnvValue(value: string): string {
+  if (/[\0-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) throw new Error('This value holds a control character, so it is not saved.');
   if (value === '' || /^[A-Za-z0-9_\-./:@+=,~%]+$/.test(value)) return value;
-  if (!value.includes("'") && !value.includes('\n')) return `'${value}'`;
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
+  if (value.endsWith('\\')) {
+    if (/[#\r\n'"`]/.test(value) || value !== value.trim()) throw new Error('This value ends with a backslash and holds a quote, a # or a line break, so it cannot be written to .env.');
+    return value;
+  }
+  if (!/['\r\n]/.test(value)) return `'${value}'`;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r/g, '\\r').replace(/\n/g, '\\n')}"`;
 }
 
 /**
@@ -27,7 +39,7 @@ export function readEnvValues(path: string): Map<string, string> {
     if (!m || !raw) continue;
     const single = /^'(.*)'$/.exec(raw);
     const double = /^"(.*)"$/.exec(raw);
-    values.set(m[1], single ? single[1] : double ? double[1].replace(/\\(.)/g, (_, c: string) => (c === 'n' ? '\n' : c)) : raw);
+    values.set(m[1], single ? single[1] : double ? double[1].replace(/\\(.)/g, (_, c: string) => (c === 'n' ? '\n' : c === 'r' ? '\r' : c)) : raw);
   }
   return values;
 }

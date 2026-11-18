@@ -120,6 +120,24 @@ test('.env: existing lines are kept, a commented key is filled in place, new key
   assert.deepEqual([back.get('NEW_PATH'), back.get('NOTE'), back.get('PLAIN'), back.get('OLD')], ['/Users/me/My Keys/sa.json', "it's #1", 'abc', undefined]);
 });
 
+test('.env: whatever a value holds, it stays one variable and the line after it stays its own', async () => {
+  const { parse } = await import('dotenv');
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-env-'));
+  for (const value of ['ends with a backslash\\', 'C:\\keys\\', 'line one\rline two', 'line one\r\nline two', 'line one\nline two', "quote ' inside", 'both \' and "', 'hash # inside', 'a=b c=d']) {
+    const path = join(dir, `${Math.random().toString(36).slice(2)}.env`);
+    updateEnvFile(path, { FIRST: value, SECOND: 'kept' });
+    const read = parse(readFileSync(path, 'utf8'));
+    assert.deepEqual(Object.keys(read), ['FIRST', 'SECOND'], JSON.stringify(value));
+    assert.equal(read.SECOND, 'kept', JSON.stringify(value));
+  }
+  // What cannot be written as one line is refused, and nothing is written.
+  const path = join(dir, 'refused.env');
+  for (const value of ['nul \0 inside', 'bell \x07', 'quote \' and backslash at the end\\', 'line\nbreak and backslash\\']) {
+    assert.throws(() => updateEnvFile(path, { FIRST: value, SECOND: 'kept' }), /not saved|cannot be written/, JSON.stringify(value));
+  }
+  assert.ok(!existsSync(path));
+});
+
 test('checks: each one says what it found, or what to fix', async () => {
   assert.deepEqual(await checkSlack('good-bot', { apiBase: `${base}/slack` }), { team: 'Acme', user: 'kbot', kind: 'bot' });
   await assert.rejects(checkSlack('bad', { apiBase: `${base}/slack` }), /token was rejected/);

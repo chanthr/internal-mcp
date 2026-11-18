@@ -11,6 +11,7 @@
  *
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -22,13 +23,13 @@ import { home } from '../core/paths.js';
 import { authStore } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
-import { stdioCommand } from '../core/invocation.js';
+import { cli, stdioCommand } from '../core/invocation.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
 import { pingTool } from '../plugin/ping.js';
 import { VERSION } from '../version.js';
 import { checkConnection, sqlAdapterFor } from '../connections/index.js';
-import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, type ConnectionConfig } from '../connections/schema.js';
+import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, stringsIn, type ConnectionConfig } from '../connections/schema.js';
 import { embeddingsConfigured, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, validTrustEntry } from '../plugins/drive/trust.js';
@@ -64,6 +65,26 @@ export function consoleUrl(port: number): string {
   return `http://localhost:${port}/console/#token=${consoleToken()}`;
 }
 
+/**
+ * An address that opens the console once, for the moment after start when the server opens the browser itself.
+ * The opener's command line can be read by any user of the machine, so it must not hold the token. This code is
+ * good for one request within two minutes of start, and that request is answered with the real address.
+ */
+let _open: { code: string; until: number } | null = null;
+export function consoleOpenUrl(port: number): string {
+  _open = { code: randomBytes(24).toString('base64url'), until: Date.now() + 120_000 };
+  return `http://localhost:${port}/console/open?code=${_open.code}`;
+}
+function redeemOpenCode(given: string): boolean {
+  const open = _open;
+  if (!open || Date.now() > open.until) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(open.code);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+  _open = null; // once
+  return true;
+}
+
 const SERVICE_ENV: Record<string, string[]> = {
   drive: ['GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_OAUTH_REFRESH_TOKEN'],
   slack: ['SLACK_BOT_TOKEN'],
@@ -96,6 +117,38 @@ function connectionView(name: string, c: ConnectionConfig, tools: number) {
   };
 }
 
+/** Every place in a declared request where a `${NAME}` could be written. */
+const toolStrings = (tool: { request?: unknown }): string[] => stringsIn(tool.request ?? {});
+
+/** Credentials and settings of the server itself. A connection has no business sending these anywhere. */
+const SERVER_OWN = new Set([
+  'SLACK_BOT_TOKEN', 'SLACK_USER_TOKEN', 'SLACK_TOKEN', 'GITHUB_PAT', 'GITHUB_TOKEN', 'RAILWAY_TOKEN', 'RAILWAY_MCP_TOKEN',
+  'OPENAI_API_KEY', 'EMBEDDING_API_KEY', 'QDRANT_API_KEY', 'MATHPIX_APP_ID', 'MATHPIX_APP_KEY',
+  'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_OAUTH_REFRESH_TOKEN',
+  'OAUTH_GOOGLE_CLIENT_SECRET', 'OAUTH_JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY', 'MCP_API_KEY', 'MCP_CONFIG_JSON',
+]);
+/** …and the connection string of a database, which the console files under <NAME>_DATABASE_URL. */
+const serverOwn = (name: string) => SERVER_OWN.has(name.toUpperCase()) || /_DATABASE_URL$/i.test(name);
+
+/**
+ * Why a `${NAME}` written in the console is refused, or null.
+ *
+ * At call time a `${NAME}` is filled from the server's whole environment, and a connection sends it to an address
+ * its author chose. So what the console accepts is narrow: a name that is in this folder's .env (somebody put it
+ * there for this server), or one that is not set yet. Never one of the server's own credentials, and never a
+ * variable the server merely inherited from the shell it was started in (a cloud key, say).
+ */
+function foreignEnvProblem(dir: string, values: string[]): string | null {
+  const inFile = readEnvKeys(join(dir, '.env'));
+  for (const name of new Set(values.flatMap(envRefs))) {
+    if (serverOwn(name)) return `\${${name}} is one of the server's own settings. A connection cannot send it to another service.`;
+    if (process.env[name]?.trim() && !inFile.has(name)) {
+      return `\${${name}} is set in the environment the server was started from, not in .env. A connection made here uses secrets from .env only. Put it there with: ${cli(`setup secret ${name}`)}`;
+    }
+  }
+  return null;
+}
+
 export function mountConsole(app: Express, registry: Registry): boolean {
   if (!consoleEnabled()) return false;
   const ui = uiDir();
@@ -118,6 +171,20 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (!res.headersSent) refuse(res, e instanceof z.ZodError ? 400 : 422, e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') : msg(e));
     });
   };
+
+  // What a form field may hold. A token, a URL and a model name are one line of visible characters; a path may
+  // hold spaces. Nothing typed into the console holds a line break or another control character.
+  const visible = (max: number) => z.string().trim().max(max).regex(/^[\x21-\x7e]*$/, 'no spaces, line breaks or other invisible characters');
+  const secret = visible(500).min(10);
+  const oneLine = (max: number) => z.string().trim().max(max).regex(/^[^\0-\x1f\x7f]*$/, 'no line breaks or other control characters');
+  const webUrl = (max: number) =>
+    visible(max).refine((v) => {
+      try {
+        return /^https?:$/.test(new URL(v).protocol);
+      } catch {
+        return false;
+      }
+    }, 'a full address that starts with http:// or https://');
 
   // ── What is set up ──
   api.get(
@@ -188,7 +255,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/folders',
     wrap(async (req, res) => {
       if (!mustEdit(res)) return;
-      const { path } = z.object({ path: z.string().min(1).max(1000) }).parse(req.body);
+      const { path } = z.object({ path: oneLine(1000).min(1) }).parse(req.body);
       const full = resolve(settingsDir(), path.trim().replace(/^~(?=$|\/)/, homedir()));
       const r = await setup(['folder', full], settingsDir());
       if (!r.ok) return refuse(res, 422, firstLine(r.lines));
@@ -218,25 +285,27 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const envPath = join(dir, '.env');
       const id = String(req.params.id);
       if (id === 'slack') {
-        const { token } = z.object({ token: z.string().min(10).max(500) }).parse(req.body);
+        const { token } = z.object({ token: secret }).parse(req.body);
         const r = await checkSlack(token.trim());
         updateEnvFile(envPath, { SLACK_BOT_TOKEN: token.trim() });
         return change(res, { found: `${r.team} as ${r.user}` });
       }
       if (id === 'github') {
-        const { token } = z.object({ token: z.string().min(10).max(500) }).parse(req.body);
+        const { token } = z.object({ token: secret }).parse(req.body);
         const r = await checkGithub(token.trim());
         updateEnvFile(envPath, { GITHUB_PAT: token.trim() });
         return change(res, { found: `signed in as ${r.login}` });
       }
       if (id === 'railway') {
-        const { token } = z.object({ token: z.string().min(10).max(500) }).parse(req.body);
+        const { token } = z.object({ token: secret }).parse(req.body);
         const r = await checkRailway(token.trim());
         updateEnvFile(envPath, { RAILWAY_TOKEN: token.trim() });
         return change(res, { found: r.who });
       }
       if (id === 'embeddings') {
-        const body = z.object({ baseUrl: z.string().max(500).optional(), model: z.string().max(200).optional(), apiKey: z.string().max(500).optional() }).parse(req.body);
+        const body = z
+          .object({ baseUrl: webUrl(500).optional(), model: visible(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, 'a model name').optional().or(z.literal('')), apiKey: visible(500).optional() })
+          .parse(req.body);
         const baseUrl = body.baseUrl?.trim() || undefined;
         const apiKey = body.apiKey?.trim() || undefined;
         const r = await checkEmbedding({ baseUrl, model: body.model?.trim() || undefined, apiKey });
@@ -301,12 +370,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, 'lowercase letters, digits and dashes, starting with a letter'),
     type: z.enum(['postgres', 'sqlite', 'http']),
     /** postgres: the connection string. Saved to .env under <NAME>_DATABASE_URL, never to the config. */
-    url: z.string().max(2000).optional(),
-    path: z.string().max(1000).optional(),
-    baseUrl: z.string().max(1000).optional(),
-    headers: z.record(z.string(), z.string()).optional(),
+    url: visible(2000).optional(),
+    path: oneLine(1000).optional(),
+    baseUrl: webUrl(1000).optional().or(z.literal('')),
+    headers: z.record(z.string().regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}$/, 'a header name'), oneLine(2000)).optional(),
     explore: z.boolean().optional(),
-    description: z.string().max(500).optional(),
+    description: oneLine(500).optional(),
   });
   api.post(
     '/connections',
@@ -339,6 +408,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         if (!b.baseUrl?.trim()) return refuse(res, 422, 'Enter the base URL of the API.');
         const headers = b.headers ?? {};
         refuseLiteralSecrets(headers, 'The header');
+        const foreign = foreignEnvProblem(dir, Object.values(headers));
+        if (foreign) return refuse(res, 422, foreign);
         conn = { type: 'http', baseUrl: b.baseUrl.trim(), ...(Object.keys(headers).length ? { headers } : {}) };
       }
       if (b.explore && b.type !== 'http') conn.explore = true;
@@ -396,6 +467,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       const tool = DataToolSchema.parse(req.body);
       const { connections, problems } = withTool(settingsDir(), tool);
+      const foreign = foreignEnvProblem(settingsDir(), toolStrings(tool));
+      if (foreign) problems.push(foreign);
       if (problems.length) return res.json({ ok: false, problems });
       const c = connections[tool.connection];
       if (c.type === 'http') return res.json({ ok: true, note: 'The request is well formed. Save it and try it to see what the API answers.' });
@@ -411,6 +484,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const tool = DataToolSchema.parse(req.body);
       const dir = settingsDir();
       const { problems } = withTool(dir, tool);
+      const foreign = foreignEnvProblem(dir, toolStrings(tool));
+      if (foreign) problems.push(foreign);
       if (problems.length) return refuse(res, 422, problems.join(' '));
       // A name another plugin already uses would stop the server at start.
       const clash = registry.listTools(pingTool).find((t) => t.name === tool.name && !getConfig().tools.some((d) => d.name === t.name));
@@ -552,6 +627,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     next();
   });
   router.use('/api', api);
+  // The browser the server opened: trade the one-time code for the address with the token. Anything else lands on
+  // the page, which works if this browser already has the token and asks for it if not.
+  router.get('/open', (req, res) => void res.redirect(302, redeemOpenCode(String(req.query.code ?? '')) ? `/console/#token=${consoleToken()}` : '/console/'));
   if (ui) {
     router.use(express.static(ui, { index: 'index.html', maxAge: 0 }));
     router.get(/.*/, (_req, res) => res.sendFile(join(ui, 'index.html')));

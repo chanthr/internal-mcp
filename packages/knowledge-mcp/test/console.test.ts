@@ -4,10 +4,10 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -33,10 +33,11 @@ Object.assign(process.env, {
   MCP_CONFIG_PATH: join(dir, 'mcp.config.json'),
   MCP_ENV_FILE: 'none',
   KMCP_SUPERVISE: 'false',
+  KNOWLEDGE_CONSOLE: 'on', // a test has no terminal, and without one the console is off
   PORT: '0',
 });
 
-const { refusal, consoleToken, consoleEnabled } = await import('../src/admin/auth.js');
+const { refusal, consoleToken, consoleEnabled, foreignPage } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
@@ -78,11 +79,26 @@ test('only a browser on this machine reaches the console', () => {
   assert.match(refusal(req('127.0.0.1', { host: 'localhost:8080', 'x-forwarded-for': '203.0.113.9' }))!, /not served through a proxy/); // behind nginx every visitor is 127.0.0.1
   assert.match(refusal(req('127.0.0.1', { host: 'mcp.example.com' }))!, /Open the console as http:\/\/localhost/);
   assert.match(refusal(req('127.0.0.1', { host: 'evil.example:8080' }))!, /localhost/); // DNS rebinding: the page's own name
-  assert.equal(consoleEnabled({}), true);
-  assert.equal(consoleEnabled({ KNOWLEDGE_CONSOLE: 'off' }), false);
+  // Served to a person who started the server in a terminal. A service or a container has none, and gets no
+  // console unless it is asked for: a proxy on the same machine that sets no forwarding header looks local.
+  assert.equal(consoleEnabled({}, true), true);
+  assert.equal(consoleEnabled({}, false), false);
+  assert.equal(consoleEnabled({ KNOWLEDGE_CONSOLE: 'on' }, false), true);
+  assert.equal(consoleEnabled({ KNOWLEDGE_CONSOLE: 'off' }, true), false);
+
+  // The API answers its own page. What a browser marks as another site's request is refused.
+  assert.equal(foreignPage({}), false); // a program: judged by the token
+  assert.equal(foreignPage({ 'sec-fetch-site': 'same-origin', origin: 'http://localhost:8080' }), false);
+  assert.equal(foreignPage({ 'sec-fetch-site': 'cross-site' }), true);
+  assert.equal(foreignPage({ 'sec-fetch-site': 'same-site' }), true);
+  assert.equal(foreignPage({ origin: 'https://mcp.example.com' }), true); // the page was opened under a public name
+  assert.equal(foreignPage({ origin: 'null' }), true);
 });
 
 test('the API needs the console token, and the token file is private', async () => {
+  assert.equal((await api('GET', '/state', undefined, { Origin: 'https://mcp.example.com' })).status, 403);
+  assert.equal((await api('GET', '/state', undefined, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+  assert.equal((await api('GET', '/state', undefined, { 'Sec-Fetch-Site': 'same-origin', Origin: base })).status, 200);
   assert.equal((await fetch(`${base}/console/api/state`)).status, 401);
   assert.equal((await fetch(`${base}/console/api/state`, { headers: { Authorization: 'Bearer wrong' } })).status, 401);
   assert.equal((await api('GET', '/state', undefined, { 'X-Forwarded-For': '203.0.113.9' })).status, 403);
@@ -117,6 +133,45 @@ test('the page: served from this server only, with nothing loaded from elsewhere
   const { get } = await import('node:http');
   const status = await new Promise<number>((done, fail) => get({ host: '127.0.0.1', port: server.port, path: '/console/', headers: { Host: 'evil.example.com' } }, (r) => (r.resume(), done(r.statusCode ?? 0))).on('error', fail));
   assert.ok(status === 403 || status === 404, String(status));
+});
+
+test('a token file somebody else could have read is not trusted: a new token is made', () => {
+  const data = mkdtempSync(join(tmpdir(), 'kmcp-token-'));
+  const path = join(data, 'console-token');
+  const old = 'a'.repeat(32);
+  writeFileSync(path, `${old}\n`, { mode: 0o644 });
+  chmodSync(path, 0o644);
+  const read = () =>
+    spawnSync(process.execPath, ['--import', 'tsx', '-e', "import('./src/admin/auth.ts').then((m) => console.log(m.consoleToken()))"], {
+      env: { ...process.env, MCP_DATA_DIR: data },
+      encoding: 'utf8',
+    }).stdout.trim();
+  const fresh = read();
+  assert.ok(fresh.length >= 24 && fresh !== old, 'the readable token is replaced');
+  assert.equal(statSync(path).mode & 0o777, 0o600);
+  assert.equal(read(), fresh, 'a private file is kept');
+});
+
+test('the address the server opens in the browser works once and holds no token', async () => {
+  const { consoleOpenUrl } = await import('../src/admin/routes.js');
+  const url = consoleOpenUrl(server.port);
+  assert.ok(!url.includes(token));
+  const first = await fetch(url, { redirect: 'manual' });
+  assert.deepEqual([first.status, first.headers.get('location')], [302, `/console/#token=${token}`]);
+  assert.equal(first.headers.get('cache-control'), 'no-store');
+  const again = await fetch(url, { redirect: 'manual' });
+  assert.deepEqual([again.status, again.headers.get('location')], [302, '/console/']);
+  assert.equal((await fetch(`${base}/console/open?code=guess`, { redirect: 'manual' })).headers.get('location'), '/console/');
+});
+
+test('a body the server cannot read is answered in one line, without file paths', async () => {
+  for (const path of ['/console/api/run', '/mcp']) {
+    const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{"name": ' });
+    const text = await res.text();
+    assert.equal(res.status, 400, path);
+    assert.deepEqual(JSON.parse(text), { error: 'The request body is not valid JSON.' });
+    assert.ok(!text.includes('node_modules') && !text.includes(' at '), text);
+  }
 });
 
 test('state: what is set up, without any secret', async () => {
@@ -167,6 +222,39 @@ test('folders, connections and tools are saved through the same checks as the se
   }
   const http = await api('POST', '/connections', { name: 'crm', type: 'http', baseUrl: 'https://crm.example.com/api', headers: { Authorization: 'Bearer ${CRM_TOKEN}' } });
   assert.equal(http.status, 200);
+
+  // A ${NAME} written here is filled from the server's environment and sent to the address of the connection.
+  // So it may name what is in this folder's .env, or what is not set yet: not the server's own credentials, and
+  // not a variable the server only inherited from the shell it was started in.
+  process.env.SHELL_ONLY_KEY = 'inherited-from-the-shell-000';
+  try {
+    const own = await api('POST', '/connections', { name: 'crm2', type: 'http', baseUrl: 'https://crm.example.com', headers: { 'X-Token': '${SLACK_BOT_TOKEN}' } });
+    assert.equal(own.status, 422);
+    assert.match(own.json.error, /SLACK_BOT_TOKEN\} is one of the server's own settings/);
+    const inherited = await api('POST', '/connections', { name: 'crm2', type: 'http', baseUrl: 'https://crm.example.com', headers: { 'X-Token': '${SHELL_ONLY_KEY}' } });
+    assert.equal(inherited.status, 422);
+    assert.match(inherited.json.error, /not in \.env/);
+    assert.equal(config().connections.crm2, undefined);
+    const request = { name: 'crm_lookup', connection: 'crm', description: 'Look up.', request: { path: '/x', headers: { 'X-Other': '${SHELL_ONLY_KEY}' } } };
+    assert.match((await api('POST', '/tools/check', request)).json.problems.join(' '), /not in \.env/);
+    assert.equal((await api('POST', '/tools', request)).status, 422);
+    assert.equal((await api('POST', '/tools', { ...request, request: { path: '/x', query: { key: '${SHOP_DATABASE_URL}' } } })).status, 422);
+  } finally {
+    delete process.env.SHELL_ONLY_KEY;
+  }
+
+  // A form field is one line. A line break in a value would become a line of its own in .env.
+  for (const body of [
+    { baseUrl: 'http://127.0.0.1:1/v1', model: 'model\rOTHER=1' },
+    { baseUrl: 'http://127.0.0.1:1/v1\nOTHER=1', model: 'm' },
+    { baseUrl: 'not an address', model: 'm' },
+    { baseUrl: 'http://127.0.0.1:1/v1', model: 'm', apiKey: 'key with spaces' },
+  ]) {
+    assert.equal((await api('POST', '/services/embeddings', body)).status, 400, JSON.stringify(body));
+  }
+  assert.equal((await api('POST', '/services/slack', { token: 'xoxb-0000000000\nOTHER=1' })).status, 400);
+  assert.equal((await api('POST', '/connections', { name: 'pg', type: 'postgres', url: 'postgres://u:p@127.0.0.1:1/db\nOTHER=1' })).status, 400);
+  assert.ok(!envFile().includes('OTHER'));
 
   // A tool: the definition is checked, and the query is compiled on the real database, before anything is saved.
   const tool = { name: 'orders_over', connection: 'shop', description: 'Orders over an amount.', params: { min: { type: 'number' } }, sql: 'select id, total from orders where total >= :min' };

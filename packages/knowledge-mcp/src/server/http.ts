@@ -23,7 +23,7 @@ import { maskedSecretCount } from '../core/log_mask.js';
 import { getConfig, configSource } from '../core/config.js';
 import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import { VERSION } from '../version.js';
-import { consoleUrl, mountConsole } from '../admin/routes.js';
+import { consoleOpenUrl, consoleUrl, mountConsole } from '../admin/routes.js';
 import { followSupervisor, reportReady } from '../admin/supervisor.js';
 import type { Registry } from '../plugin/registry.js';
 import { resolveUser } from './identity.js';
@@ -478,6 +478,16 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     }
   });
 
+  // Last: anything a handler above did not answer for itself, a body that is not JSON or is too large above all.
+  // Express would answer with the error's stack (file paths of this install) to whoever sent the request.
+  app.use((err: unknown, _req: ExpressRequest, res: ExpressResponse, next: (e?: unknown) => void) => {
+    if (res.headersSent) return next(err);
+    const given = (err as { status?: unknown; statusCode?: unknown } | null)?.status ?? (err as { statusCode?: unknown } | null)?.statusCode;
+    const status = typeof given === 'number' && given >= 400 && given < 600 ? given : 500;
+    if (status >= 500) console.error('[knowledge-mcp] request failed:', err instanceof Error ? err.message : err);
+    res.status(status).json({ error: status === 400 ? 'The request body is not valid JSON.' : status === 413 ? 'The request body is too large.' : status < 500 ? 'The request was refused.' : 'The server could not handle the request.' });
+  });
+
   // PORT=0 picks a free port (for tests). The actual port is reported in the return value.
   const wanted = parseInt(process.env.PORT || '8080', 10);
   const httpServer = await new Promise<import('node:http').Server>((resolveListen, rejectListen) => {
@@ -487,7 +497,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   const address = httpServer.address();
   const port = typeof address === 'object' && address ? address.port : wanted;
   console.error(`[knowledge-mcp] HTTP mode · listening on :${port} · version=${VERSION}`);
-  reportReady({ port, consoleUrl: consoleOn ? consoleUrl(port) : null });
+  reportReady({ port, consoleUrl: consoleOn ? consoleUrl(port) : null, openUrl: consoleOn ? consoleOpenUrl(port) : null });
 
   // External connections start in the background after the port is open, so /health comes up first even when upstream
   // or Qdrant does not respond

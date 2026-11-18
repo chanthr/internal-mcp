@@ -57,8 +57,8 @@ Usage: knowledge-mcp <command> [options]
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
   setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
                                       Setup steps that ask nothing (for scripts and AI agents)
-  serve [--stdio] [--open]            Start the server (HTTP on $PORT, default 8080). On your own machine it also
-                                      serves the console at /console/ (--open opens it; KNOWLEDGE_CONSOLE=off turns it off)
+  serve [--stdio] [--open]            Start the server (HTTP on $PORT, default 8080). Started in a terminal it also
+                                      serves the console at /console/ (--open opens it; KNOWLEDGE_CONSOLE=on or off decides it)
   keys create [--email E] [--role R] [--label L] [--expires 90d]
                                       Create an API key and print it once
   keys list                           List keys (never the key itself)
@@ -76,7 +76,11 @@ function servesHttp(argv: string[]): boolean {
   return !argv.includes('--stdio') && (process.env.MCP_TRANSPORT || 'http').toLowerCase() !== 'stdio';
 }
 
-/** Open a page in the person's browser. Best effort: a missing opener is not an error. */
+/**
+ * Open a page in the person's browser. Best effort: a missing opener is not an error.
+ * A command line is visible to every user of the machine (`ps`), so what is opened is never the address with the
+ * console token: it is the one-time address of the server (see admin/routes.ts, /console/open).
+ */
 function openInBrowser(url: string): void {
   const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
   try {
@@ -91,12 +95,12 @@ function openInBrowser(url: string): void {
  * `open`: also open the console in the browser the first time the server is up.
  */
 async function serveSupervised(open: boolean): Promise<never> {
-  return supervise(({ port, consoleUrl }, first) => {
+  return supervise(({ port, consoleUrl, openUrl }, first) => {
     if (!consoleUrl || !first) return;
     // The address carries the access token, so it is printed only to a terminal, never into a log file.
     if (process.stderr.isTTY) info(`[knowledge-mcp] console · ${consoleUrl}`);
     else info(`[knowledge-mcp] console · http://localhost:${port}/console/ (the access token is in the data directory, file console-token)`);
-    if (open && process.stderr.isTTY && !process.env.CI) openInBrowser(consoleUrl);
+    if (open && openUrl && process.stderr.isTTY && !process.env.CI) openInBrowser(openUrl);
   });
 }
 
