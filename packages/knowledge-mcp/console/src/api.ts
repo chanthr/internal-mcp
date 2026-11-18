@@ -141,15 +141,28 @@ export interface State {
   plugins: PluginStatus[];
   folders: Array<{ path: string; name: string | null; documents: number | null }>;
   services: {
-    drive: { set: boolean; trusted: string[] };
+    /** `via`: a service account key, or a Google sign-in (then `account` is who, and `reads` the folders). */
+    drive: { set: boolean; trusted: string[]; via: 'key' | 'login' | null; account: string | null; reads: string[] };
     slack: { set: boolean };
     github: { set: boolean };
-    railway: { set: boolean };
+    railway: { set: boolean; via: 'token' | 'login' | null; who: string | null };
     embeddings: { set: boolean; model: string | null; dim: number | null; baseUrl: string | null; keySet: boolean };
   };
   connections: ConnectionView[];
   declaredTools: DeclaredTool[];
   tools: ToolView[];
+  /** A sign-in that came back from the other site and waits to be saved. */
+  login: { service: 'railway' | 'google' } | null;
+}
+
+/**
+ * Leave the console for another site's sign-in page. The server makes the address and the site sends the browser
+ * back here. Does not return: the page is on its way out.
+ */
+export async function signIn(path: string, body: unknown = {}): Promise<never> {
+  const { url } = await call<{ url: string }>('POST', path, body);
+  location.assign(url);
+  return new Promise<never>(() => undefined);
 }
 export interface Changed {
   ok: true;

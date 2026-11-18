@@ -104,9 +104,9 @@ npm run dev                    # in a generated project: the address is in the f
 
 | Page | What you do there |
 | --- | --- |
-| Documents | Add a folder, connect Google Drive, turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
+| Documents | Add a folder, connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
-| Apps | Connect Slack, GitHub and Railway with a token |
+| Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
 | Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
 | People and keys | Create and revoke keys, and limit a person to some tools |
@@ -117,6 +117,23 @@ npm run dev                    # in a generated project: the address is in the f
 A saved change takes effect by itself: the server starts again and the page waits for it. Every value is checked
 against the real service before it is written, to the same `.env` and `mcp.config.json` the commands write, so the
 console and the commands can be mixed freely.
+
+### Connecting without copying a token
+
+Making a token in another site's settings and carrying it over is the slow part of setting up. Where a service
+offers something better, the console uses it:
+
+| Service | In the console | What it takes |
+| --- | --- | --- |
+| Railway | **Sign in with Railway** | Nothing to prepare. The server registers itself with Railway, you sign in and pick the workspaces it may read, as a viewer. The sign-in renews itself |
+| Google Drive | **Sign in with Google** | An OAuth client of your own Google Cloud project, made once: client ID and secret go into the form. The server then reads your My Drive, or the folders you list, as you. Google reviews every shared app that reads Drive, which is why there is no ready-made one to offer |
+| Google Drive | **Account with gcloud** | The gcloud CLI, signed in. It creates a service account and its key; you then share folders with that account |
+| GitHub | **Use the gh login** | The gh CLI, signed in |
+| Slack | A link that opens Slack's "Create an app" with the read-only permissions filled in | The bot token is still copied once. Slack's sign-in needs a secret and a public https address, which a server on your machine has not |
+
+A token can still be pasted for each, and `RAILWAY_TOKEN` in the environment wins over a sign-in. With a personal
+Google account, publish the OAuth consent screen (it stays unverified, which is fine for your own use): left in
+"Testing", Google ends the sign-in every 7 days.
 
 The console is for the person at the machine. It is served only when the server was started in a terminal (a
 service, a container or a process manager gets none unless `KNOWLEDGE_CONSOLE=on`), it answers only a browser on
@@ -400,11 +417,11 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Plugin | Tools | Needs |
 | --- | --- | --- |
 | `knowledge` | `search_knowledge`, `read_document` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required |
-| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google service account or OAuth refresh token. Share a folder or a document with that account and it is searchable |
+| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google sign-in from the console (it reads your own Drive), or a service account: share a folder or a document with that account and it is searchable. An OAuth refresh token in the environment works too |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
-| `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | `RAILWAY_TOKEN` |
+| `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | A sign-in from the console, or `RAILWAY_TOKEN` |
 | core | `ping` | Nothing. Shows who you are and which plugins are on |
 
 </details>
@@ -649,6 +666,7 @@ Node by its full path and the server starts there too.
 
 8. The console changes settings and runs tools as the admin, so it is kept to the person at the machine. It exists only when the server was started in a terminal or with `KNOWLEDGE_CONSOLE=on`. Requests from another address, with a forwarding header, under a host name other than `localhost`, or marked by the browser as coming from another site are refused; the API needs the console token; the page loads nothing from outside the server. Two limits to know: a reverse proxy on the same machine that adds no forwarding header (nginx's plain `proxy_pass`) looks like a local browser, so on a server leave the console off; and every user of a shared machine can reach `localhost`, where the owner-only token file is what keeps them out.
 9. The console token is the admin's key. Its holder can change every setting, and can declare a connection that sends a secret from `.env` to an address of their choosing (that is what a connection is). The console narrows this to secrets in the folder's `.env`: it refuses a `${NAME}` that names one of the server's own credentials or a variable the server only inherited from the shell.
+10. A sign-in made from the console is kept in the data directory (`railway-login.json`, `google-login.json`), readable by the owner only, like the data file. A Google sign-in reads as you: whatever is in the folders you chose is visible to every user of the server, so choose folders meant for all of them. The address the browser comes back to after a sign-in accepts only the answer to a sign-in the console started minutes before, and saves nothing by itself.
 
 ## File map
 

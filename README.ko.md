@@ -103,9 +103,9 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 
 | 화면 | 하는 일 |
 | --- | --- |
-| Documents | 폴더를 추가하고, Google Drive를 연결하고, 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
+| Documents | 폴더를 추가하고, Google Drive를 연결하고(구글 로그인, gcloud로 서비스 계정 만들기, 키 붙여넣기), 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
 | Databases and APIs | Postgres, SQLite, HTTP API를 연결합니다. 질의를 한 번 써서 도구로 저장합니다. 화면이 테이블 목록을 보여 주고, 저장하기 전에 실제 데이터베이스에서 질의를 점검합니다 |
-| Apps | Slack, GitHub, Railway를 토큰으로 연결합니다 |
+| Apps | Slack, GitHub, Railway를 연결합니다. 로그인이 되는 곳은 로그인으로, 아니면 토큰으로 연결합니다 |
 | Tools | AI 클라이언트가 부를 수 있는 도구 전부입니다. 값을 넣고 실행하면 클라이언트가 받는 결과가 그대로 보입니다 |
 | Connect a client | 버튼 하나로 Claude Code, Claude Desktop, Cursor, VS Code에 이 서버를 추가합니다. 이미 추가된 곳도 보여 줍니다. 직접 넣을 항목도 복사할 수 있습니다 |
 | People and keys | 키를 만들고 취소합니다. 사람마다 쓸 수 있는 도구를 정합니다 |
@@ -115,6 +115,23 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 
 저장한 변경은 저절로 적용됩니다. 서버가 다시 시작하고 화면은 기다립니다. 모든 값은 실제 서비스에 확인한 뒤에
 씁니다. 설정 명령과 같은 `.env`와 `mcp.config.json`에 쓰므로 콘솔과 명령을 섞어 써도 됩니다.
+
+### 토큰을 옮겨 적지 않고 연결하기
+
+다른 사이트의 설정 화면에서 토큰을 만들어 옮겨 적는 일이 설정에서 가장 오래 걸립니다. 서비스가 더 나은 방법을
+제공하면 콘솔이 그 방법을 씁니다.
+
+| 서비스 | 콘솔에서 | 필요한 것 |
+| --- | --- | --- |
+| Railway | **Sign in with Railway** | 준비할 것이 없습니다. 서버가 Railway에 스스로 등록하고, 사용자는 로그인해서 읽게 할 워크스페이스를 고릅니다. 권한은 보기 전용입니다. 로그인은 저절로 갱신됩니다 |
+| Google Drive | **Sign in with Google** | 본인 Google Cloud 프로젝트의 OAuth 클라이언트가 필요합니다. 한 번 만들어 클라이언트 ID와 비밀값을 넣습니다. 그 뒤 서버는 로그인한 사람의 내 드라이브나 고른 폴더를 읽습니다. 구글은 Drive를 읽는 공용 앱을 모두 심사하기 때문에 미리 만들어 둔 앱을 제공할 수 없습니다 |
+| Google Drive | **Account with gcloud** | 로그인된 gcloud CLI가 필요합니다. 서비스 계정과 키를 만들어 줍니다. 그 계정에 폴더를 공유하면 됩니다 |
+| GitHub | **Use the gh login** | 로그인된 gh CLI가 필요합니다 |
+| Slack | 읽기 권한이 채워진 채로 Slack의 앱 만들기 화면을 여는 링크 | 봇 토큰은 한 번 복사해야 합니다. Slack 로그인은 비밀값과 공개 https 주소를 요구하는데, 내 컴퓨터의 서버에는 둘 다 없습니다 |
+
+서비스마다 토큰을 붙여 넣는 방법도 그대로 있습니다. 환경변수 `RAILWAY_TOKEN`이 있으면 로그인보다 먼저 씁니다.
+개인 구글 계정이면 OAuth 동의 화면을 게시하십시오(심사를 받지 않은 상태로 두어도 본인 용도에는 문제없습니다).
+"테스트" 상태로 두면 구글이 7일마다 로그인을 끊습니다.
 
 콘솔은 그 컴퓨터 앞에 앉은 사람을 위한 화면입니다. 서버를 터미널에서 띄웠을 때만 제공합니다. 서비스, 컨테이너,
 프로세스 관리자로 띄운 서버에는 없습니다(`KNOWLEDGE_CONSOLE=on`으로 켤 수 있습니다). 같은 컴퓨터의 브라우저가
@@ -396,11 +413,11 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
 | `knowledge` | `search_knowledge`, `read_document` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다 |
-| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | Google 서비스 계정이나 OAuth refresh token. 폴더나 문서를 그 계정에 공유하면 검색됩니다 |
+| `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | 콘솔에서 한 구글 로그인(본인 Drive를 읽습니다)이나 Google 서비스 계정. 서비스 계정은 폴더나 문서를 그 계정에 공유하면 검색됩니다. 환경변수의 OAuth refresh token도 됩니다 |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
-| `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | `RAILWAY_TOKEN` |
+| `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | 콘솔에서 한 로그인이나 `RAILWAY_TOKEN` |
 | 코어 | `ping` | 없음. 내가 누구로 접속했는지, 어떤 플러그인이 켜졌는지 보여 줍니다 |
 
 </details>
@@ -641,6 +658,7 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 7. 데이터베이스 연결은 그 데이터베이스 사용자가 읽을 수 있는 것을 모두 읽습니다. 읽기만 되는 전용 사용자를 만드십시오. superuser와 애플리케이션이 쓰는 사용자는 쓰지 마십시오. `explore`를 켤 때는 허용된 사람 모두가 봐도 되는 것만 읽는 사용자를 쓰십시오. tools 목록이 없는 member는 모든 연결을 쓸 수 있습니다.
 8. 콘솔은 관리자 권한으로 설정을 바꾸고 도구를 실행합니다. 그래서 그 컴퓨터 앞에 앉은 사람에게만 엽니다. 서버를 터미널에서 띄웠거나 `KNOWLEDGE_CONSOLE=on`일 때만 있습니다. 다른 주소에서 온 요청, 전달 헤더가 붙은 요청, `localhost`가 아닌 호스트 이름으로 온 요청, 브라우저가 다른 사이트에서 왔다고 표시한 요청은 거절합니다. API는 콘솔 토큰이 있어야 하고, 화면은 서버 밖에서 아무것도 불러오지 않습니다. 알아 둘 한계가 둘 있습니다. 같은 컴퓨터의 리버스 프록시가 전달 헤더를 붙이지 않으면(nginx 기본 `proxy_pass`) 로컬 브라우저와 구별되지 않습니다. 서버에서는 콘솔을 꺼 두십시오. 여러 사람이 쓰는 컴퓨터에서는 모든 사용자가 `localhost`에 닿습니다. 이때 막아 주는 것은 소유자만 읽는 토큰 파일입니다.
 9. 콘솔 토큰은 관리자의 열쇠입니다. 가진 사람은 모든 설정을 바꿀 수 있고, `.env`의 비밀값을 자기가 고른 주소로 보내는 연결을 만들 수 있습니다(연결이 원래 하는 일입니다). 콘솔은 이 범위를 그 폴더의 `.env`에 있는 비밀값으로 좁힙니다. 서버 자신의 자격 증명 이름이나 서버가 셸에서 물려받기만 한 변수를 가리키는 `${NAME}`은 거절합니다.
+10. 콘솔에서 한 로그인은 데이터 폴더에 저장합니다(`railway-login.json`, `google-login.json`). 데이터 파일처럼 소유자만 읽을 수 있습니다. 구글 로그인은 로그인한 사람의 권한으로 읽습니다. 고른 폴더에 든 것은 서버의 모든 사용자에게 보이므로, 모두가 봐도 되는 폴더만 고르십시오. 로그인 뒤 브라우저가 돌아오는 주소는 콘솔이 몇 분 안에 시작한 로그인의 응답만 받고, 스스로는 아무것도 저장하지 않습니다.
 
 ## 파일 구성
 

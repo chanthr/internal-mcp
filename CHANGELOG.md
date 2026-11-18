@@ -42,6 +42,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Connect a service without copying a token.** In the console: *Sign in with Railway* (the server registers
+  itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself), *Sign in
+  with Google* for Drive (through an OAuth client of your own Google Cloud project, made once; the server reads
+  your My Drive or the folders you list), *Account with gcloud* (creates the Drive service account and its key
+  without stopping the server while gcloud works), *Use the gh login* for GitHub, and for Slack a link that opens
+  "Create an app" with the read-only permissions filled in. A token can still be pasted for each, and
+  `RAILWAY_TOKEN` wins over a sign-in. A sign-in is kept owner-only in the data directory and goes, together with
+  the permission at the other site, when the service is disconnected.
 - **A console in the browser.** Start the server in a terminal and open the address it prints
   (`npx @chnxthr/knowledge-mcp` in any folder opens it for you). Add folders, connect Drive, Slack, GitHub,
   Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
@@ -104,6 +112,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **The line the generator prints for Claude Code broke in a folder with a space in its path.** Pasted as
+  printed, `claude mcp add` took half the path as the command and the server never started ("ENOENT"). Paths are
+  quoted now, Node is named by its full path, and the entry is added for the user rather than for the folder
+  the command happened to be run in. The setup wizard quotes its line the same way.
 - **The built-in index no longer reads everything to answer small questions.** Asking how many passages have a
   vector loaded every vector into memory, and it was asked on every search and every status read. With 90,000
   passages the server held 1.7 GB after start and 5.6 GB while vectors were being made; it now holds 180 MB after

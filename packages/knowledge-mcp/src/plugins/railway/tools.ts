@@ -1,11 +1,13 @@
 /**
- * Our own Railway GraphQL tools: they call backboard.railway.app/graphql/v2 directly.
+ * Our own Railway GraphQL tools: they call Railway's public GraphQL API directly.
  *
  * Why our own tools: the Railway remote MCP (mcp.railway.com) is OAuth-only (it rejects project tokens), so it
  * cannot be used on an unattended server. The public GraphQL API supports token auth, so it is called directly.
  *
- * RAILWAY_TOKEN: listing every project needs a team/account token.
- *   A project token is blocked from me/projects, so it can only read one project (project(id)).
+ * What it calls with (login.ts): RAILWAY_TOKEN when set, else the sign-in made from the console.
+ *   RAILWAY_TOKEN: listing every project needs a team/account token. A project token is blocked from
+ *   me/projects, so it can only read one project (project(id)).
+ *   A sign-in sees the workspaces the person picked on Railway's consent screen, as a viewer.
  *
  * 3 tools: railway_services (list) -> railway_deployments (deploy status) -> railway_logs (logs)
  */
@@ -13,25 +15,19 @@ import { z } from 'zod';
 import { defineTool } from '../../plugin/define.js';
 import { getAuth } from '../../core/context.js';
 import { maskString } from '../../core/log_mask.js';
-
-const RAILWAY_API = 'https://backboard.railway.app/graphql/v2';
-
-function railwayHeaders(): Record<string, string> {
-  const token = process.env.RAILWAY_TOKEN || process.env.RAILWAY_MCP_TOKEN;
-  if (!token) throw new Error('[railway] RAILWAY_TOKEN (or RAILWAY_MCP_TOKEN) is not set');
-  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
-}
+import { railwayAuth } from './login.js';
 
 const RAILWAY_TIMEOUT_MS = 20_000;
 
 async function gql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  const { token, api } = await railwayAuth();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), RAILWAY_TIMEOUT_MS);
   let r: Response;
   try {
-    r = await fetch(RAILWAY_API, {
+    r = await fetch(api, {
       method: 'POST',
-      headers: railwayHeaders(),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, variables }),
       signal: ctrl.signal,
     });

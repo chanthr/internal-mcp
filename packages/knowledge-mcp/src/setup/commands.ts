@@ -23,6 +23,7 @@ import { parseArgs } from 'node:util';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
+import { railwayAuth, railwaySignedIn } from '../plugins/railway/login.js';
 import { checkDrive, checkDriveCredentials, checkEmbedding, checkGithub, checkRailway, checkSlack } from './checks.js';
 import { updateEnvFile } from './envfile.js';
 import { ConnectionsSchema, DataToolsSchema, dataConfigProblems, envRefs, exploreToolNames, type ConnectionConfig, type DataToolConfig } from '../connections/schema.js';
@@ -251,7 +252,13 @@ async function check(ctx: CommandContext): Promise<number> {
   else say('· github      not configured');
 
   if (has('RAILWAY_TOKEN')) run('railway', async () => (await checkRailway(env.RAILWAY_TOKEN!.trim(), { apiBase: ctx.endpoints?.railway })).who);
-  else say('· railway     not configured');
+  else if (railwaySignedIn()) {
+    // Signed in from the console: the check gets a token the way the tools do, renewing it when the hour is up.
+    run('railway', async () => {
+      const auth = await railwayAuth();
+      return `${(await checkRailway(auth.token, { apiBase: ctx.endpoints?.railway ?? auth.api })).who} (signed in from the console)`;
+    });
+  } else say('· railway     not configured');
 
   for (const slot of slots) for (const line of await slot) ctx.out(line);
   if (checked === 0) ctx.out(`Nothing is configured yet. Run \`${cli('setup')}\`.`);
@@ -282,17 +289,17 @@ async function drive(argv: string[], ctx: CommandContext): Promise<number> {
   }
   if (!values.gcloud) throw new Error('setup drive needs --gcloud or --key <file>');
 
-  if (!hasTool(exec, 'gcloud')) {
+  if (!(await hasTool(exec, 'gcloud'))) {
     ctx.out('✗ The gcloud CLI is not installed. Install it (https://cloud.google.com/sdk/docs/install), then run this again.');
     return 1;
   }
-  const account = gcloudAccount(exec);
+  const account = await gcloudAccount(exec);
   if (!account) {
     ctx.out('✗ gcloud is not signed in. The person who owns the Google account must run this in a terminal (it opens a browser):');
     ctx.out('    gcloud auth login');
     return 1;
   }
-  const project = values.project ?? gcloudDefaultProject(exec);
+  const project = values.project ?? await gcloudDefaultProject(exec);
   if (!project) {
     ctx.out('✗ No project chosen. Pass --project <id> (list them with: gcloud projects list).');
     return 1;
@@ -306,7 +313,7 @@ async function drive(argv: string[], ctx: CommandContext): Promise<number> {
     ctx.out('Nothing was created. Show this to the account owner, then run the same command with --yes.');
     return 2;
   }
-  const r = createDriveServiceAccount(exec, plan);
+  const r = await createDriveServiceAccount(exec, plan);
   updateEnvFile(envPath, { GOOGLE_APPLICATION_CREDENTIALS: plan.keyPath });
   ctx.out(`✓ ${r.created ? 'Created' : 'Reused'} ${r.email}. Key saved to ${plan.keyPath}, path saved to ${envPath}.`);
   // A key that was created a moment ago can be refused for a few seconds.
@@ -330,7 +337,7 @@ async function github(argv: string[], ctx: CommandContext): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { 'from-gh': { type: 'boolean' } } });
   if (!values['from-gh']) throw new Error(`setup github needs --from-gh (a token you type goes through \`${cli('setup')}\`)`);
   const exec = ctx.exec ?? systemExec;
-  const token = hasTool(exec, 'gh') ? ghToken(exec) : null;
+  const token = (await hasTool(exec, 'gh')) ? await ghToken(exec) : null;
   if (!token) {
     ctx.out('✗ The gh CLI is not installed or not signed in. The account owner runs: gh auth login');
     return 1;

@@ -16,7 +16,8 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import type { Exec } from '../setup/auto.js';
+import { shellQuote } from '../core/invocation.js';
+import type { SyncExec } from '../setup/auto.js';
 
 /** How a client starts this server over stdio. */
 export interface Entry {
@@ -51,11 +52,11 @@ export interface ClientContext {
   home: string;
   platform: NodeJS.Platform;
   env: NodeJS.ProcessEnv;
-  exec: Exec;
+  exec: SyncExec;
 }
 
 /** Commands of other programs get a short time: a click must not hold the server for minutes. */
-const quickExec: Exec = (cmd, args) => {
+const quickExec: SyncExec = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 20_000 });
   if (r.error) return { status: 127, stdout: '', stderr: r.error.message };
   return { status: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -112,7 +113,6 @@ function vscodeUserConfig(ctx: ClientContext): string {
   return join(ctx.env.XDG_CONFIG_HOME?.trim() || join(ctx.home, '.config'), 'Code', 'User', 'mcp.json');
 }
 
-const shellQuote = (a: string) => (/[^A-Za-z0-9_@%+=:,./-]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a);
 const server = (e: Entry) => ({ command: e.command, args: e.args, ...(e.env ? { env: e.env } : {}) });
 const envFlags = (e: Entry) => Object.entries(e.env ?? {}).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 const claudeAddArgs = (e: Entry) => ['mcp', 'add', '--scope', 'user', e.name, ...envFlags(e), '--', e.command, ...e.args];

@@ -223,22 +223,22 @@ test('gcloud: the plan lists the exact commands, and the account gets no role', 
   assert.ok(!cmds.some((c) => /add-iam-policy-binding|roles\//.test(c)), 'no role is granted');
 });
 
-test('gcloud: creates the account once, reuses an existing one, and explains a blocked key', () => {
+test('gcloud: creates the account once, reuses an existing one, and explains a blocked key', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-gc-'));
   const plan = { project: 'acme-lab', name: 'knowledge-mcp-drive', keyPath: join(dir, 'k.json') };
   const fresh = fakeCli();
-  assert.deepEqual(auto.createDriveServiceAccount(fresh.exec, plan), { email: 'knowledge-mcp-drive@acme-lab.iam.gserviceaccount.com', created: true });
+  assert.deepEqual(await auto.createDriveServiceAccount(fresh.exec, plan), { email: 'knowledge-mcp-drive@acme-lab.iam.gserviceaccount.com', created: true });
   assert.ok(fresh.calls.some((c) => c.includes('service-accounts create knowledge-mcp-drive')));
   const again = fakeCli({ saExists: true });
-  assert.equal(auto.createDriveServiceAccount(again.exec, plan).created, false);
+  assert.equal((await auto.createDriveServiceAccount(again.exec, plan)).created, false);
   assert.ok(!again.calls.some((c) => c.includes('service-accounts create')));
   const blocked = fakeCli({ fail: { match: 'keys create', stderr: 'ERROR: (gcloud.iam.service-accounts.keys.create) FAILED_PRECONDITION: Key creation is not allowed on this service account.\n- constraints/iam.disableServiceAccountKeyCreation' } });
-  assert.throws(() => auto.createDriveServiceAccount(blocked.exec, plan), /organization blocks service account keys/);
+  await assert.rejects(() => auto.createDriveServiceAccount(blocked.exec, plan), /organization blocks service account keys/);
   const noBilling = fakeCli({ fail: { match: 'services enable', stderr: 'ERROR: Billing account for project is not found.' } });
-  assert.throws(() => auto.createDriveServiceAccount(noBilling.exec, plan), /no billing account/);
-  assert.throws(() => auto.createDriveServiceAccount(fresh.exec, { ...plan, name: 'Bad Name' }), /6-30 characters/);
+  await assert.rejects(() => auto.createDriveServiceAccount(noBilling.exec, plan), /no billing account/);
+  await assert.rejects(() => auto.createDriveServiceAccount(fresh.exec, { ...plan, name: 'Bad Name' }), /6-30 characters/);
   writeFileSync(plan.keyPath, '{}');
-  assert.throws(() => auto.createDriveServiceAccount(fresh.exec, plan), /already exists/);
+  await assert.rejects(() => auto.createDriveServiceAccount(fresh.exec, plan), /already exists/);
 });
 
 test('wizard + gcloud: shows the commands, creates nothing without a yes, and falls back to a key file', async () => {

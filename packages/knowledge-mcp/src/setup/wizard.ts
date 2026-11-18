@@ -28,7 +28,7 @@ import {
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
-import { cli } from '../core/invocation.js';
+import { cli, shellQuote } from '../core/invocation.js';
 
 export interface SetupIO {
   /** Print a line. */
@@ -153,17 +153,17 @@ function readConfig(path: string): Record<string, any> {
  * fails (the caller then falls back to asking for a key file).
  */
 async function driveKeyWithGcloud(io: SetupIO, exec: Exec, dir: string): Promise<string | null> {
-  let account = gcloudAccount(exec);
+  let account = await gcloudAccount(exec);
   if (!account) {
     io.say('  gcloud is not signed in. In another terminal run:  gcloud auth login');
     await io.ask('  Press Enter when you are signed in (or Enter now to use a key file instead):', '');
-    account = gcloudAccount(exec);
+    account = await gcloudAccount(exec);
     if (!account) return null;
   }
   io.say(`  Signed in to Google Cloud as ${account}.`);
   let projects;
   try {
-    projects = gcloudProjects(exec);
+    projects = await gcloudProjects(exec);
   } catch (e) {
     io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -172,7 +172,7 @@ async function driveKeyWithGcloud(io: SetupIO, exec: Exec, dir: string): Promise
     io.say('  This account has no Google Cloud project. Create one first:  gcloud projects create <id>');
     return null;
   }
-  const preset = gcloudDefaultProject(exec);
+  const preset = await gcloudDefaultProject(exec);
   const shown = projects.slice(0, 15);
   io.say('  Which project should hold the service account?');
   shown.forEach((p, i) => io.say(`    ${i + 1}. ${p.id}${p.name !== p.id ? `  (${p.name})` : ''}${p.id === preset ? '  [current]' : ''}`));
@@ -190,7 +190,7 @@ async function driveKeyWithGcloud(io: SetupIO, exec: Exec, dir: string): Promise
   io.say(`  The account ${serviceAccountEmail(plan)} gets no project role. It can only read what you share with it in Drive.`);
   if (!yes(await io.ask('  Create it now? (y/N)', 'n'))) return null;
   try {
-    const r = createDriveServiceAccount(exec, plan);
+    const r = await createDriveServiceAccount(exec, plan);
     io.say(`  ✓ ${r.created ? 'Created' : 'Reused'} ${r.email}, key saved to ${plan.keyPath}`);
     return plan.keyPath;
   } catch (e) {
@@ -259,13 +259,13 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     let keyPath: string | null = null;
     let found: DriveCheck | null = null;
     let gcloudUser: string | null = null;
-    if (hasTool(exec, 'gcloud')) {
+    if (await hasTool(exec, 'gcloud')) {
       io.say('  The gcloud CLI is installed, so this can be done for you:');
       io.say('    1. Create the service account and key with gcloud (you only sign in)');
       io.say('    2. I already have a key file');
       if ((await io.ask('  Choose 1 or 2:', '1')) === '1') {
         keyPath = await driveKeyWithGcloud(io, exec, dir);
-        if (keyPath) gcloudUser = gcloudAccount(exec);
+        if (keyPath) gcloudUser = await gcloudAccount(exec);
       }
     } else {
       io.say('  Tip: with the gcloud CLI installed (cloud.google.com/sdk), setup can create the key for you.');
@@ -406,7 +406,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     io.say('GitHub');
     const exec = opts.exec ?? systemExec;
     let fromGh: string | null = null;
-    const gh = hasTool(exec, 'gh') ? ghToken(exec) : null;
+    const gh = (await hasTool(exec, 'gh')) ? await ghToken(exec) : null;
     if (gh) {
       io.say('  The gh CLI is signed in. Its token can be reused, but it can do everything your gh login can (including');
       io.say('  writing). This server only reads, yet a fine-grained read-only token is the safer choice.');
@@ -582,7 +582,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   const serve = opts.serveCommand ?? ['npx', 'knowledge-mcp', 'serve', '--stdio'];
   const name = String(config.branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'knowledge';
   const addArgs = ['mcp', 'add', name, '--', ...serve];
-  io.say(`  Claude Code (this machine):  claude ${addArgs.join(' ')}`);
+  io.say(`  Claude Code (this machine):  claude ${addArgs.map(shellQuote).join(' ')}`);
   io.say('  Any client over HTTP:        start the server, then use http://localhost:8080/mcp with header "Authorization: Bearer <key>"');
   if (opts.canRunClient !== false && spawnSync('claude', ['--version'], { stdio: 'ignore' }).status === 0) {
     if (yes(await io.ask('  Claude Code is installed. Add this server to it now? (y/N)', 'n'))) {
