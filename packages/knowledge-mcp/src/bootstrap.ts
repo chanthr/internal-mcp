@@ -13,6 +13,13 @@ import { config as loadDotenv } from 'dotenv';
 import { candidates } from './core/paths.js';
 import { installLogMasking } from './core/log_mask.js';
 
+/**
+ * The environment as the process received it, before any .env file was read. A restarted server must be started
+ * with this one: values from .env do not replace what is already set, so a child that inherited the loaded values
+ * would never see an edited .env.
+ */
+export const ORIGINAL_ENV: NodeJS.ProcessEnv = { ...process.env };
+
 const explicit = process.env.MCP_ENV_FILE?.trim();
 if (explicit && explicit !== 'none' && !existsSync(explicit)) {
   console.error(`[knowledge-mcp] MCP_ENV_FILE points to a file that does not exist: ${explicit}`);

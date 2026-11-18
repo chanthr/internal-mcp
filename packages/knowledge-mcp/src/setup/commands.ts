@@ -68,7 +68,7 @@ export const SETUP_USAGE = `setup                      guided setup (asks questi
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-function readConfigFile(dir: string): Record<string, any> {
+export function readConfigFile(dir: string): Record<string, any> {
   const path = join(dir, 'mcp.config.json');
   if (!existsSync(path)) return {};
   try {
@@ -79,14 +79,14 @@ function readConfigFile(dir: string): Record<string, any> {
 }
 
 /** drive.trustedOwners as the server will read it: env DRIVE_TRUSTED_OWNERS first, then mcp.config.json. */
-function trustedList(ctx: CommandContext): string[] {
+export function trustedList(ctx: Pick<CommandContext, 'dir' | 'env'>): string[] {
   const env = (ctx.env ?? process.env).DRIVE_TRUSTED_OWNERS;
   const list: unknown = env !== undefined ? env.split(',') : readConfigFile(ctx.dir).drive?.trustedOwners;
   return (Array.isArray(list) ? list : []).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
 }
 
 /** Add entries to drive.trustedOwners in mcp.config.json. Returns the entries that were new. */
-function addTrusted(dir: string, entries: string[]): string[] {
+export function addTrusted(dir: string, entries: string[]): string[] {
   const config = readConfigFile(dir);
   const current: string[] = Array.isArray(config.drive?.trustedOwners) ? config.drive.trustedOwners.map((x: unknown) => String(x).toLowerCase()) : [];
   const added = [...new Set(entries.map((e) => e.trim().toLowerCase()).filter(Boolean))].filter((e) => !current.includes(e));
@@ -98,7 +98,7 @@ function addTrusted(dir: string, entries: string[]): string[] {
 }
 
 /** Folders listed in mcp.config.json, with absolute paths. */
-function configuredFolders(dir: string): Array<{ path: string; name?: string }> {
+export function configuredFolders(dir: string): Array<{ path: string; name?: string }> {
   const list: unknown = readConfigFile(dir).folders;
   return (Array.isArray(list) ? list : [])
     .filter((f): f is { path: string; name?: string } => !!f && typeof (f as { path?: unknown }).path === 'string')
@@ -343,10 +343,10 @@ async function embeddings(argv: string[], ctx: CommandContext): Promise<number> 
 }
 
 /** Names that are plugin ids already; a connection cannot take one (its name is its permission group). */
-const BUILT_IN = new Set(['knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
+export const BUILT_IN = new Set(['knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
 
 /** `connections` and `tools` of mcp.config.json, checked the way the server checks them at boot. */
-function readDataConfig(dir: string): { connections: Record<string, ConnectionConfig>; tools: DataToolConfig[]; problems: string[] } {
+export function readDataConfig(dir: string): { connections: Record<string, ConnectionConfig>; tools: DataToolConfig[]; problems: string[] } {
   const raw = readConfigFile(dir);
   const c = ConnectionsSchema.safeParse(raw.connections ?? {});
   const t = DataToolsSchema.safeParse(raw.tools ?? []);
@@ -369,7 +369,7 @@ function pairs(list: string[] | undefined, sep: string, flag: string): Record<st
 }
 
 /** A header or query value that is a secret must be written as ${ENV_NAME}: the config file is not a place for secrets. */
-function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
+export function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
   for (const [k, v] of Object.entries(values)) {
     if (/authorization|api[-_]?key|token|secret|password|cookie/i.test(k) && !/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(v)) {
       throw new Error(`${what} "${k}" looks like a secret. Write its value as \${ENV_NAME} (for example ${k}: Bearer \${API_TOKEN}) and put the value in .env with: ${cli('setup secret API_TOKEN')}`);

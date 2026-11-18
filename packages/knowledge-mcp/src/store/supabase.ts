@@ -10,7 +10,7 @@ import { getConfig } from '../core/config.js';
 import { getSupabase } from './supabase_client.js';
 import { generateKey, hashKey, toRole } from './keys.js';
 import type {
-  KeyCheck, KeyInfo, NewKey, RefreshConsume, SlackChannelPatch, SlackChannelRow, Store, ToolCallRecord, UserRecord,
+  KeyCheck, KeyInfo, NewKey, RefreshConsume, SlackChannelPatch, SlackChannelRow, Store, ToolCallRecord, ToolCallRow, UserRecord,
 } from './types.js';
 
 const SLACK_COLS = 'id,channel_name,channel_id,purpose,category,enabled,sort_order';
@@ -192,6 +192,23 @@ export class SupabaseStore implements Store {
     const { data, error } = await this.t('mcp_tool_calls').delete().lt('created_at', cutoff).select('id');
     if (error) fail('prune tool calls', error);
     return (data ?? []).length;
+  }
+
+  async recentToolCalls(limit: number): Promise<ToolCallRow[]> {
+    const { data, error } = await this.t('mcp_tool_calls')
+      .select('tool, email, role, ok, error, duration_ms, created_at')
+      .order('created_at', { ascending: false })
+      .limit(Math.max(1, Math.min(500, Math.floor(limit))));
+    if (error) fail('read tool calls', error);
+    return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+      tool: String(r.tool),
+      email: (r.email as string | null) ?? null,
+      role: (r.role as string | null) ?? null,
+      ok: r.ok === true,
+      error: (r.error as string | null) ?? null,
+      durationMs: Number(r.duration_ms ?? 0),
+      at: String(r.created_at),
+    }));
   }
 
   // ── OAuth ──

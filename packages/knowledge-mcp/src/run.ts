@@ -20,7 +20,9 @@ import { VERSION } from './version.js';
 import type { Plugin } from './plugin/define.js';
 import { Registry } from './plugin/registry.js';
 import { builtinPlugins } from './plugins/index.js';
-import { cli } from './core/invocation.js';
+import { cli, stdioCommand } from './core/invocation.js';
+import { shouldSupervise, supervise } from './admin/supervisor.js';
+import { spawn } from 'node:child_process';
 
 export interface RunOptions {
   /** Plugins to serve. Default: the built-in Drive, Slack, GitHub and Railway plugins. */
@@ -55,7 +57,8 @@ Usage: knowledge-mcp <command> [options]
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
   setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
                                       Setup steps that ask nothing (for scripts and AI agents)
-  serve [--stdio]                     Start the server (HTTP on $PORT, default 8080)
+  serve [--stdio] [--open]            Start the server (HTTP on $PORT, default 8080). On your own machine it also
+                                      serves the console at /console/ (--open opens it; KNOWLEDGE_CONSOLE=off turns it off)
   keys create [--email E] [--role R] [--label L] [--expires 90d]
                                       Create an API key and print it once
   keys list                           List keys (never the key itself)
@@ -68,8 +71,37 @@ Usage: knowledge-mcp <command> [options]
 
 Docs: https://github.com/chanthr/internal-mcp`;
 
+/** Is this `serve` an HTTP server (not a stdio session)? */
+function servesHttp(argv: string[]): boolean {
+  return !argv.includes('--stdio') && (process.env.MCP_TRANSPORT || 'http').toLowerCase() !== 'stdio';
+}
+
+/** Open a page in the person's browser. Best effort: a missing opener is not an error. */
+function openInBrowser(url: string): void {
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+  try {
+    spawn(cmd as string, args as string[], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+  } catch {
+    /* no browser to open */
+  }
+}
+
+/**
+ * Run the HTTP server under the supervisor, so a change saved in the console takes effect by itself.
+ * `open`: also open the console in the browser the first time the server is up.
+ */
+async function serveSupervised(open: boolean): Promise<never> {
+  return supervise(({ port, consoleUrl }, first) => {
+    if (!consoleUrl || !first) return;
+    // The address carries the access token, so it is printed only to a terminal, never into a log file.
+    if (process.stderr.isTTY) info(`[knowledge-mcp] console · ${consoleUrl}`);
+    else info(`[knowledge-mcp] console · http://localhost:${port}/console/ (the access token is in the data directory, file console-token)`);
+    if (open && process.stderr.isTTY && !process.env.CI) openInBrowser(consoleUrl);
+  });
+}
+
 async function cmdServe(registry: Registry, argv: string[]): Promise<void> {
-  const { values } = parseArgs({ args: argv, options: { stdio: { type: 'boolean' } }, allowPositionals: false });
+  const { values } = parseArgs({ args: argv, options: { stdio: { type: 'boolean' }, open: { type: 'boolean' } }, allowPositionals: false });
   if (values.stdio) process.env.MCP_TRANSPORT = 'stdio';
   const transport = (process.env.MCP_TRANSPORT || 'http').toLowerCase();
   if (transport === 'stdio') {
@@ -267,16 +299,6 @@ async function cmdDoctor(registry: Registry): Promise<void> {
   }
 }
 
-/** How an AI client should start this server over stdio: the project's own server when there is one. */
-function stdioCommand(dir: string): string[] {
-  const tsx = join(dir, 'node_modules', '.bin', 'tsx');
-  const own = join(dir, 'src', 'server.ts');
-  if (existsSync(own) && existsSync(tsx)) return [tsx, own, 'serve', '--stdio'];
-  const built = join(dir, 'dist', 'server.js');
-  if (existsSync(built)) return ['node', built, 'serve', '--stdio'];
-  return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
-}
-
 async function cmdSetup(argv: string[]): Promise<void> {
   if (argv.length > 0) {
     // Commands that ask nothing: for scripts and for AI agents (see AGENTS.md in a generated project).
@@ -333,6 +355,9 @@ export async function run(opts: RunOptions = {}): Promise<void> {
     if (cmd === 'setup') return await cmdSetup(rest);
     if (cmd === 'keys') return await cmdKeys(rest);
     if (cmd === 'users') return await cmdUsers(rest);
+    // An HTTP server on a person's machine runs under a small supervisor (see admin/supervisor.ts). Started with
+    // no arguments at all, the console is opened in the browser as well.
+    if (cmd === 'serve' && servesHttp(rest) && shouldSupervise()) return await serveSupervised(argv.length === 0 || rest.includes('--open'));
     const registry = new Registry(opts.plugins ?? builtinPlugins);
     if (cmd === 'serve' || cmd === '--stdio') return await cmdServe(registry, cmd === '--stdio' ? ['--stdio'] : rest);
     if (cmd === 'doctor') return await cmdDoctor(registry);

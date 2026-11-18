@@ -23,6 +23,8 @@ import { maskedSecretCount } from '../core/log_mask.js';
 import { getConfig, configSource } from '../core/config.js';
 import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import { VERSION } from '../version.js';
+import { consoleUrl, mountConsole } from '../admin/routes.js';
+import { followSupervisor, reportReady } from '../admin/supervisor.js';
 import type { Registry } from '../plugin/registry.js';
 import { resolveUser } from './identity.js';
 import { createMcpServer } from './mcp.js';
@@ -123,6 +125,10 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   app.get('/health', (_req, res) => {
     res.json({ ok: true, server: 'knowledge-mcp', version: VERSION });
   });
+
+  // The local console (a page for the setup, on this machine only). KNOWLEDGE_CONSOLE=off leaves it out.
+  followSupervisor();
+  const consoleOn = mountConsole(app, registry);
 
   // ── OAuth 2.1 (for Claude app custom connectors), only when the env is complete (otherwise Bearer only) ──
   const oauthEnabled = isOAuthConfigured();
@@ -481,6 +487,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   const address = httpServer.address();
   const port = typeof address === 'object' && address ? address.port : wanted;
   console.error(`[knowledge-mcp] HTTP mode · listening on :${port} · version=${VERSION}`);
+  reportReady({ port, consoleUrl: consoleOn ? consoleUrl(port) : null });
 
   // External connections start in the background after the port is open, so /health comes up first even when upstream
   // or Qdrant does not respond

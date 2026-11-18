@@ -11,7 +11,8 @@
  *   started by another npm script              npx knowledge-mcp setup check   (the binary in node_modules)
  *   anything else                             knowledge-mcp setup check
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const BINARY = 'knowledge-mcp';
 const PACKAGE = '@chnxthr/knowledge-mcp';
@@ -60,4 +61,14 @@ export function cli(command: string, env: NodeJS.ProcessEnv = process.env): stri
   }
   if (env.npm_command === 'exec') return `npx ${PACKAGE} ${command}`;
   return `${BINARY} ${command}`;
+}
+
+/** How an AI client starts this server over stdio from the folder `dir`: the project's own server when there is one. */
+export function stdioCommand(dir: string): string[] {
+  const tsx = join(dir, 'node_modules', '.bin', 'tsx');
+  const own = join(dir, 'src', 'server.ts');
+  if (existsSync(own) && existsSync(tsx)) return [tsx, own, 'serve', '--stdio'];
+  const built = join(dir, 'dist', 'server.js');
+  if (existsSync(built)) return ['node', built, 'serve', '--stdio'];
+  return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
 }
