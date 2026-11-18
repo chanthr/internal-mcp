@@ -216,7 +216,7 @@ export async function callHttp(call: HttpCall, env: NodeJS.ProcessEnv = process.
       return mask(clip(text), secrets);
     }
     if (request.pick) value = pick(value, request.pick);
-    return mask(clip(typeof value === 'string' ? value : JSON.stringify(value, null, 2)), secrets);
+    return mask(clip(typeof value === 'string' ? value : JSON.stringify(value)), secrets);
   }
   return mask(clip(text), secrets) + note;
 }

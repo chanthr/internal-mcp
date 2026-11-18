@@ -19,6 +19,7 @@ export const pingTool: Tool = {
     'Health check. Verifies the server, your auth and which plugins are on. ' +
     'Call it first when a tool you expect is missing.',
   inputSchema: inputJsonSchema('ping', input) as Tool['inputSchema'],
+  annotations: { readOnlyHint: true },
 };
 
 export function handlePing(registry: Registry, auth: AuthContext, args: unknown) {

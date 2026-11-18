@@ -33,6 +33,7 @@ import { checkConnection, sqlAdapterFor } from '../connections/index.js';
 import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, stringsIn, type ConnectionConfig } from '../connections/schema.js';
 import { embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
 import { reembed } from '../plugins/knowledge/reembed.js';
+import { LOCAL_PREFIX, localFolders } from '../plugins/knowledge/folders.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
@@ -237,7 +238,14 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         store: { kind: store.kind, location: store.location },
         index,
         plugins: registry.status(),
-        folders: configuredFolders(dir).map((f) => ({ path: f.path, name: f.name ?? null, documents: existsSync(f.path) ? countDocuments(f.path) : null })),
+        // Counted in the index (what can be searched), not by walking the folder on every status read.
+        folders: await Promise.all(
+          configuredFolders(dir).map(async (f) => {
+            const known = localFolders().find((k) => k.path === f.path);
+            const documents = !existsSync(f.path) ? null : local && known ? await local.countDocuments(DRIVE_COLLECTION, `${LOCAL_PREFIX}${known.name}/`) : countDocuments(f.path);
+            return { path: f.path, name: f.name ?? null, documents };
+          }),
+        ),
         services: {
           drive: { set: isSet(SERVICE_ENV.drive), trusted: trustedList({ dir }) },
           slack: { set: isSet(SERVICE_ENV.slack) },

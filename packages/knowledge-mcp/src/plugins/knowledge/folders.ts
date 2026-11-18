@@ -25,7 +25,7 @@ import { withLock } from '../../core/lock.js';
 import { isExcludedName } from '../drive/exclude.js';
 import { extractLocalFile, mimeForFileName } from '../drive/extract_text.js';
 import { backfillVectors, deleteFileVectors, indexText } from '../drive/indexer.js';
-import { DRIVE_COLLECTION, ensureCollection, getQdrantClient, vectorProblem } from '../drive/qdrant.js';
+import { DRIVE_COLLECTION, ensureCollection, getLocalIndex, getQdrantClient, vectorProblem } from '../drive/qdrant.js';
 import { embeddingsConfigured } from '../drive/embeddings.js';
 import { MAX_FILE_BYTES } from '../drive/settings.js';
 
@@ -162,6 +162,10 @@ export async function resolveLocalId(id: string): Promise<(LocalFile & { folder:
 
 /** Indexed local documents: id → the modified time recorded when each was indexed. */
 async function indexedLocalDocs(): Promise<Map<string, string>> {
+  // The built-in index answers from its document index. (Paging through every chunk to learn the same thing read
+  // the text of the whole index on every pass.)
+  const local = await getLocalIndex();
+  if (local) return local.documentTimes(DRIVE_COLLECTION, LOCAL_PREFIX);
   const client = await getQdrantClient();
   const out = new Map<string, string>();
   let offset: string | number | null | undefined;
@@ -204,7 +208,7 @@ const noText = new Map<string, string>();
  * removed from the config are deleted.
  */
 export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Promise<FolderScanResult | null> {
-  return withLock('folders-scan', async () => {
+  const result = await withLock('folders-scan', async () => {
     await ensureCollection();
     const folders = localFolders();
     const indexed = await indexedLocalDocs();
@@ -260,16 +264,20 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
       await deleteFileVectors(id);
       r.removed++;
     }
-    try {
-      const problem = embeddingsConfigured() ? await vectorProblem() : null;
-      if (problem) log(`search by meaning is off: ${problem}`);
-      const filled = await backfillVectors();
-      if (filled > 0) log(`added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
-    } catch (e) {
-      log(`adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
-    }
     return r;
   });
+  if (!result) return null;
+  // Vectors come after the pass, with the scan lock let go: making them for a large index takes long, and the next
+  // pass (a file that was just saved) must not wait for it.
+  try {
+    const problem = embeddingsConfigured() ? await vectorProblem() : null;
+    if (problem) log(`search by meaning is off: ${problem}`);
+    const filled = await backfillVectors();
+    if (filled > 0) log(`added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
+  } catch (e) {
+    log(`adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
+  }
+  return result;
 }
 
 let _timer: NodeJS.Timeout | null = null;

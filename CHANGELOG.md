@@ -6,6 +6,15 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **What a model reads costs less.** `search_knowledge` shows two neighbouring parts of a document as one passage
+  instead of twice the same edge, says how many terms of the question each passage holds, calls a poor keyword
+  match weak, and answers a filter that matched nothing with the values that field has. `read_document` reads
+  around a part (`part`, `around`) or continues a long document (`offset`), returns plain text instead of JSON,
+  and its default `maxChars` is 20,000 (was 50,000). Over 24 questions on a 500-file corpus the same documents
+  were found with 22% less text. A tool on a database returns rows as a compact table (column names once, one
+  row per line): about a third of the size of rows as indented objects.
+- **A value a tool returns is sent as compact JSON.** A plugin that returns an object used to get it indented.
+  The value is the same; a client that showed the text to people may want to format it.
 - **`setup check` asks every service at the same time.** The lines come out in the same order; the wait is the
   slowest service, not the sum of all.
 - **Search needs no key: `search_knowledge` replaces `semantic_search_drive`.** The built-in index now holds a
@@ -95,6 +104,20 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **The built-in index no longer reads everything to answer small questions.** Asking how many passages have a
+  vector loaded every vector into memory, and it was asked on every search and every status read. With 90,000
+  passages the server held 1.7 GB after start and 5.6 GB while vectors were being made; it now holds 180 MB after
+  start and 360 MB. Making vectors for those passages (the index's own share, with an instant model) went from
+  80 s to 8 s, a status read from 120 ms to 11 ms, a keyword search from 20 ms to 6 ms, a pass over an unchanged
+  folder from 1.2 s to 0.3 s.
+- **A keyword search with a filter looked only at the best 2,000 matches.** A document further down that passed
+  the filter was not found. The ranking is now read until enough pass.
+- **`knowledge reembed` could leave the index almost without vectors.** Run while another run was filling in
+  vectors, it dropped them and stopped. It now drops nothing unless it is the run that makes the new ones. A
+  large index is also filled in one go, not 20,000 passages per scan.
+- **Text put back together from the index repeated itself.** A PDF or Office document read with `read_document`
+  showed up to 100 tokens twice at every boundary between two parts.
+- **`search_knowledge` no longer offers Drive's `source` labels when Drive is not connected.**
 - **A value written to `.env` stays one variable.** A value with a carriage return, or a quoted value ending in a
   backslash, could run on into the next line of the file when it was read back. Line breaks are now escaped, such
   a value is written without quotes, and one that cannot be written safely is refused.

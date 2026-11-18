@@ -85,6 +85,7 @@ p { margin: 0; }
 .inline { display: flex; align-items: flex-end; gap: 8px; }
 .field-help { color: var(--muted); font-size: 12px; margin-top: -4px; }
 .inline > :first-child { flex: 1; min-width: 0; }
+.inline > :nth-child(2):not(button):not(label) { flex: 2; min-width: 0; }
 .actions { display: flex; align-items: center; gap: 8px; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
 .code-input textarea { font-family: var(--mono); font-size: 12px; line-height: 1.6; }

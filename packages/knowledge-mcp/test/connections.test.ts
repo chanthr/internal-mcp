@@ -146,6 +146,7 @@ const { dataConfigProblems, ConnectionsSchema, DataToolsSchema } = await import(
 const { buildUrl, fillBody, fillPath } = await import('../src/connections/http.js');
 const { checkConnection, closeDataConnections } = await import('../src/connections/index.js');
 const { tableResult } = await import('../src/connections/format.js');
+const { readTable } = await import('./helpers/table.js');
 const { SQLITE_CHILD_SOURCE } = await import('../src/connections/sqlite.js'); // every awaited import stays above the first test
 const { Registry } = await import('../src/plugin/registry.js');
 const { getConfig } = await import('../src/core/config.js');
@@ -163,7 +164,7 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 const json = async (name: string, args: Record<string, unknown> = {}) => {
   const r = await call(name, args);
   assert.equal(r.isError, false, r.text);
-  return JSON.parse(r.text);
+  return readTable(r.text);
 };
 const problems = (connections: unknown, tools: unknown) => dataConfigProblems(ConnectionsSchema.parse(connections), DataToolsSchema.parse(tools)).map((p) => p.message);
 
@@ -415,11 +416,11 @@ test('checkConnection: reachability and whether each query compiles, without run
 
 test('a large answer is cut to fit, and says so', () => {
   const rows = Array.from({ length: 400 }, (_, i) => [i, 'x'.repeat(1000)]);
-  const r = tableResult({ columns: ['id', 'text'], rows, truncated: false }, 5000) as { rowCount: number; truncated?: boolean; note?: string };
+  const r = readTable(tableResult({ columns: ['id', 'text'], rows, truncated: false }, 5000)) as { rowCount: number; truncated?: boolean; note?: string };
   assert.ok(r.rowCount < 400 && r.rowCount > 100);
   assert.equal(r.truncated, true);
   assert.match(r.note!, /the answer was too large/);
-  const long = tableResult({ columns: ['t', 'b', 'd'], rows: [['y'.repeat(5000), new Uint8Array(3), new Date('2026-01-02T03:04:05Z')]], truncated: false }, 10) as { rows: Array<Record<string, string>> };
+  const long = readTable(tableResult({ columns: ['t', 'b', 'd'], rows: [['y'.repeat(5000), new Uint8Array(3), new Date('2026-01-02T03:04:05Z')]], truncated: false }, 10)) as { rows: Array<Record<string, string>> };
   assert.match(long.rows[0].t, /… \[1000 more characters\]$/);
   assert.deepEqual([long.rows[0].b, long.rows[0].d], ['[binary, 3 bytes]', '2026-01-02T03:04:05.000Z']);
   writeFileSync(join(dir, 'unused'), ''); // keep the temp dir import used on every platform
@@ -471,7 +472,7 @@ test('http: a secret of the request never reaches the caller, whatever the API o
   // The same in a successful answer.
   const ok = await call('crm_echo_ok', { team: 'blue' });
   assert.equal(ok.isError, false);
-  assert.match(ok.text, /"authorization": "Bearer \*\*\*"/);
+  assert.match(ok.text, /"authorization":"Bearer \*\*\*"/);
   assert.ok(!ok.text.includes('s3cret-token') && !ok.text.includes('acme'));
   // A line break in a parameter that goes into a header with a secret: the error names the header, not its value.
   const broken = await call('crm_echo', { team: 'a\nb' });
@@ -488,15 +489,26 @@ test('http: a secret of the request never reaches the caller, whatever the API o
 
 test('a single row that is too large is cut to fit, arrays and JSON values included', () => {
   const huge = Array.from({ length: 300000 }, (_, i) => i);
-  const one = tableResult({ columns: ['a', 'j', 'n'], rows: [[huge, { list: huge }, 5]], truncated: false }, 100) as { rows: Array<Record<string, unknown>> };
+  const one = readTable(tableResult({ columns: ['a', 'j', 'n'], rows: [[huge, { list: huge }, 5]], truncated: false }, 100)) as { rows: Array<Record<string, unknown>> };
   assert.ok(JSON.stringify(one).length < 20000);
   assert.match(String(one.rows[0].a), /^\[0,1,2,.*… \[\d+ more characters\]$/);
   assert.equal(one.rows[0].n, 5);
-  assert.deepEqual((tableResult({ columns: ['a'], rows: [[[1, 2, 3]]], truncated: false }, 100) as { rows: unknown[] }).rows, [{ a: [1, 2, 3] }]); // a small one stays an array
+  assert.deepEqual((readTable(tableResult({ columns: ['a'], rows: [[[1, 2, 3]]], truncated: false }, 100)) as { rows: unknown[] }).rows, [{ a: [1, 2, 3] }]); // a small one stays an array
   // Sixty long columns: every value is under the cell limit, the row is not.
-  const wide = tableResult({ columns: Array.from({ length: 60 }, (_, i) => `c${i}`), rows: [Array.from({ length: 60 }, () => 'y'.repeat(3900))], truncated: false }, 100) as { truncated?: boolean };
-  assert.ok(JSON.stringify(wide).length < 201000);
+  const wideText = tableResult({ columns: Array.from({ length: 60 }, (_, i) => `c${i}`), rows: [Array.from({ length: 60 }, () => 'y'.repeat(3900))], truncated: false }, 100);
+  const wide = readTable(wideText) as { truncated?: boolean };
+  assert.ok(wideText.length < 201000);
   assert.equal(wide.truncated, true);
+});
+
+test('rows come back as a compact table: valid JSON, the column names once, one row per line', () => {
+  const text = tableResult({ columns: ['id', 'total', 'note'], rows: [[1, 10.5, 'a "quoted" note'], [2, 20, null]], truncated: false }, 100);
+  assert.equal(text, '{"rowCount":2,"columns":["id","total","note"],"rows":[\n[1,10.5,"a \\"quoted\\" note"],\n[2,20,null]\n]}');
+  assert.deepEqual(readTable(text).rows, [{ id: 1, total: 10.5, note: 'a "quoted" note' }, { id: 2, total: 20, note: null }]);
+  assert.equal(tableResult({ columns: ['n'], rows: [], truncated: false }, 100), '{"rowCount":0,"columns":["n"],"rows":[]}');
+  assert.equal(tableResult({ columns: [], rows: [], truncated: false, changes: 3 }, 100), '{"rowCount":0,"rowsChanged":3}');
+  const cut = JSON.parse(tableResult({ columns: ['n'], rows: [[1], [2]], truncated: true }, 2));
+  assert.deepEqual([cut.truncated, /the limit is 2/.test(cut.note), cut.rows], [true, true, [[1], [2]]]);
 });
 
 // ── A query must not outlive the server that started it ──

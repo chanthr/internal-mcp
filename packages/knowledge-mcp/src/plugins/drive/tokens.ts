@@ -37,14 +37,19 @@ export function tokenText(text: string): string {
 const STOPWORDS = new Set(['the', 'a', 'an', 'of', 'to', 'in', 'on', 'for', 'and', 'or', 'is', 'are', 'was', 'be', 'how', 'what', 'why', 'do', 'does', 'i', 'we', 'it']);
 const MAX_QUERY_TOKENS = 64;
 
+/** The distinct terms a question is searched by: its tokens, without filler words when anything else is left. */
+export function queryTerms(question: string): string[] {
+  const all = [...new Set(tokenize(question))];
+  const useful = all.filter((t) => !STOPWORDS.has(t));
+  return (useful.length ? useful : all).slice(0, MAX_QUERY_TOKENS);
+}
+
 /**
  * An FTS5 MATCH expression for a free-text question: any token may match, ranking (BM25) favours chunks that match
  * more of them and rarer ones. Returns null when the question has nothing to search for.
  */
 export function ftsQuery(question: string): string | null {
-  const all = [...new Set(tokenize(question))];
-  const useful = all.filter((t) => !STOPWORDS.has(t));
-  const tokens = (useful.length ? useful : all).slice(0, MAX_QUERY_TOKENS);
+  const tokens = queryTerms(question);
   if (tokens.length === 0) return null;
   // Quoted so that a token is never read as FTS5 syntax (AND, OR, NEAR, a column name, …).
   return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');

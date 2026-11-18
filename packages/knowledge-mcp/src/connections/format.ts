@@ -1,5 +1,5 @@
 /**
- * Shapes what a database or an API returned into what the model reads: rows as objects, long values cut, the whole
+ * Shapes what a database or an API returned into what the model reads: rows as a compact table, long values cut, the whole
  * answer kept under a size that fits a conversation, and a plain note whenever something was left out.
  */
 
@@ -52,10 +52,21 @@ export function uniqueColumns(columns: string[]): string[] {
   });
 }
 
-/** The answer of a SQL tool. */
-export function tableResult(t: Table, maxRows: number): Record<string, unknown> {
+/**
+ * The answer of a SQL tool, as text for a model to read: valid JSON, with the column names said once and one row
+ * per line.
+ *
+ *   {"rowCount":2,"columns":["id","total"],"rows":[
+ *   [1,10.5],
+ *   [2,20]
+ *   ]}
+ *
+ * Rows as objects repeat every column name on every row, and indenting them spends a line per value: the same hundred
+ * rows took close to three times the room.
+ */
+export function tableResult(t: Table, maxRows: number): string {
   const columns = uniqueColumns(t.columns);
-  let rows = t.rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, cell(r[i])])));
+  let rows = t.rows.map((r) => columns.map((_, i) => cell(r[i])));
   let cut = t.truncated;
   // Keep the whole answer under the size limit by dropping rows from the end.
   let size = JSON.stringify(rows).length;
@@ -69,17 +80,19 @@ export function tableResult(t: Table, maxRows: number): Record<string, unknown> 
     cut = true;
     // One row can be too large by itself (many long columns). Its values are cut further until it fits.
     for (let max = Math.floor(MAX_CELL_CHARS / 4); rows.length === 1 && JSON.stringify(rows).length > MAX_RESULT_CHARS && max >= 16; max = Math.floor(max / 4)) {
-      rows = [Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => [k, cell(v, max)]))];
+      rows = [rows[0].map((v) => cell(v, max))];
     }
   }
-  const out: Record<string, unknown> = { rowCount: rows.length };
-  if (t.changes !== undefined) out.rowsChanged = t.changes;
+  const head: Record<string, unknown> = { rowCount: rows.length };
+  if (t.changes !== undefined) head.rowsChanged = t.changes;
   if (cut) {
-    out.truncated = true;
-    out.note = `Only the first ${rows.length} rows are shown${t.truncated ? ` (the limit is ${maxRows})` : ' (the answer was too large)'}. Narrow the question to see the rest; do not treat these rows as the complete answer.`;
+    head.truncated = true;
+    head.note = `Only the first ${rows.length} rows are shown${t.truncated ? ` (the limit is ${maxRows})` : ' (the answer was too large)'}. Narrow the question to see the rest; do not treat these rows as the complete answer.`;
   }
-  if (columns.length) out.rows = rows;
-  return out;
+  if (columns.length === 0) return JSON.stringify(head);
+  head.columns = columns;
+  const open = JSON.stringify(head).slice(0, -1); // without the closing brace: the rows follow
+  return rows.length ? `${open},"rows":[\n${rows.map((r) => JSON.stringify(r)).join(',\n')}\n]}` : `${open},"rows":[]}`;
 }
 
 /** Text cut at a length, saying how much was left out. */

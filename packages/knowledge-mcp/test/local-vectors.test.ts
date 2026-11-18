@@ -161,3 +161,93 @@ test('keyword index follows edits and deletes; vectors can be added later', asyn
   assert.deepEqual(await index.stats(K), { chunks: 2, withVectors: 1, documents: 2 });
   await index.deleteCollection(K);
 });
+
+test('counts, one document and paging read the indexes, and say the same as reading everything', async () => {
+  const B = 'unit_counts';
+  await client.createCollection(B, { vectors: { size: 4, distance: 'Cosine' } });
+  const points = [];
+  for (let d = 0; d < 30; d++) {
+    for (let c = 0; c < 4; c++) {
+      points.push({
+        id: d * 10 + c + 1,
+        vector: c % 2 ? [1, d, 0, 0] : undefined, // half of the chunks wait for a vector
+        payload: { file_id: `local:f${d % 2 ? 'a' : 'b'}/doc${d}.md`, chunk_index: c, modified_time: `2026-01-${String(d + 1).padStart(2, '0')}`, source: d % 2 ? 'a' : 'b', doc_tags: [`t${d % 3}`], content: `text ${d} ${c}` },
+      });
+    }
+  }
+  await client.upsert(B, { points });
+  assert.deepEqual(await local.stats(B), { chunks: 120, withVectors: 60, documents: 30 });
+  assert.equal((await local.embeddingState(B))!.vectors, 60);
+  assert.equal((await local.missingVectors(B, 1000)).length, 60);
+  assert.equal((await local.missingVectors(B, 7)).length, 7);
+
+  // One folder's documents, and when each was indexed: one row per document.
+  assert.equal(await local.countDocuments(B, 'local:fa/'), 15);
+  const times = await local.documentTimes(B, 'local:fa/');
+  assert.deepEqual([times.size, times.get('local:fa/doc1.md'), times.has('local:fb/doc0.md')], [15, '2026-01-02', false]);
+  assert.equal((await local.documentTimes(B)).size, 30);
+  assert.deepEqual((await local.documentChunks(B, 'local:fa/doc1.md')).map((p) => p?.chunk_index).sort(), [0, 1, 2, 3]);
+  assert.deepEqual((await local.documentChunks(B, 'local:fa/nope.md')).length, 0);
+  // What a filter could be asked for, counted in documents.
+  assert.deepEqual(await local.fieldValues(B, 'doc_tags'), [{ value: 't0', documents: 10 }, { value: 't1', documents: 10 }, { value: 't2', documents: 10 }]);
+  assert.deepEqual(await local.fieldValues(B, 'source'), [{ value: 'a', documents: 15 }, { value: 'b', documents: 15 }]);
+  assert.deepEqual(await local.fieldValues(B, 'doc_tags', 1), [{ value: 't0', documents: 10 }]);
+
+  // Paging with a few fields picked, and through one document.
+  const page = await client.scroll(B, { limit: 3, with_payload: ['file_id', 'chunk_index'] });
+  assert.deepEqual(page.points[0].payload, { file_id: 'local:fb/doc0.md', chunk_index: 0 });
+  assert.notEqual(page.next_page_offset, null);
+  const one = await client.scroll(B, { limit: 100, with_payload: true, filter: { must: [{ key: 'file_id', match: { value: 'local:fa/doc3.md' } }] } });
+  assert.deepEqual([one.points.length, one.next_page_offset, one.points[0].payload?.content], [4, null, 'text 3 0']);
+
+  // The rest get their vectors: nothing is left waiting, and the counts follow.
+  await local.setVectors(B, (await local.missingVectors(B, 1000)).map((m) => ({ id: m.id, vector: [0, 0, 1, 0] })));
+  assert.deepEqual(await local.stats(B), { chunks: 120, withVectors: 120, documents: 30 });
+  assert.equal((await local.missingVectors(B, 10)).length, 0);
+  assert.equal(await local.clearVectors(B, 4), 120);
+  assert.deepEqual([(await local.stats(B)).withVectors, (await local.missingVectors(B, 1000)).length], [0, 120]);
+});
+
+test('vector search returns the best matches in order: the same as scoring every chunk and sorting', async () => {
+  const V = 'unit_topk';
+  await client.createCollection(V, { vectors: { size: 4, distance: 'Cosine' } });
+  let x = 7;
+  const rnd = () => (x = (x * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5;
+  const points = Array.from({ length: 500 }, (_, i) => ({ id: i + 1, vector: [rnd(), rnd(), rnd(), rnd()], payload: { file_id: `f${i}`, source: i % 5 === 0 ? 'rare' : 'common', content: `c${i}` } }));
+  await client.upsert(V, { points });
+  const q = [0.3, -0.2, 0.9, 0.1];
+  const norm = (v: number[]) => Math.sqrt(v.reduce((a, b) => a + b * b, 0));
+  const cos = (v: number[]) => v.reduce((a, b, i) => a + b * q[i], 0) / (norm(v) * norm(q));
+  const expected = points.map((p) => ({ id: p.id, score: cos(p.vector), rare: p.payload.source === 'rare' })).sort((a, b) => b.score - a.score);
+
+  const got = await client.search(V, { vector: q, limit: 25, with_payload: ['content'] });
+  assert.deepEqual(got.map((h) => h.id), expected.slice(0, 25).map((e) => e.id));
+  got.forEach((h, i) => assert.ok(Math.abs(h.score - expected[i].score) < 1e-5, `score ${i}`));
+  assert.equal(got[0].payload?.content, `c${expected[0].id - 1}`); // the text is read for what is returned
+  // With a filter: the best of the chunks that pass.
+  const rare = await client.search(V, { vector: q, limit: 10, filter: { must: [{ key: 'source', match: { value: 'rare' } }] } });
+  assert.deepEqual(rare.map((h) => h.id), expected.filter((e) => e.rare).slice(0, 10).map((e) => e.id));
+  // More asked for than there is, a floor on the score, and nothing asked for.
+  assert.equal((await client.search(V, { vector: q, limit: 10_000 })).length, 500);
+  const above = await client.search(V, { vector: q, limit: 500, score_threshold: 0.5 });
+  assert.equal(above.length, expected.filter((e) => e.score >= 0.5).length);
+  assert.deepEqual(await client.search(V, { vector: q, limit: 0 }), []);
+  // A chunk written after the vectors were read into memory is found by the next search.
+  await client.upsert(V, { points: [{ id: 9001, vector: q, payload: { file_id: 'new', source: 'common', content: 'the query itself' } }] });
+  assert.equal((await client.search(V, { vector: q, limit: 1, with_payload: true }))[0].payload?.content, 'the query itself');
+});
+
+test('keyword search with a filter finds a match that is far down the ranking', async () => {
+  const K = 'unit_deep';
+  await client.createCollection(K, { vectors: { size: 4, distance: 'Cosine' } });
+  // 2,500 short chunks say "alpha" twice. One long chunk of another source says it once, so it ranks below all of them.
+  const common = Array.from({ length: 2500 }, (_, i) => ({ id: i + 1, payload: { file_id: `c${i}`, source: 'common', content: 'alpha alpha in a short chunk' } }));
+  for (let i = 0; i < common.length; i += 500) await client.upsert(K, { points: common.slice(i, i + 500) });
+  await client.upsert(K, { points: [{ id: 9000, payload: { file_id: 'r', source: 'rare', content: `alpha once, then ${'many other words that make this chunk long '.repeat(8)}` } }] });
+  const top = await local.keywordSearch(K, { query: 'alpha', limit: 5 });
+  assert.ok(top.every((h) => h.payload?.source === 'common'));
+  const hits = await local.keywordSearch(K, { query: 'alpha', limit: 5, filter: { must: [{ key: 'source', match: { value: 'rare' } }] } });
+  assert.deepEqual(hits.map((h) => h.payload?.file_id), ['r']);
+  assert.deepEqual(await local.keywordSearch(K, { query: 'alpha', limit: 5, filter: { must: [{ key: 'source', match: { value: 'nobody' } }] } }), []);
+});
+
