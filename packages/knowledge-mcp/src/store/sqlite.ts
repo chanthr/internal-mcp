@@ -13,7 +13,7 @@ import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/share
 import { dataDir } from '../core/paths.js';
 import { generateKey, hashKey, toRole } from './keys.js';
 import type {
-  KeyCheck, KeyInfo, NewKey, RefreshConsume, SlackChannelPatch, SlackChannelRow, Store, ToolCallRecord, UserRecord,
+  KeyCheck, KeyInfo, NewKey, RefreshConsume, SlackChannelPatch, SlackChannelRow, Store, ToolCallRecord, ToolCallRow, UserRecord,
 } from './types.js';
 
 const SCHEMA_SQL = `
@@ -145,6 +145,21 @@ export class SqliteStore implements Store {
   async pruneToolCalls(days: number): Promise<number> {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
     return Number(this.db.prepare('delete from mcp_tool_calls where created_at < ?').run(cutoff).changes);
+  }
+
+  async recentToolCalls(limit: number): Promise<ToolCallRow[]> {
+    const rows = this.db
+      .prepare('select tool, email, role, ok, error, duration_ms, created_at from mcp_tool_calls order by id desc limit ?')
+      .all(Math.max(1, Math.min(500, Math.floor(limit)))) as Row[];
+    return rows.map((r) => ({
+      tool: String(r.tool),
+      email: (r.email as string | null) ?? null,
+      role: (r.role as string | null) ?? null,
+      ok: Number(r.ok) === 1,
+      error: (r.error as string | null) ?? null,
+      durationMs: Number(r.duration_ms ?? 0),
+      at: String(r.created_at),
+    }));
   }
 
   close(): void {

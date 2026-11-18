@@ -1,10 +1,10 @@
 /** Command hints must be typed the way they work where the person is: npm scripts in a project, npx, or the binary. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cli } from '../src/core/invocation.js';
+import { cli, stdioEntry } from '../src/core/invocation.js';
 
 function project(scripts: Record<string, string>): NodeJS.ProcessEnv {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-inv-'));
@@ -38,4 +38,31 @@ test('a project without those scripts, npx, and the plain binary', () => {
   assert.equal(cli('setup check', { npm_command: 'exec' }), 'npx @chnxthr/knowledge-mcp setup check');
   assert.equal(cli('setup check', {}), 'knowledge-mcp setup check'); // the Docker image, a global install
   assert.equal(cli('doctor', { npm_command: 'run-script', npm_package_json: '/nonexistent/package.json' }), 'knowledge-mcp doctor');
+});
+
+test('the entry for a client names this Node by its full path, so a desktop app needs no PATH of its own', () => {
+  const bin = mkdtempSync(join(tmpdir(), 'kmcp-node-'));
+  const node = join(bin, 'node');
+  writeFileSync(node, '');
+  writeFileSync(join(bin, 'npx'), '');
+
+  // No project: npx beside that Node, the folder named outright, and a PATH that holds node (npx is a script).
+  const bare = mkdtempSync(join(tmpdir(), 'kmcp-bare-'));
+  const viaNpx = stdioEntry(bare, node, 'darwin');
+  assert.match(viaNpx.command, /[\\/]npx$/);
+  assert.deepEqual(viaNpx.args, ['-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio']);
+  assert.equal(viaNpx.env?.MCP_HOME, bare);
+  assert.ok(viaNpx.env?.PATH.split(':').some((d) => viaNpx.command.startsWith(d)), 'node is on the PATH the entry sets');
+  assert.deepEqual(stdioEntry(bare, node, 'win32'), { command: 'npx', args: ['-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'], env: { MCP_HOME: bare } });
+
+  // A built project, then one run from source: Node itself with the file to run. The folder is found from the file.
+  const built = mkdtempSync(join(tmpdir(), 'kmcp-built-'));
+  mkdirSync(join(built, 'dist'));
+  writeFileSync(join(built, 'dist', 'server.js'), '');
+  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'dist', 'server.js'), 'serve', '--stdio'] });
+  mkdirSync(join(built, 'src'));
+  writeFileSync(join(built, 'src', 'server.ts'), '');
+  mkdirSync(join(built, 'node_modules', 'tsx', 'dist'), { recursive: true });
+  writeFileSync(join(built, 'node_modules', 'tsx', 'dist', 'cli.mjs'), '');
+  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(built, 'src', 'server.ts'), 'serve', '--stdio'] });
 });

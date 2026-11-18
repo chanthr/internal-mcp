@@ -36,6 +36,7 @@ Node 22.13 이상이나 Docker가 필요합니다.
 
 | 원하는 것 | 시작 방법 |
 | --- | --- |
+| **브라우저에서 눌러 가며 설정하기** | 아무 폴더에서 `npx @chnxthr/knowledge-mcp`. [콘솔](#콘솔)이 열립니다 |
 | **내 도구 만들기** (사내 API, 데이터베이스 등 무엇이든) | `npx create-knowledge-mcp my-mcp` |
 | **데이터베이스나 API에 질문하기**, 코드 없이 | [내 데이터를 도구로](#내-데이터를-도구로): 설정에 연결과 질의를 적습니다 |
 | **기본 연결만 쓰기** (Drive, Slack, GitHub, Railway) | Docker 이미지 |
@@ -88,6 +89,38 @@ docker exec kmcp knowledge-mcp doctor        # 어떤 연결이 켜졌는지, �
 환경변수는 [`.env.example`](.env.example)에 모두 있습니다. 각 연결은 자기 환경변수가 채워지면 켜집니다.
 이미지에는 설정이 들어 있지 않습니다. 위처럼 `mcp.config.json`을 연결하거나 `-e MCP_CONFIG_JSON='{…}'`로 넘깁니다.
 [`compose.yaml`](compose.yaml)은 같은 일을 Docker Compose로 합니다.
+
+## 콘솔
+
+설정 명령이 하는 일을 브라우저 화면에서 합니다. 터미널에서 서버를 띄우면 주소가 나옵니다.
+
+```bash
+npx @chnxthr/knowledge-mcp     # 아무 폴더에서: 설정이 그 폴더에 저장되고 콘솔이 열립니다
+npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 주소가 나옵니다
+```
+
+![콘솔: 무엇이 연결됐고 잘 되는지](.github/assets/console-overview.png)
+
+| 화면 | 하는 일 |
+| --- | --- |
+| Documents | 폴더를 추가하고, Google Drive를 연결하고, 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
+| Databases and APIs | Postgres, SQLite, HTTP API를 연결합니다. 질의를 한 번 써서 도구로 저장합니다. 화면이 테이블 목록을 보여 주고, 저장하기 전에 실제 데이터베이스에서 질의를 점검합니다 |
+| Apps | Slack, GitHub, Railway를 토큰으로 연결합니다 |
+| Tools | AI 클라이언트가 부를 수 있는 도구 전부입니다. 값을 넣고 실행하면 클라이언트가 받는 결과가 그대로 보입니다 |
+| Connect a client | 버튼 하나로 Claude Code, Claude Desktop, Cursor, VS Code에 이 서버를 추가합니다. 이미 추가된 곳도 보여 줍니다. 직접 넣을 항목도 복사할 수 있습니다 |
+| People and keys | 키를 만들고 취소합니다. 사람마다 쓸 수 있는 도구를 정합니다 |
+| Activity | 최근 도구 호출입니다. 누가, 언제, 얼마나 걸렸고, 성공했는지 보여 줍니다 |
+
+![콘솔: 도구를 실행해 보기](.github/assets/console-tools.png)
+
+저장한 변경은 저절로 적용됩니다. 서버가 다시 시작하고 화면은 기다립니다. 모든 값은 실제 서비스에 확인한 뒤에
+씁니다. 설정 명령과 같은 `.env`와 `mcp.config.json`에 쓰므로 콘솔과 명령을 섞어 써도 됩니다.
+
+콘솔은 그 컴퓨터 앞에 앉은 사람을 위한 화면입니다. 서버를 터미널에서 띄웠을 때만 제공합니다. 서비스, 컨테이너,
+프로세스 관리자로 띄운 서버에는 없습니다(`KNOWLEDGE_CONSOLE=on`으로 켤 수 있습니다). 같은 컴퓨터의 브라우저가
+`localhost`로 요청할 때만 응답합니다. API는 서버가 처음 시작할 때 만든 토큰(`<데이터 폴더>/console-token`)이 있어야
+하고, 토큰은 주소에 붙어 나옵니다. 화면은 비밀값을 보여 주지 않습니다. 토큰이 설정됐다는 사실만 보여 줍니다.
+콘솔 토큰을 가진 사람은 이 서버의 관리자입니다. 비밀번호처럼 다루십시오. `KNOWLEDGE_CONSOLE=off`로 끕니다.
 
 ## 동작 방식
 
@@ -339,7 +372,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `setup connection <이름> --postgres --env NAME` / `--sqlite <파일>` / `--http <기본 URL>` | 설정에 적은 도구가 쓸 데이터베이스나 API를 추가합니다([내 데이터를 도구로](#내-데이터를-도구로)) |
 | `setup secret <ENV_NAME>` | 비밀값 하나를 화면에 보이지 않게 `.env`에 넣습니다 |
 | `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다 |
-| `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
+| `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. 터미널에서 띄우면 `/console/`에서 [콘솔](#콘솔)도 제공하고, 콘솔이 변경을 저장하면 스스로 다시 시작합니다. `--open`을 붙이거나 명령 없이 실행하면 브라우저에서 콘솔을 엽니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
 | `keys list` / `keys revoke <id>` | 키 목록을 봅니다(키 값은 나오지 않음). 또는 키 하나를 끕니다 |
 | `users add <email> [--role admin\|member] [--tools a,b]` | 사람을 등록합니다. `--tools`를 주면 멤버는 그 플러그인만 씁니다 |
@@ -439,7 +472,10 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 `.env`와 `mcp.config.json`은 현재 폴더를 먼저 보고, 없으면 프로젝트 폴더를 봅니다. 클라이언트가 다른 폴더에서
 서버를 띄워도 찾습니다. `MCP_CONFIG_JSON`(내용 직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
+`MCP_HOME`은 설정과 데이터가 있는 폴더를 직접 정합니다. 이때 현재 폴더는 보지 않습니다. npx로 서버를 띄우는
+클라이언트 설정에 필요합니다(클라이언트가 실행되는 폴더는 남의 프로젝트이기 때문입니다).
 설정은 시작할 때 한 번 읽습니다. 로그인 허용 목록을 포함해 설정을 바꾸면 서버를 다시 시작합니다.
+(터미널에서 띄운 서버는 콘솔이 변경을 저장하면 스스로 다시 시작합니다.)
 
 | 설정 키 | 뜻 |
 | --- | --- |
@@ -552,9 +588,15 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 
 ## 클라이언트 연결
 
+콘솔의 **Connect a client** 화면이 대신 해 줍니다. 클라이언트마다 버튼이 하나 있고, 내 폴더와 서버 이름에 맞춘
+항목을 넣습니다. 데스크톱 앱에는 터미널의 PATH가 없습니다. 그래서 콘솔이 쓰는 항목은 Node를 전체 경로로
+가리키고, 서버가 거기서도 시작됩니다.
+
 | 클라이언트 | 방법 |
 | --- | --- |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠D⁠e⁠s⁠k⁠t⁠o⁠p⁠,⁠ ⁠C⁠u⁠r⁠s⁠o⁠r⁠,⁠ ⁠V⁠S⁠ ⁠C⁠o⁠d⁠e | 같은 명령과 `MCP_HOME`을 클라이언트 설정 파일의 `command`, `args`, `env`에 적습니다 |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠원⁠격 | `claude mcp add --transport http my-mcp https://<호스트>/mcp --header "Authorization: Bearer <키>"` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
 | 다⁠른⁠ ⁠M⁠C⁠P⁠ ⁠클⁠라⁠이⁠언⁠트 | 주소 `https://<호스트>/mcp`, 헤더 `Authorization: Bearer <키>` |
@@ -589,6 +631,8 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 5. 서비스 계정 주소를 아는 사람은 누구나 그 계정에 문서를 공유할 수 있습니다. Drive는 받는 쪽에 묻지 않습니다. 그래서 root 밖 공유 문서는 공유된 맨 위 항목의 소유자가 `drive.trustedOwners`에 있을 때만 보여 줍니다. 이 목록에는 자기 조직만 넣고 `*`는 쓰지 마십시오. 신뢰하는 소유자가 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.
 6. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.
 7. 데이터베이스 연결은 그 데이터베이스 사용자가 읽을 수 있는 것을 모두 읽습니다. 읽기만 되는 전용 사용자를 만드십시오. superuser와 애플리케이션이 쓰는 사용자는 쓰지 마십시오. `explore`를 켤 때는 허용된 사람 모두가 봐도 되는 것만 읽는 사용자를 쓰십시오. tools 목록이 없는 member는 모든 연결을 쓸 수 있습니다.
+8. 콘솔은 관리자 권한으로 설정을 바꾸고 도구를 실행합니다. 그래서 그 컴퓨터 앞에 앉은 사람에게만 엽니다. 서버를 터미널에서 띄웠거나 `KNOWLEDGE_CONSOLE=on`일 때만 있습니다. 다른 주소에서 온 요청, 전달 헤더가 붙은 요청, `localhost`가 아닌 호스트 이름으로 온 요청, 브라우저가 다른 사이트에서 왔다고 표시한 요청은 거절합니다. API는 콘솔 토큰이 있어야 하고, 화면은 서버 밖에서 아무것도 불러오지 않습니다. 알아 둘 한계가 둘 있습니다. 같은 컴퓨터의 리버스 프록시가 전달 헤더를 붙이지 않으면(nginx 기본 `proxy_pass`) 로컬 브라우저와 구별되지 않습니다. 서버에서는 콘솔을 꺼 두십시오. 여러 사람이 쓰는 컴퓨터에서는 모든 사용자가 `localhost`에 닿습니다. 이때 막아 주는 것은 소유자만 읽는 토큰 파일입니다.
+9. 콘솔 토큰은 관리자의 열쇠입니다. 가진 사람은 모든 설정을 바꿀 수 있고, `.env`의 비밀값을 자기가 고른 주소로 보내는 연결을 만들 수 있습니다(연결이 원래 하는 일입니다). 콘솔은 이 범위를 그 폴더의 `.env`에 있는 비밀값으로 좁힙니다. 서버 자신의 자격 증명 이름이나 서버가 셸에서 물려받기만 한 변수를 가리키는 `${NAME}`은 거절합니다.
 
 ## 파일 구성
 
@@ -600,6 +644,8 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 | [`packages/knowledge-mcp/src/store/`](packages/knowledge-mcp/src/store/) | 저장소 인터페이스, SQLite와 Supabase 구현 |
 | [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | 기본 플러그인: `knowledge`, `drive`, `slack`, `github`, `railway` |
 | [`packages/knowledge-mcp/src/connections/`](packages/knowledge-mcp/src/connections/) | 설정에 적는 도구: Postgres, SQLite, HTTP 연결 |
+| [`packages/knowledge-mcp/src/admin/`](packages/knowledge-mcp/src/admin/) | 콘솔 API, 접근 규칙, 저장 뒤 서버를 다시 시작하는 장치 |
+| [`packages/knowledge-mcp/console/`](packages/knowledge-mcp/console/) | 콘솔 화면(React). `dist/console-ui`로 빌드합니다. 입력 부품은 [affectUI](https://github.com/flohoeller/affectui) 컴포넌트를 `src/ui`에 복사한 것입니다(MIT, 그 폴더의 안내문 참고) |
 | [`packages/knowledge-mcp/src/run.ts`](packages/knowledge-mcp/src/run.ts) | 명령줄 |
 | [`packages/knowledge-mcp/test/`](packages/knowledge-mcp/test/) | 단위 시험, HTTP와 stdio 종단 시험 |
 | [`packages/create-knowledge-mcp/`](packages/create-knowledge-mcp/) | 생성기와 프로젝트 템플릿 |

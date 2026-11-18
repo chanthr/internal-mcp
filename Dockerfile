@@ -18,6 +18,7 @@ COPY packages/create-knowledge-mcp/package.json packages/create-knowledge-mcp/
 RUN npm ci
 COPY packages/knowledge-mcp/tsconfig.json packages/knowledge-mcp/tsconfig.build.json packages/knowledge-mcp/
 COPY packages/knowledge-mcp/src packages/knowledge-mcp/src
+COPY packages/knowledge-mcp/console packages/knowledge-mcp/console
 RUN npm run build -w @chnxthr/knowledge-mcp
 
 # === Production deps — only what the core package needs ===

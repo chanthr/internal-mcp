@@ -44,11 +44,12 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node console/build.mjs",
     "dev": "tsx watch src/cli.ts serve",
     "start": "node dist/cli.js serve",
-    "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --test-reporter=spec test/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p console/tsconfig.json",
+    "console:watch": "node console/build.mjs --watch",
+    "test": "node console/build.mjs && node --import tsx --test --test-reporter=spec test/*.test.ts",
     "prepack": "npm run build"
   },
   "dependencies": {
@@ -73,7 +74,12 @@
     "@types/node": "^22.10.0",
     "@types/pdf-parse": "^1.1.5",
     "@types/pg": "^8.23.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "tsx": "^4.0.0",
     "typescript": "^5.4.0"
   },

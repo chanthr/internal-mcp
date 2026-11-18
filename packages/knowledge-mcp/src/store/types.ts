@@ -51,6 +51,12 @@ export interface ToolCallRecord {
   durationMs: number;
 }
 
+/** One logged tool call, as the console's activity page shows it. Arguments are never stored. */
+export interface ToolCallRow extends ToolCallRecord {
+  /** ISO time of the call. */
+  at: string;
+}
+
 export interface SlackChannelRow {
   id: string;
   channel_name: string;
@@ -86,6 +92,8 @@ export interface Store {
   logToolCall(row: ToolCallRecord): Promise<void>;
   /** Delete tool-call log rows older than `days`. Returns how many were removed. */
   pruneToolCalls(days: number): Promise<number>;
+  /** The latest tool calls, newest first. */
+  recentToolCalls(limit: number): Promise<ToolCallRow[]>;
 
   // OAuth
   getOAuthClient(clientId: string): Promise<OAuthClientInformationFull | null>;

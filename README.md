@@ -36,6 +36,7 @@ SQLite file. You need Node 22.13 or later, or Docker.
 
 | You want | Start with |
 | --- | --- |
+| **To click through it in a browser** | `npx @chnxthr/knowledge-mcp` in any folder. [The console](#the-console) opens |
 | **Your own tools** (internal APIs, databases, anything) | `npx create-knowledge-mcp my-mcp` |
 | **Questions about your database or API**, no code | [Your data as tools](#your-data-as-tools): a connection and a query in the config |
 | **Only the built-in connectors** (Drive, Slack, GitHub, Railway) | The Docker image |
@@ -88,6 +89,41 @@ docker exec kmcp knowledge-mcp doctor        # which connectors are on, and what
 [`.env.example`](.env.example) lists every variable. Each connector turns on when its variables are set.
 The image holds no config: mount `mcp.config.json` as above, or pass it inline with `-e MCP_CONFIG_JSON='{…}'`.
 [`compose.yaml`](compose.yaml) does the same with Docker Compose.
+
+## The console
+
+A page in your browser for everything the setup commands do. Start the server in a terminal and it prints the
+address:
+
+```bash
+npx @chnxthr/knowledge-mcp     # in any folder: the settings are saved there, and the console opens
+npm run dev                    # in a generated project: the address is in the first lines
+```
+
+![The console: what is connected and whether it works](.github/assets/console-overview.png)
+
+| Page | What you do there |
+| --- | --- |
+| Documents | Add a folder, connect Google Drive, turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
+| Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
+| Apps | Connect Slack, GitHub and Railway with a token |
+| Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
+| Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
+| People and keys | Create and revoke keys, and limit a person to some tools |
+| Activity | The latest tool calls: who, when, how long, and whether it worked |
+
+![The console: trying a tool](.github/assets/console-tools.png)
+
+A saved change takes effect by itself: the server starts again and the page waits for it. Every value is checked
+against the real service before it is written, to the same `.env` and `mcp.config.json` the commands write, so the
+console and the commands can be mixed freely.
+
+The console is for the person at the machine. It is served only when the server was started in a terminal (a
+service, a container or a process manager gets none unless `KNOWLEDGE_CONSOLE=on`), it answers only a browser on
+this machine that asks for `localhost`, and its API needs a token the server creates on first start
+(`<data dir>/console-token`) and prints as part of the address. The page never shows a secret: it says that a
+token is set, not what it is. Whoever holds the console token is the admin of this server, so keep it like a
+password. `KNOWLEDGE_CONSOLE=off` turns the console off.
 
 ## How it works
 
@@ -340,7 +376,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `setup connection <name> --postgres --env NAME` / `--sqlite <file>` / `--http <base URL>` | Adds a database or an API for tools declared in the config (see [Your data as tools](#your-data-as-tools)) |
 | `setup secret <ENV_NAME>` | Types one secret into `.env` without it being shown |
 | `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
-| `serve` | Starts the HTTP server on `$PORT` (default 8080). `serve --stdio` talks over stdin and stdout instead |
+| `serve` | Starts the HTTP server on `$PORT` (default 8080). Started in a terminal it also serves [the console](#the-console) at `/console/` and restarts itself when the console saves a change; `--open` opens the console in the browser, and so does running with no command at all. `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |
 | `users add <email> [--role admin\|member] [--tools a,b]` | Registers a person. `--tools` limits a member to those plugins |
@@ -440,8 +476,10 @@ that depends on the bot's channels and on each person's allowed channels.
 
 `.env` and `mcp.config.json` are read from the working directory first, then from your project folder, so a
 client that starts the server from elsewhere still finds them. `MCP_CONFIG_JSON` (inline) and
-`MCP_CONFIG_PATH` override the file. The config is read once at startup: restart the server after you change
-it, the sign-in allowlist included.
+`MCP_CONFIG_PATH` override the file. `MCP_HOME` names the folder of the settings and the data outright; the
+working directory is then not looked at, which is what a client's entry needs when the server is started through
+npx from somebody else's project. The config is read once at startup: restart the server after you change it, the
+sign-in allowlist included. (A server started in a terminal restarts itself when the console saves a change.)
 
 | Config key | Meaning |
 | --- | --- |
@@ -557,9 +595,15 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 
 ## Connect a client
 
+The console's **Connect a client** page does this for you: one button per client, with the entry made for your
+folder and your server name. A desktop app does not have the PATH of your terminal, so the entry it writes names
+Node by its full path and the server starts there too.
+
 | Client | How |
 | --- | --- |
 | Claude Code, local | `claude mcp add my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
+| Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| Claude Desktop, Cursor, VS Code, local | The same command and `MCP_HOME` in the client's config file, under `command`, `args` and `env` |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
 | Claude web and desktop | Turn on OAuth, then add a custom connector with `https://<host>/mcp` |
 | Any MCP client | URL `https://<host>/mcp` with header `Authorization: Bearer <key>` |
@@ -595,6 +639,9 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.
 
+8. The console changes settings and runs tools as the admin, so it is kept to the person at the machine. It exists only when the server was started in a terminal or with `KNOWLEDGE_CONSOLE=on`. Requests from another address, with a forwarding header, under a host name other than `localhost`, or marked by the browser as coming from another site are refused; the API needs the console token; the page loads nothing from outside the server. Two limits to know: a reverse proxy on the same machine that adds no forwarding header (nginx's plain `proxy_pass`) looks like a local browser, so on a server leave the console off; and every user of a shared machine can reach `localhost`, where the owner-only token file is what keeps them out.
+9. The console token is the admin's key. Its holder can change every setting, and can declare a connection that sends a secret from `.env` to an address of their choosing (that is what a connection is). The console narrows this to secrets in the folder's `.env`: it refuses a `${NAME}` that names one of the server's own credentials or a variable the server only inherited from the shell.
+
 ## File map
 
 | Path | Contents |
@@ -605,6 +652,8 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | [`packages/knowledge-mcp/src/store/`](packages/knowledge-mcp/src/store/) | Store interface, SQLite and Supabase implementations |
 | [`packages/knowledge-mcp/src/plugins/`](packages/knowledge-mcp/src/plugins/) | Built-in plugins: `knowledge`, `drive`, `slack`, `github`, `railway` |
 | [`packages/knowledge-mcp/src/connections/`](packages/knowledge-mcp/src/connections/) | Tools declared in the config: Postgres, SQLite and HTTP connections |
+| [`packages/knowledge-mcp/src/admin/`](packages/knowledge-mcp/src/admin/) | The console's API, its access rules, and the supervisor that restarts the server after a saved change |
+| [`packages/knowledge-mcp/console/`](packages/knowledge-mcp/console/) | The console page (React). Built into `dist/console-ui`; its controls are [affectUI](https://github.com/flohoeller/affectui) components, copied under `src/ui` (MIT, see the notice there) |
 | [`packages/knowledge-mcp/src/run.ts`](packages/knowledge-mcp/src/run.ts) | The command line |
 | [`packages/knowledge-mcp/test/`](packages/knowledge-mcp/test/) | Unit tests and end-to-end tests over HTTP and stdio |
 | [`packages/create-knowledge-mcp/`](packages/create-knowledge-mcp/) | The generator and its project template |

@@ -68,7 +68,7 @@ export const SETUP_USAGE = `setup                      guided setup (asks questi
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-function readConfigFile(dir: string): Record<string, any> {
+export function readConfigFile(dir: string): Record<string, any> {
   const path = join(dir, 'mcp.config.json');
   if (!existsSync(path)) return {};
   try {
@@ -79,14 +79,14 @@ function readConfigFile(dir: string): Record<string, any> {
 }
 
 /** drive.trustedOwners as the server will read it: env DRIVE_TRUSTED_OWNERS first, then mcp.config.json. */
-function trustedList(ctx: CommandContext): string[] {
+export function trustedList(ctx: Pick<CommandContext, 'dir' | 'env'>): string[] {
   const env = (ctx.env ?? process.env).DRIVE_TRUSTED_OWNERS;
   const list: unknown = env !== undefined ? env.split(',') : readConfigFile(ctx.dir).drive?.trustedOwners;
   return (Array.isArray(list) ? list : []).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
 }
 
 /** Add entries to drive.trustedOwners in mcp.config.json. Returns the entries that were new. */
-function addTrusted(dir: string, entries: string[]): string[] {
+export function addTrusted(dir: string, entries: string[]): string[] {
   const config = readConfigFile(dir);
   const current: string[] = Array.isArray(config.drive?.trustedOwners) ? config.drive.trustedOwners.map((x: unknown) => String(x).toLowerCase()) : [];
   const added = [...new Set(entries.map((e) => e.trim().toLowerCase()).filter(Boolean))].filter((e) => !current.includes(e));
@@ -98,7 +98,7 @@ function addTrusted(dir: string, entries: string[]): string[] {
 }
 
 /** Folders listed in mcp.config.json, with absolute paths. */
-function configuredFolders(dir: string): Array<{ path: string; name?: string }> {
+export function configuredFolders(dir: string): Array<{ path: string; name?: string }> {
   const list: unknown = readConfigFile(dir).folders;
   return (Array.isArray(list) ? list : [])
     .filter((f): f is { path: string; name?: string } => !!f && typeof (f as { path?: unknown }).path === 'string')
@@ -153,14 +153,21 @@ async function check(ctx: CommandContext): Promise<number> {
   const has = (k: string) => !!env[k]?.trim();
   let failed = 0;
   let checked = 0;
-  const run = async (label: string, fn: () => Promise<string>) => {
+  // Each check is started as it is reached and none waits for another: five services answer in the time of the
+  // slowest, not the sum. The lines are printed at the end, in the order the checks were started.
+  const slots: Array<Promise<string[]>> = [];
+  const say = (line: string) => void slots.push(Promise.resolve([line]));
+  const run = (label: string, fn: () => Promise<string>) => {
     checked++;
-    try {
-      ctx.out(`✓ ${label.padEnd(11)} ${await fn()}`);
-    } catch (e) {
-      failed++;
-      ctx.out(`✗ ${label.padEnd(11)} ${msg(e)}`);
-    }
+    slots.push(
+      (async () => fn())().then(
+        (text) => [`✓ ${label.padEnd(11)} ${text}`],
+        (e) => {
+          failed++;
+          return [`✗ ${label.padEnd(11)} ${msg(e)}`];
+        },
+      ),
+    );
   };
   const trusted = trustedList(ctx);
   const driveSummary = (d: Awaited<ReturnType<typeof checkDrive>>) => {
@@ -180,7 +187,7 @@ async function check(ctx: CommandContext): Promise<number> {
   };
 
   for (const f of configuredFolders(ctx.dir)) {
-    await run('folder', async () => {
+    run('folder', async () => {
       let isDir = false;
       try {
         isDir = statSync(f.path).isDirectory();
@@ -199,31 +206,34 @@ async function check(ctx: CommandContext): Promise<number> {
     for (const p of data.problems) {
       checked++;
       failed++;
-      ctx.out(`✗ ${'config'.padEnd(11)} ${p}`);
+      say(`✗ ${'config'.padEnd(11)} ${p}`);
     }
-    ctx.out('  The server does not start until mcp.config.json is fixed.');
+    say('  The server does not start until mcp.config.json is fixed.');
   } else {
-    try {
-      for (const [name, c] of Object.entries(data.connections)) {
-        for (const line of await checkConnection(name, c, data.tools, env)) {
-          checked++;
-          if (!line.ok) failed++;
-          ctx.out(`${line.ok ? '✓' : '✗'} ${line.what.padEnd(11)} ${line.text}`);
+    slots.push(
+      (async () => {
+        try {
+          const perConnection = await Promise.all(Object.entries(data.connections).map(([name, c]) => checkConnection(name, c, data.tools, env)));
+          return perConnection.flat().map((line) => {
+            checked++;
+            if (!line.ok) failed++;
+            return `${line.ok ? '✓' : '✗'} ${line.what.padEnd(11)} ${line.text}`;
+          });
+        } finally {
+          await closeDataConnections();
         }
-      }
-    } finally {
-      await closeDataConnections();
-    }
+      })(),
+    );
   }
 
   if (has('GOOGLE_SERVICE_ACCOUNT_KEY')) {
-    await run('drive', async () => driveSummary(await checkDriveCredentials(env.GOOGLE_SERVICE_ACCOUNT_KEY!, 'GOOGLE_SERVICE_ACCOUNT_KEY', { apiBase: ctx.endpoints?.drive })));
+    run('drive', async () => driveSummary(await checkDriveCredentials(env.GOOGLE_SERVICE_ACCOUNT_KEY!, 'GOOGLE_SERVICE_ACCOUNT_KEY', { apiBase: ctx.endpoints?.drive })));
   } else if (has('GOOGLE_APPLICATION_CREDENTIALS')) {
-    await run('drive', async () => driveSummary(await checkDrive(resolve(ctx.dir, env.GOOGLE_APPLICATION_CREDENTIALS!), { apiBase: ctx.endpoints?.drive })));
-  } else ctx.out('· drive       not configured');
+    run('drive', async () => driveSummary(await checkDrive(resolve(ctx.dir, env.GOOGLE_APPLICATION_CREDENTIALS!), { apiBase: ctx.endpoints?.drive })));
+  } else say('· drive       not configured');
 
   if (has('OPENAI_API_KEY') || has('EMBEDDING_API_KEY') || has('EMBEDDING_BASE_URL')) {
-    await run('embeddings', async () => {
+    run('embeddings', async () => {
       const r = await checkEmbedding({ baseUrl: env.EMBEDDING_BASE_URL, model: env.EMBEDDING_MODEL, apiKey: env.EMBEDDING_API_KEY?.trim() || env.OPENAI_API_KEY?.trim() });
       const want = env.EMBEDDING_DIM?.trim() || (env.EMBEDDING_BASE_URL?.trim() ? '' : '1536');
       if (want && Number(want) !== r.dim && !/^text-embedding-3/.test(r.model)) {
@@ -231,18 +241,19 @@ async function check(ctx: CommandContext): Promise<number> {
       }
       return `${r.model} (${r.dim} dimensions)`;
     });
-  } else ctx.out('· embeddings  not configured (search works by keywords; an embedding model adds search by meaning)');
+  } else say('· embeddings  not configured (search works by keywords; an embedding model adds search by meaning)');
 
-  if (has('SLACK_BOT_TOKEN')) await run('slack', async () => { const r = await checkSlack(env.SLACK_BOT_TOKEN!.trim(), { apiBase: ctx.endpoints?.slack }); return `${r.team} as ${r.user}`; });
-  else ctx.out('· slack       not configured');
+  if (has('SLACK_BOT_TOKEN')) run('slack', async () => { const r = await checkSlack(env.SLACK_BOT_TOKEN!.trim(), { apiBase: ctx.endpoints?.slack }); return `${r.team} as ${r.user}`; });
+  else say('· slack       not configured');
 
   const gh = env.GITHUB_PAT?.trim() || env.GITHUB_TOKEN?.trim();
-  if (gh) await run('github', async () => `signed in as ${(await checkGithub(gh, { apiBase: ctx.endpoints?.github })).login}`);
-  else ctx.out('· github      not configured');
+  if (gh) run('github', async () => `signed in as ${(await checkGithub(gh, { apiBase: ctx.endpoints?.github })).login}`);
+  else say('· github      not configured');
 
-  if (has('RAILWAY_TOKEN')) await run('railway', async () => (await checkRailway(env.RAILWAY_TOKEN!.trim(), { apiBase: ctx.endpoints?.railway })).who);
-  else ctx.out('· railway     not configured');
+  if (has('RAILWAY_TOKEN')) run('railway', async () => (await checkRailway(env.RAILWAY_TOKEN!.trim(), { apiBase: ctx.endpoints?.railway })).who);
+  else say('· railway     not configured');
 
+  for (const slot of slots) for (const line of await slot) ctx.out(line);
   if (checked === 0) ctx.out(`Nothing is configured yet. Run \`${cli('setup')}\`.`);
   return failed;
 }
@@ -343,10 +354,10 @@ async function embeddings(argv: string[], ctx: CommandContext): Promise<number> 
 }
 
 /** Names that are plugin ids already; a connection cannot take one (its name is its permission group). */
-const BUILT_IN = new Set(['knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
+export const BUILT_IN = new Set(['knowledge', 'drive', 'slack', 'github', 'railway', 'ping']);
 
 /** `connections` and `tools` of mcp.config.json, checked the way the server checks them at boot. */
-function readDataConfig(dir: string): { connections: Record<string, ConnectionConfig>; tools: DataToolConfig[]; problems: string[] } {
+export function readDataConfig(dir: string): { connections: Record<string, ConnectionConfig>; tools: DataToolConfig[]; problems: string[] } {
   const raw = readConfigFile(dir);
   const c = ConnectionsSchema.safeParse(raw.connections ?? {});
   const t = DataToolsSchema.safeParse(raw.tools ?? []);
@@ -369,7 +380,7 @@ function pairs(list: string[] | undefined, sep: string, flag: string): Record<st
 }
 
 /** A header or query value that is a secret must be written as ${ENV_NAME}: the config file is not a place for secrets. */
-function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
+export function refuseLiteralSecrets(values: Record<string, string>, what: string): void {
   for (const [k, v] of Object.entries(values)) {
     if (/authorization|api[-_]?key|token|secret|password|cookie/i.test(k) && !/\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(v)) {
       throw new Error(`${what} "${k}" looks like a secret. Write its value as \${ENV_NAME} (for example ${k}: Bearer \${API_TOKEN}) and put the value in .env with: ${cli('setup secret API_TOKEN')}`);

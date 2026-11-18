@@ -12,7 +12,8 @@
 import { definePlugin, type PluginState } from '../../plugin/define.js';
 import { driveConfigured } from '../drive/index.js';
 import { backfillVectors, indexAvailable } from '../drive/indexer.js';
-import { embedQuery, embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../drive/embeddings.js';
+import { EMBEDDING_MODEL } from '../drive/embeddings.js';
+import { reembed } from './reembed.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 import { foldersConfigured, scanFolders, startFolderScans } from './folders.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
@@ -85,39 +86,16 @@ export const knowledgePlugin = definePlugin({
     reembed: {
       description: 'make new vectors for every indexed passage with the configured embedding model (after changing the model)',
       run: async () => {
-        if (!embeddingsConfigured()) {
-          console.log(`No embedding model is configured. Set one first: ${cli('setup embeddings')} (search works by keywords without one).`);
+        const r = await reembed((done, total) => console.error(done === 0 ? `[knowledge] making new vectors for ${total} passage(s) with ${EMBEDDING_MODEL}; the documents are not read again` : `[knowledge] ${done}/${total}`));
+        if (!r.ok) {
+          console.log(r.why);
           process.exitCode = 1;
           return;
         }
-        const index = await getLocalIndex();
-        if (!index) {
-          console.log(`Vectors are in Qdrant. After changing the model run: ${cli('drive reindex --recreate')}`);
-          process.exitCode = 1;
-          return;
-        }
-        // Ask the model first: dropping the old vectors and then finding the new model unreachable would leave none.
-        const probe = await embedQuery('ping');
-        if (probe.length !== EMBEDDING_DIM) {
-          console.log(`${EMBEDDING_MODEL} returns ${probe.length}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. Set EMBEDDING_DIM=${probe.length} (${cli('setup embeddings')} does this) and run again.`);
-          process.exitCode = 1;
-          return;
-        }
-        const before = await index.stats(DRIVE_COLLECTION);
-        const cleared = await index.clearVectors(DRIVE_COLLECTION, EMBEDDING_DIM);
-        console.log(`Dropped ${cleared} old vector(s). Making new ones for ${before.chunks} passage(s) with ${EMBEDDING_MODEL}; the documents are not read again.`);
-        let done = 0;
-        for (;;) {
-          const n = await backfillVectors(1280);
-          if (n === 0) break;
-          done += n;
-          console.error(`[knowledge] ${done}/${before.chunks}`);
-        }
-        const after = await index.stats(DRIVE_COLLECTION);
         console.log(
-          after.withVectors === after.chunks
-            ? `Done: ${after.withVectors} passage(s) have vectors.`
-            : `${after.withVectors} of ${after.chunks} passage(s) have vectors. Another process is filling the rest, or run this again.`,
+          r.withVectors === r.passages
+            ? `Done: ${r.withVectors} passage(s) have vectors (${r.dropped} old vector(s) dropped).`
+            : `${r.withVectors} of ${r.passages} passage(s) have vectors. Another process is filling the rest, or run this again.`,
         );
       },
     },

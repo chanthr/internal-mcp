@@ -1,11 +1,12 @@
 /** stdio end to end: the client spawns the server like Claude Code would, from another working directory. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -44,6 +45,45 @@ test('stdio without a key runs as the local admin and serves plugin tools', asyn
   const ping = JSON.parse((pingResult.content as Array<{ text: string }>)[0]!.text);
   assert.equal(ping.authenticated_as, 'local@stdio');
   await client.close();
+});
+
+test('MCP_HOME names the folder of the settings and the data, whatever folder the client starts the server in', async () => {
+  // What a client's entry looks like when the server comes through npx: no project to find, only the variable.
+  const home = mkdtempSync(join(tmpdir(), 'kmcp-home-'));
+  const db = new DatabaseSync(join(home, 'shop.db'));
+  db.exec('create table orders (id integer primary key, total real); insert into orders values (1, 10)');
+  db.close();
+  const tool = (name: string) => ({ name, connection: 'shop', description: 'Orders.', sql: 'select id, total from orders' });
+  writeFileSync(join(home, 'mcp.config.json'), JSON.stringify({ connections: { shop: { type: 'sqlite', path: join(home, 'shop.db') } }, tools: [tool('home_orders')] }));
+  // The client's own project has settings too. They are somebody else's: neither file may be read.
+  const project = mkdtempSync(join(tmpdir(), 'kmcp-project-'));
+  writeFileSync(join(project, 'other.config.json'), JSON.stringify({ connections: { shop: { type: 'sqlite', path: join(home, 'shop.db') } }, tools: [tool('project_orders')] }));
+  writeFileSync(join(project, '.env'), `MCP_CONFIG_PATH=${join(project, 'other.config.json')}\n`);
+  writeFileSync(join(project, 'mcp.config.json'), JSON.stringify({ connections: { shop: { type: 'sqlite', path: join(home, 'shop.db') } }, tools: [tool('cwd_orders')] }));
+
+  const env = cleanEnv();
+  delete env.MCP_DATA_DIR;
+  delete env.MCP_ENV_FILE;
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ['--import', TSX, fileURLToPath(new URL('../src/cli.ts', import.meta.url)), 'serve', '--stdio'],
+    cwd: project,
+    env: { ...env, MCP_HOME: home },
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'test', version: '1.0.0' });
+  await client.connect(transport);
+  try {
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    assert.ok(names.includes('home_orders'), names.join(', '));
+    assert.ok(!names.includes('project_orders') && !names.includes('cwd_orders'), names.join(', '));
+    const r = await client.callTool({ name: 'home_orders', arguments: {} });
+    assert.match((r.content as Array<{ text: string }>)[0]!.text, /"total": ?10/);
+    assert.ok(existsSync(join(home, 'data')), 'the data directory is in the home folder');
+    assert.ok(!existsSync(join(project, 'data')));
+  } finally {
+    await client.close();
+  }
 });
 
 test('stdio with a wrong MCP_API_KEY exits with a clear message', () => {

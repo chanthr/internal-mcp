@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const { runSetup, parseSelection } = await import('../src/setup/wizard.js');
-const { updateEnvFile, readEnvKeys, formatEnvValue } = await import('../src/setup/envfile.js');
+const { updateEnvFile, readEnvKeys, readEnvValues, formatEnvValue } = await import('../src/setup/envfile.js');
 const { checkEmbedding, checkSlack, checkGithub, checkRailway } = await import('../src/setup/checks.js');
 const auto = await import('../src/setup/auto.js');
 const { runSetupCommand } = await import('../src/setup/commands.js');
@@ -114,6 +114,28 @@ test('.env: existing lines are kept, a commented key is filled in place, new key
   assert.deepEqual([...readEnvKeys(path)].sort(), ['NEW_PATH', 'PORT', 'SLACK_BOT_TOKEN']);
   assert.equal(statSync(path).mode & 0o777, 0o600);
   assert.equal(formatEnvValue("it's #1"), '"it\'s #1"');
+  // What was written is read back as it was given, whatever quoting it needed.
+  updateEnvFile(path, { NOTE: "it's #1", PLAIN: 'abc' });
+  const back = readEnvValues(path);
+  assert.deepEqual([back.get('NEW_PATH'), back.get('NOTE'), back.get('PLAIN'), back.get('OLD')], ['/Users/me/My Keys/sa.json', "it's #1", 'abc', undefined]);
+});
+
+test('.env: whatever a value holds, it stays one variable and the line after it stays its own', async () => {
+  const { parse } = await import('dotenv');
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-env-'));
+  for (const value of ['ends with a backslash\\', 'C:\\keys\\', 'line one\rline two', 'line one\r\nline two', 'line one\nline two', "quote ' inside", 'both \' and "', 'hash # inside', 'a=b c=d']) {
+    const path = join(dir, `${Math.random().toString(36).slice(2)}.env`);
+    updateEnvFile(path, { FIRST: value, SECOND: 'kept' });
+    const read = parse(readFileSync(path, 'utf8'));
+    assert.deepEqual(Object.keys(read), ['FIRST', 'SECOND'], JSON.stringify(value));
+    assert.equal(read.SECOND, 'kept', JSON.stringify(value));
+  }
+  // What cannot be written as one line is refused, and nothing is written.
+  const path = join(dir, 'refused.env');
+  for (const value of ['nul \0 inside', 'bell \x07', 'quote \' and backslash at the end\\', 'line\nbreak and backslash\\']) {
+    assert.throws(() => updateEnvFile(path, { FIRST: value, SECOND: 'kept' }), /not saved|cannot be written/, JSON.stringify(value));
+  }
+  assert.ok(!existsSync(path));
 });
 
 test('checks: each one says what it found, or what to fix', async () => {

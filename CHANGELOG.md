@@ -6,6 +6,8 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **`setup check` asks every service at the same time.** The lines come out in the same order; the wait is the
+  slowest service, not the sum of all.
 - **Search needs no key: `search_knowledge` replaces `semantic_search_drive`.** The built-in index now holds a
   keyword index (BM25) next to the vectors, so search works with nothing configured and in any language (Korean,
   Japanese and Chinese are matched by character pairs). An embedding model adds search by meaning; the two result
@@ -31,6 +33,19 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A console in the browser.** Start the server in a terminal and open the address it prints
+  (`npx @chnxthr/knowledge-mcp` in any folder opens it for you). Add folders, connect Drive, Slack, GitHub,
+  Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
+  back, add the server to Claude Code, Claude Desktop, Cursor or VS Code with one button, pick or change the
+  embedding model (new vectors are made from the stored text, with the progress shown), manage people and keys,
+  and see the latest calls. It writes the same `.env` and `mcp.config.json` as the setup commands, through the same live
+  checks, and a saved change restarts the server by itself. It is served only when the server was started in a
+  terminal (or with `KNOWLEDGE_CONSOLE=on`), only to a browser on the same machine asking for `localhost`, its
+  API needs a token created on first start, and the page never shows a secret. `KNOWLEDGE_CONSOLE=off` turns it
+  off; `KMCP_SUPERVISE=false` keeps the server from restarting itself.
+- **`MCP_HOME`.** One variable names the folder of `.env`, `mcp.config.json` and the data. A client's entry sets
+  it when the server is started through npx, so the settings are found whatever folder the client runs in, and
+  the `.env` of that folder is not read.
 - **Your data as tools, without a plugin file.** `connections` in the config names a Postgres database, a SQLite
   file or an HTTP API; `tools` declares one SQL query or one API request each, with typed parameters. Values are
   bound by the driver, a read-only tool runs in a read-only transaction (SQLite: a read-only file) with a row limit
@@ -80,6 +95,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **A value written to `.env` stays one variable.** A value with a carriage return, or a quoted value ending in a
+  backslash, could run on into the next line of the file when it was read back. Line breaks are now escaped, such
+  a value is written without quotes, and one that cannot be written safely is refused.
+- **A request body that is not JSON gets a one-line answer.** It used to be answered with a stack trace.
 - **Hints name commands that run where you are.** Messages said `knowledge-mcp setup check`, which is not on the
   PATH of a generated project. They now say `npm run setup -- check` there, `npx @chnxthr/knowledge-mcp …` under npx,
   and `knowledge-mcp …` in the Docker image.
