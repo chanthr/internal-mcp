@@ -15,6 +15,8 @@ import { defineTool } from '../../../plugin/define.js';
 import { getAuth } from '../../../core/context.js';
 import { getConfig } from '../../../core/config.js';
 import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
+import { getGraph } from '../graph.js';
+import { graphVisibility, linkCounts } from './linked_documents.js';
 import { isExcludedPath } from '../../drive/exclude.js';
 import { sourceLabels } from '../../drive/settings.js';
 import { driveConfigured } from '../../drive/index.js';
@@ -208,12 +210,18 @@ async function search(args: z.infer<typeof inputSchema>) {
   const held = passages.map((ps) => holds(ps.parts));
   const weak = found.mode === 'keyword' && terms.length >= 2 && Math.max(...held) * 2 < terms.length;
 
+  // How each shown document is connected to others the caller may see (the links people wrote: ../graph.ts).
+  const graph = getGraph();
+  const mayLink = graphVisibility();
+  const linked = passages.map((ps) => linkCounts(graph, ps.parts[0].p.file_id, mayLink));
+
   const severalSources = allSources().length > 1;
   const lines: string[] = [];
   lines.push(`# Knowledge search — "${query}"`);
   lines.push(
     `${passages.length} passage${passages.length === 1 ? '' : 's'} from ${perDoc.size} document${perDoc.size === 1 ? '' : 's'} · matched by ${found.mode}. ` +
-      'To read around a passage: read_document with its ID and part.',
+      'To read around a passage: read_document with its ID and part.' +
+      (linked.some(Boolean) ? ' To follow a document\'s links: linked_documents with its ID.' : ''),
   );
   if (weak) lines.push('> Weak match: no passage holds even half of the terms of the question. The documents may not cover it; say so rather than answer from these.');
   if (found.degraded) {
@@ -247,6 +255,8 @@ async function search(args: z.infer<typeof inputSchema>) {
     const matched = [...new Set(ps.parts.flatMap((x) => x.h.matched))];
     const byWords = matched.includes('keyword') && terms.length > 1 ? ` (${held[i]} of ${terms.length} terms of the question)` : '';
     lines.push(`Match: ${matched.join(' + ')}${byWords}${severalSources ? ` · source: ${p.source}` : ''}`);
+    const l = linked[i];
+    if (l) lines.push(`Links: to ${l.out} · from ${l.in}`);
     const images = [...new Set(parts.flatMap((x) => x.p.image_urls ?? []))];
     if (images.length) lines.push(`Images: ${images.join(' · ')}`);
     lines.push('');

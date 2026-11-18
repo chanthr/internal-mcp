@@ -33,7 +33,10 @@ import { checkConnection, sqlAdapterFor } from '../connections/index.js';
 import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, stringsIn, type ConnectionConfig } from '../connections/schema.js';
 import { embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
 import { reembed } from '../plugins/knowledge/reembed.js';
-import { LOCAL_PREFIX, localFolders } from '../plugins/knowledge/folders.js';
+import { LOCAL_PREFIX, localFolders, scanFolders } from '../plugins/knowledge/folders.js';
+import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
+import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
+import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
@@ -164,6 +167,11 @@ function upstreamViews(dir: string, registry: Registry) {
       error: s?.error ?? null,
     };
   });
+}
+
+/** A document of the graph as the page shows it: what it is, and how many documents it links to and from. */
+function nodeView(g: Graph, n: GraphNode) {
+  return { id: n.id, title: n.title, path: n.path, in: g.in.get(n.id)?.length ?? 0, out: g.out.get(n.id)?.length ?? 0 };
 }
 
 /** How Railway is connected: a token in the environment wins over a sign-in. */
@@ -384,6 +392,79 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (config.folders.length === before.length) return refuse(res, 404, 'That folder is not in the list.');
       writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
       change(res);
+    }),
+  );
+
+  // ── Files dropped on the page (uploads.ts) ──
+  api.put(
+    '/uploads',
+    // Read after the token was checked: a request without it is turned away before its body is taken in.
+    express.raw({ type: 'application/octet-stream', limit: MAX_FILE_BYTES }),
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const path = z.string().min(1).max(1000).parse(req.query.path);
+      if (!Buffer.isBuffer(req.body)) return refuse(res, 400, 'Send the file as the body of the request (application/octet-stream).');
+      res.json({ ok: true, ...(await saveUpload(settingsDir(), path, req.body)) });
+    }),
+  );
+  api.post(
+    '/uploads/done',
+    wrap(async (_req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const full = uploadsDir(dir);
+      if (!existsSync(full)) return refuse(res, 409, 'Nothing has been uploaded yet.');
+      // The first upload makes `uploads/` a folder of this server, like any folder that is added.
+      if (!configuredFolders(dir).some((f) => f.path === full)) {
+        const r = await setup(['folder', full, '--name', UPLOADS], dir);
+        if (!r.ok) return refuse(res, 422, firstLine(r.lines));
+        return change(res, { note: 'The files are in. They are searchable as soon as the server is back.' });
+      }
+      // The running server knows the folder: read the new files now rather than at the next timed scan.
+      if (localFolders().some((f) => f.path === full)) {
+        const scan = await scanFolders();
+        return void res.json({ ok: true, restarting: false, restartNeeded: false, note: scan ? `The files are in: ${scan.indexed} read, ${scan.skipped} without text.` : 'The files are in. A scan is already running and will pick them up.' });
+      }
+      change(res);
+    }),
+  );
+
+  // ── How the documents link to each other (plugins/knowledge/graph.ts) ──
+  api.get(
+    '/graph',
+    wrap(async (_req, res) => {
+      const g = getGraph();
+      const nodes = [...g.nodes.values()];
+      res.json({
+        documents: nodes.length,
+        links: g.edges,
+        unlinked: unlinked(g).length,
+        broken: g.broken.length,
+        top: nodes.map((n) => nodeView(g, n)).filter((v) => v.in > 0).sort((a, b) => b.in - a.in || a.title.localeCompare(b.title)).slice(0, 15),
+        alone: unlinked(g).slice(0, 30).map((n) => nodeView(g, n)),
+        brokenLinks: g.broken.slice(0, 50).map((b) => ({ from: nodeView(g, g.nodes.get(b.from)!), target: b.target })),
+      });
+    }),
+  );
+  api.get(
+    '/graph/find',
+    wrap(async (req, res) => {
+      const q = z.string().max(200).parse(req.query.q ?? '').normalize('NFC').toLowerCase().trim();
+      const g = getGraph();
+      const hits = q ? [...g.nodes.values()].filter((n) => n.title.toLowerCase().includes(q) || n.path.normalize('NFC').toLowerCase().includes(q)) : [];
+      res.json({ found: hits.slice(0, 20).map((n) => nodeView(g, n)) });
+    }),
+  );
+  api.get(
+    '/graph/node',
+    wrap(async (req, res) => {
+      const id = z.string().min(1).max(2000).parse(req.query.id);
+      const g = getGraph();
+      const node = g.nodes.get(id);
+      if (!node) return refuse(res, 404, 'That document is not in the graph.');
+      const ends = (edges: GraphEdge[] | undefined, end: 'to' | 'from') =>
+        (edges ?? []).map((e) => ({ ...nodeView(g, g.nodes.get(e[end])!), meta: e.meta })).sort((a, b) => a.title.localeCompare(b.title));
+      res.json({ node: nodeView(g, node), out: ends(g.out.get(id), 'to'), in: ends(g.in.get(id), 'from'), broken: g.broken.filter((b) => b.from === id).map((b) => b.target) });
     }),
   );
 

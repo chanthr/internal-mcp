@@ -104,7 +104,8 @@ npm run dev                    # in a generated project: the address is in the f
 
 | Page | What you do there |
 | --- | --- |
-| Documents | Add a folder, connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
+| Documents | Drop files or folders on the page, add a folder by its path, connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
+| Graph | How your documents point at each other: the links people wrote, with the most linked documents, a view around any one document, and the loose ends (links to nowhere, documents nothing links to) |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
 | Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
@@ -417,7 +418,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Plugin | Tools | Needs |
 | --- | --- | --- |
-| `knowledge` | `search_knowledge`, `read_document` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required |
+| `knowledge` | `search_knowledge`, `read_document`, `linked_documents` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google sign-in from the console (it reads your own Drive), or a service account: share a folder or a document with that account and it is searchable. An OAuth refresh token in the environment works too |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
@@ -445,7 +446,15 @@ What the model reads is kept short, because it pays for every line:
 | --- | --- |
 | `search_knowledge` | Up to `topK` parts (default 5, at most 2 per document), each with the document, its date, an ID, the heading and how many terms of the question it holds. Two parts that are neighbours in a document are shown as one passage. When no passage holds half of the terms, the answer says the match is weak. A filter that matches nothing answers with the values that field has |
 | `read_document` | With `part` (the number a result shows): that passage and the parts around it (`around`, default 1), a few thousand characters. Without it: the document from the start, up to `maxChars` (default 20,000), and the `offset` that continues it. Plain text, not JSON |
+| `linked_documents` | With a document ID: what it links to and what links to it, by title, each with its ID. Without one: how many documents and links there are, and the documents most others link to. A search result that has links says so (`Links: to 2 · from 3`) |
 | A tool on a database | Rows as a compact table: `{"rowCount":2,"columns":["id","total"],"rows":[[1,10.5],[2,20]]}`, one row per line. The column names are said once |
+
+**The knowledge graph.** Documents in the local folders are linked the way their authors linked them, with no
+model in between: `[[Note]]`, `[[Note|shown text]]` and `[[folder/Note#Heading]]` as Obsidian writes them,
+Markdown links to documents (`[guide](../guides/setup.md)`), and header fields that name documents
+(`related: [a.md, "[[Note]]"]`). So an Obsidian vault added as a folder brings its graph with it. A target finds
+its document by path, by file name anywhere in the folder, or by title and alias; a note written later makes
+yesterday's dangling link whole. Only links that plainly meant a document and match none are reported as broken.
 
 | Task | How |
 | --- | --- |

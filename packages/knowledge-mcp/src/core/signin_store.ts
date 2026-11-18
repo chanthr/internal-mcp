@@ -7,43 +7,12 @@
  * and each stdio session a client starts), so renewing is done by one process at a time and the others read what
  * it wrote. Two processes spending the same refresh token would end the sign-in for both.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dataFile, type DataFile } from './data_file.js';
 import { acquireLock, releaseLock } from './lock.js';
-import { dataDir } from './paths.js';
 
-export interface SignInFile<T> {
-  path(): string;
-  read(): T | null;
-  write(value: T): void;
-  forget(): void;
-}
-
-/** A file under the data directory, written whole and swapped in so another process never reads half of it. */
-export function signInFile<T extends object>(relative: string): SignInFile<T> {
-  const path = () => join(dataDir(), relative);
-  return {
-    path,
-    read() {
-      try {
-        const j = JSON.parse(readFileSync(path(), 'utf8'));
-        return j && typeof j === 'object' ? (j as T) : null;
-      } catch {
-        return null;
-      }
-    },
-    write(value) {
-      mkdirSync(dirname(path()), { recursive: true, mode: 0o700 });
-      const tmp = `${path()}.${process.pid}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, path());
-    },
-    forget() {
-      rmSync(path(), { force: true });
-    },
-  };
-}
+export type SignInFile<T> = DataFile<T>;
+/** A sign-in's file under the data directory (core/data_file.ts). */
+export const signInFile = dataFile;
 
 export interface AccessToken {
   value: string;

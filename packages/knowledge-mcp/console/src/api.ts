@@ -77,6 +77,25 @@ export async function call<T = unknown>(method: string, path: string, body?: unk
   return json as T;
 }
 
+/** Send one file to the uploads folder. `path` is its place inside it ("notes/plan.md"). */
+export async function uploadFile(path: string, file: Blob): Promise<void> {
+  const res = await fetch(`./api/uploads?path=${encodeURIComponent(path)}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token() ?? ''}`, 'Content-Type': 'application/octet-stream' },
+    body: file,
+  });
+  if (res.ok) return;
+  if (res.status === 401) window.dispatchEvent(new Event(REFUSED));
+  const text = await res.text();
+  let error = text || `The server answered ${res.status}.`;
+  try {
+    error = (JSON.parse(text) as { error?: string }).error ?? error;
+  } catch {
+    /* not JSON */
+  }
+  throw new ApiError(error, res.status);
+}
+
 // ── What the API returns ──
 
 export interface PluginStatus {
