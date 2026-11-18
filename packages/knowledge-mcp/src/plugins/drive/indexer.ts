@@ -301,31 +301,46 @@ export function indexAvailable(): boolean {
   return vectorStoreKind() === 'built-in' || embeddingsConfigured();
 }
 
+/** The lock that keeps two runs from embedding the same passages twice (and paying twice). */
+export const BACKFILL_LOCK = 'backfill';
+
+/**
+ * Give vectors to up to `max` chunks that have none, from the stored chunk text. For a caller that already holds
+ * BACKFILL_LOCK. Returns how many chunks got a vector.
+ */
+export async function fillMissingVectors(max: number): Promise<number> {
+  const index = await getLocalIndex();
+  if (!index) return 0;
+  let n = 0;
+  while (n < max) {
+    const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(128, max - n));
+    if (batch.length === 0) break;
+    const inputs = batch.map((b) =>
+      embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') } as RawChunk),
+    );
+    const vectors = await embedTexts(inputs);
+    await index.setVectors(DRIVE_COLLECTION, batch.map((b, i) => ({ id: b.id, vector: vectors[i] })));
+    await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
+    n += batch.length;
+  }
+  return n;
+}
+
 /**
  * Give vectors to chunks that were indexed before an embedding model was configured (built-in index only).
- * Uses the stored chunk text, so no document is downloaded or extracted again. Works through at most `max` chunks
- * per call; the next sync continues. Returns how many chunks got a vector.
+ * Uses the stored chunk text, so no document is downloaded or extracted again. Works in rounds of `round` chunks
+ * and lets go of the lock between rounds, until none is left: a large index is finished in one go instead of a
+ * round per sync. Returns how many chunks got a vector (0 when another run is at it).
  */
-export async function backfillVectors(max = 20_000): Promise<number> {
-  const index = await getLocalIndex();
-  if (!index || !(await vectorsUsable())) return 0;
-  // One process at a time: two would embed the same passages twice (and pay twice).
-  const done = await withLock('backfill', async () => {
-    let n = 0;
-    while (n < max) {
-      const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(128, max - n));
-      if (batch.length === 0) break;
-      const inputs = batch.map((b) =>
-        embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') } as RawChunk),
-      );
-      const vectors = await embedTexts(inputs);
-      await index.setVectors(DRIVE_COLLECTION, batch.map((b, i) => ({ id: b.id, vector: vectors[i] })));
-      await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
-      n += batch.length;
-    }
-    return n;
-  });
-  return done ?? 0;
+export async function backfillVectors(round = 20_000): Promise<number> {
+  if (!(await getLocalIndex()) || !(await vectorsUsable())) return 0;
+  let total = 0;
+  for (;;) {
+    const done = await withLock(BACKFILL_LOCK, () => fillMissingVectors(round));
+    if (!done) break; // nothing left, or another run holds the lock
+    total += done;
+  }
+  return total;
 }
 
 /**

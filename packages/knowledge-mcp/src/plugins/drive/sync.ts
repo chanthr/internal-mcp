@@ -360,16 +360,16 @@ export const releaseSyncLock = (): void => releaseLock(SYNC_LOCK);
  * an embedding model was configured get their vectors.
  */
 export async function runSyncOnce(): Promise<SyncResult | null> {
-  return withLock(SYNC_LOCK, async () => {
-    const result = await runIncrementalSync();
-    try {
-      const filled = await backfillVectors();
-      if (filled > 0) console.error(`[drive-sync] added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
-    } catch (e) {
-      console.error(`[drive-sync] adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
-    }
-    return result;
-  });
+  const result = await withLock(SYNC_LOCK, () => runIncrementalSync());
+  if (!result) return null;
+  // After the sync, with its lock let go: vectors for a large index take long, and the next sync must not wait.
+  try {
+    const filled = await backfillVectors();
+    if (filled > 0) console.error(`[drive-sync] added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
+  } catch (e) {
+    console.error(`[drive-sync] adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
+  }
+  return result;
 }
 
 let _started = false;

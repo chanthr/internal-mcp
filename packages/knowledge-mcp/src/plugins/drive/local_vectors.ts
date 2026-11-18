@@ -90,15 +90,27 @@ function searchableText(payload: Payload | null | undefined): string {
 
 interface MemoryIndex {
   dim: number;
-  ids: number[];
-  payloads: Array<Payload | null>;
-  /** ids.length × dim, row after row. Only chunks that have a vector. */
+  /** Chunk ids as stored, in row order. */
+  ids: string[];
+  /** The row number of each chunk, for looking up its metadata. */
+  rows: number[];
+  /** Every vector, one after the other, normalized. */
   matrix: Float32Array;
   dataVersion: number;
 }
 
+/** Chunk metadata without the text, by row number: what a filter looks at. */
+interface MetaIndex {
+  byRow: Map<number, Payload | null>;
+  dataVersion: number;
+}
+
+/** How far down the keyword ranking a filtered search reads before it gives up finding more that pass. */
+const KEYWORD_FILTER_SCAN = 50_000;
+
 export class LocalVectorClient {
   private memory = new Map<string, MemoryIndex>();
+  private meta = new Map<string, MetaIndex>();
   private checked = new Set<string>();
 
   constructor(private readonly db: DatabaseSync) {
@@ -115,6 +127,12 @@ export class LocalVectorClient {
         /* another process added it first */
       }
     }
+  }
+
+  /** After a write: what was read into memory is no longer what the file holds. */
+  private forget(name: string): void {
+    this.memory.delete(name);
+    this.meta.delete(name);
   }
 
   private dataVersion(): number {
@@ -160,6 +178,9 @@ export class LocalVectorClient {
       }
     }
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_file ON ${table} (file_id)`);
+    // The chunks that still wait for a vector, and nothing else. Finding the next batch to embed, and counting how
+    // many are left, read this small index instead of walking the whole table past every chunk that is done.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_novec ON ${table} (file_id) WHERE vector IS NULL`);
     this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${ftsOf(name)} USING fts5(tokens, content='', contentless_delete=1)`);
   }
 
@@ -197,7 +218,7 @@ export class LocalVectorClient {
     if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) throw new Error('[index] createCollection needs vectors.size');
     this.createTables(name);
     this.db.prepare('INSERT OR REPLACE INTO vec_collections (name, dim) VALUES (?, ?)').run(name, size);
-    this.memory.delete(name);
+    this.forget(name);
     this.checked.add(name);
     return true;
   }
@@ -206,7 +227,7 @@ export class LocalVectorClient {
     this.db.exec(`DROP TABLE IF EXISTS ${tableOf(name)}`);
     this.db.exec(`DROP TABLE IF EXISTS ${ftsOf(name)}`);
     this.db.prepare('DELETE FROM vec_collections WHERE name = ?').run(name);
-    this.memory.delete(name);
+    this.forget(name);
     this.checked.delete(name);
     return true;
   }
@@ -252,7 +273,7 @@ export class LocalVectorClient {
       this.db.exec('ROLLBACK');
       throw e;
     }
-    this.memory.delete(name);
+    this.forget(name);
     return { status: 'completed' };
   }
 
@@ -285,7 +306,7 @@ export class LocalVectorClient {
       this.db.exec('ROLLBACK');
       throw e;
     }
-    this.memory.delete(name);
+    this.forget(name);
     return { status: 'completed' };
   }
 
@@ -306,9 +327,18 @@ export class LocalVectorClient {
   ): Promise<{ points: QdrantPoint[]; next_page_offset?: PointId | null }> {
     this.requireDim(name);
     const limit = body.limit ?? 10;
-    const rows = this.db
-      .prepare(`SELECT rowid AS rid, id, payload FROM ${tableOf(name)} WHERE rowid >= ? ORDER BY rowid`)
-      .iterate(body.offset === undefined ? 0 : Number(body.offset)) as Iterable<{ rid: number; id: string; payload: string }>;
+    const from = body.offset === undefined ? 0 : Number(body.offset);
+    const must = (body.filter?.must ?? []) as MustClause[];
+    const oneFile = must.length === 1 && !body.filter?.should?.length && !body.filter?.must_not?.length && must[0].key === 'file_id' && typeof must[0].match?.value === 'string';
+    // When only a few fields are asked for and nothing is filtered, the database picks them out: the chunk text is
+    // most of every row, and reading it into the server only to drop it made paging through an index slow.
+    const keys = Array.isArray(body.with_payload) && !body.filter && body.with_payload.every((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) ? body.with_payload : null;
+    const column = keys ? `json_object(${keys.map((k) => `'${k}', json_extract(payload, '$.${k}')`).join(', ')}) AS payload` : 'payload';
+    const rows = (
+      oneFile
+        ? this.db.prepare(`SELECT rowid AS rid, id, ${column} FROM ${tableOf(name)} WHERE file_id = ? AND rowid >= ? ORDER BY rowid`).iterate(must[0].match!.value as string, from)
+        : this.db.prepare(`SELECT rowid AS rid, id, ${column} FROM ${tableOf(name)} WHERE rowid >= ? ORDER BY rowid`).iterate(from)
+    ) as Iterable<{ rid: number; id: string; payload: string }>;
     const points: QdrantPoint[] = [];
     for (const r of rows) {
       const payload = JSON.parse(r.payload) as Payload | null;
@@ -319,29 +349,59 @@ export class LocalVectorClient {
     return { points, next_page_offset: null };
   }
 
+  /**
+   * Every vector in one array, for search. Only the vectors: a chunk's text and metadata stay in the file and are
+   * read for the few chunks a search returns. (Loading them too held the whole index in memory a second time.)
+   */
   private load(name: string): MemoryIndex {
     const version = this.dataVersion();
     const cached = this.memory.get(name);
     if (cached && cached.dataVersion === version) return cached;
     const dim = this.requireDim(name);
-    const rows = this.db.prepare(`SELECT id, payload, vector FROM ${tableOf(name)} WHERE vector IS NOT NULL ORDER BY rowid`).all() as Array<{
-      id: string;
-      payload: string;
-      vector: Uint8Array;
-    }>;
-    const matrix = new Float32Array(rows.length * dim);
-    const ids: number[] = [];
-    const payloads: Array<Payload | null> = [];
-    rows.forEach((r, i) => {
-      // Copy out of the row buffer: its byte offset is not guaranteed to be aligned for a Float32Array view.
-      const bytes = new Uint8Array(r.vector);
-      matrix.set(new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + dim * 4)), i * dim);
-      ids.push(Number(r.id));
-      payloads.push(JSON.parse(r.payload) as Payload | null);
-    });
-    const index = { dim, ids, payloads, matrix, dataVersion: version };
+    const table = tableOf(name);
+    // One snapshot for the count and the rows, so the array is exactly as long as what is read into it.
+    this.db.exec('BEGIN');
+    let index: MemoryIndex;
+    try {
+      const n = Number((this.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE vector IS NOT NULL`).get() as { n: number }).n);
+      const matrix = new Float32Array(n * dim);
+      const bytes = new Uint8Array(matrix.buffer);
+      const ids: string[] = new Array(n);
+      const rows: number[] = new Array(n);
+      let i = 0;
+      const stored = this.db.prepare(`SELECT rowid AS rid, id, vector FROM ${table} WHERE vector IS NOT NULL ORDER BY rowid`).iterate() as Iterable<{
+        rid: number;
+        id: string;
+        vector: Uint8Array;
+      }>;
+      for (const r of stored) {
+        if (i === n) break;
+        // Copied as bytes: a row's buffer is not guaranteed to start where a Float32Array could view it.
+        bytes.set(r.vector.subarray(0, dim * 4), i * dim * 4);
+        rows[i] = Number(r.rid);
+        ids[i++] = r.id;
+      }
+      index = { dim, ids, rows, matrix, dataVersion: version };
+    } finally {
+      this.db.exec('COMMIT');
+    }
     this.memory.set(name, index);
     return index;
+  }
+
+  /**
+   * Chunk metadata without the text, by row number: what a filter needs to look at. Read the first time a search
+   * has a filter and kept until the index changes. A search without a filter never needs it.
+   */
+  private metadata(name: string): Map<number, Payload | null> {
+    const version = this.dataVersion();
+    const cached = this.meta.get(name);
+    if (cached && cached.dataVersion === version) return cached.byRow;
+    const byRow = new Map<number, Payload | null>();
+    const stored = this.db.prepare(`SELECT rowid AS rid, json_remove(payload, '$.content') AS payload FROM ${tableOf(name)}`).iterate() as Iterable<{ rid: number; payload: string | null }>;
+    for (const r of stored) byRow.set(Number(r.rid), r.payload ? (JSON.parse(r.payload) as Payload | null) : null);
+    this.meta.set(name, { byRow, dataVersion: version });
+    return byRow;
   }
 
   /** Vector search. Only chunks that have a vector take part. */
@@ -349,26 +409,54 @@ export class LocalVectorClient {
     name: string,
     body: { vector: number[]; limit: number; filter?: QdrantFilter; with_payload?: boolean | string[]; score_threshold?: number },
   ): Promise<ScoredPoint[]> {
-    const { dim, ids, payloads, matrix } = this.load(name);
+    const { dim, ids, rows, matrix } = this.load(name);
     if (body.vector.length !== dim) {
       throw new Error(`[index] query vector size ${body.vector.length} does not match collection '${name}' (${dim})`);
     }
     const q = normalized(body.vector);
-    const scored: Array<{ i: number; score: number }> = [];
-    for (let i = 0; i < ids.length; i++) {
-      if (!matchesFilter(payloads[i], body.filter)) continue;
-      let dot = 0;
+    const filtered = !!(body.filter?.must?.length || body.filter?.should?.length || body.filter?.must_not?.length);
+    const meta = filtered ? this.metadata(name) : null;
+    // The best `limit` are kept as they are found (sorted, best first): one pass, and no list of every score to sort.
+    const k = Math.max(0, Math.min(body.limit, ids.length));
+    const topScore = new Float64Array(k);
+    const topRow = new Int32Array(k);
+    let kept = 0;
+    const floor = body.score_threshold ?? -Infinity;
+    for (let i = 0; i < ids.length && k > 0; i++) {
+      if (meta && !matchesFilter(meta.get(rows[i]) ?? null, body.filter)) continue;
       const base = i * dim;
-      for (let j = 0; j < dim; j++) dot += matrix[base + j] * q[j];
-      if (body.score_threshold !== undefined && dot < body.score_threshold) continue;
-      scored.push({ i, score: dot });
+      let d0 = 0;
+      let d1 = 0;
+      let d2 = 0;
+      let d3 = 0;
+      let j = 0;
+      for (; j + 3 < dim; j += 4) {
+        d0 += matrix[base + j] * q[j];
+        d1 += matrix[base + j + 1] * q[j + 1];
+        d2 += matrix[base + j + 2] * q[j + 2];
+        d3 += matrix[base + j + 3] * q[j + 3];
+      }
+      for (; j < dim; j++) d0 += matrix[base + j] * q[j];
+      const dot = d0 + d1 + d2 + d3;
+      if (dot < floor || (kept === k && dot <= topScore[k - 1])) continue;
+      let at = kept < k ? kept++ : k - 1;
+      while (at > 0 && topScore[at - 1] < dot) {
+        topScore[at] = topScore[at - 1];
+        topRow[at] = topRow[at - 1];
+        at--;
+      }
+      topScore[at] = dot;
+      topRow[at] = i;
     }
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, body.limit).map(({ i, score }) => ({
-      id: ids[i],
-      score,
-      payload: pickPayload(payloads[i], body.with_payload ?? false),
-    }));
+    const want = body.with_payload ?? false;
+    const read = want === false ? null : this.db.prepare(`SELECT payload FROM ${tableOf(name)} WHERE id = ?`);
+    const out: ScoredPoint[] = [];
+    for (let r = 0; r < kept; r++) {
+      const id = ids[topRow[r]];
+      const row = read ? (read.get(id) as { payload: string } | undefined) : undefined;
+      out.push({ id: Number(id), score: topScore[r], payload: pickPayload(row ? (JSON.parse(row.payload) as Payload | null) : null, want) });
+    }
+    return out;
   }
 
   // ── Only in the built-in index ──
@@ -386,30 +474,98 @@ export class LocalVectorClient {
     if (!match) return [];
     const table = tableOf(name);
     const fts = ftsOf(name);
-    const filtered = !!body.filter?.must?.length;
-    // Filters are applied after ranking, so fetch more than asked for when there is one.
-    const fetch = filtered ? Math.min(2000, body.limit * 20) : body.limit;
-    const rows = this.db
-      .prepare(`SELECT t.id AS id, t.payload AS payload, bm25(${fts}) AS rank FROM ${fts} JOIN ${table} t ON t.rowid = ${fts}.rowid WHERE ${fts} MATCH ? ORDER BY rank LIMIT ?`)
-      .all(match, fetch) as Array<{ id: string; payload: string; rank: number }>;
+    const filtered = !!(body.filter?.must?.length || body.filter?.should?.length || body.filter?.must_not?.length);
+    // The ranking is read as row numbers only, and the text is read for the chunks that are returned. (Ranking the
+    // chunks together with their text made the database carry every candidate's text through its sort.)
+    // A filter is applied after ranking, down a generous stretch of it, so a filter that few chunks pass still
+    // finds them; the stretch is bounded so a filter nothing passes does not walk a huge index for every query.
+    const ranked = this.db
+      .prepare(`SELECT rowid AS rid, bm25(${fts}) AS rank FROM ${fts} WHERE ${fts} MATCH ? ORDER BY rank LIMIT ?`)
+      .all(match, filtered ? KEYWORD_FILTER_SCAN : body.limit) as Array<{ rid: number; rank: number }>;
+    const meta = filtered ? this.metadata(name) : null;
+    const read = this.db.prepare(`SELECT id, payload FROM ${table} WHERE rowid = ?`);
     const out: ScoredPoint[] = [];
-    for (const r of rows) {
-      const payload = JSON.parse(r.payload) as Payload | null;
-      if (!matchesFilter(payload, body.filter)) continue;
-      out.push({ id: Number(r.id), score: -r.rank, payload: pickPayload(payload, body.with_payload ?? true) }); // bm25() is smaller for better matches
+    for (const r of ranked) {
+      if (meta && !matchesFilter(meta.get(Number(r.rid)) ?? null, body.filter)) continue;
+      const row = read.get(r.rid) as { id: string; payload: string } | undefined;
+      if (!row) continue;
+      out.push({ id: Number(row.id), score: -r.rank, payload: pickPayload(JSON.parse(row.payload) as Payload | null, body.with_payload ?? true) }); // bm25() is smaller for better matches
       if (out.length === body.limit) break;
     }
     return out;
+  }
+
+  /** How many chunks there are, and how many of them still wait for a vector. Both read an index, not the table. */
+  private counts(name: string): { chunks: number; missing: number } {
+    const table = tableOf(name);
+    const chunks = Number((this.db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n);
+    const missing = Number((this.db.prepare(`SELECT count(*) AS n FROM ${table} WHERE vector IS NULL`).get() as { n: number }).n);
+    return { chunks, missing };
   }
 
   /** How much is indexed: chunks, chunks that have a vector, and distinct documents. */
   async stats(name: string): Promise<{ chunks: number; withVectors: number; documents: number }> {
     if (this.dimOf(name) === undefined) return { chunks: 0, withVectors: 0, documents: 0 };
     this.requireDim(name);
-    const r = this.db
-      .prepare(`SELECT count(*) AS chunks, count(vector) AS withVectors, count(DISTINCT file_id) AS documents FROM ${tableOf(name)}`)
-      .get() as { chunks: number; withVectors: number; documents: number };
-    return { chunks: Number(r.chunks), withVectors: Number(r.withVectors), documents: Number(r.documents) };
+    const { chunks, missing } = this.counts(name);
+    const documents = Number((this.db.prepare(`SELECT count(DISTINCT file_id) AS n FROM ${tableOf(name)}`).get() as { n: number }).n);
+    return { chunks, withVectors: chunks - missing, documents };
+  }
+
+  /**
+   * Every indexed document with the modified time recorded for it, optionally only ids that start with `prefix`.
+   * One row is read per document (its first chunk), not one per chunk.
+   */
+  async documentTimes(name: string, prefix = ''): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (this.dimOf(name) === undefined) return out;
+    this.requireDim(name);
+    const table = tableOf(name);
+    const rows = this.db
+      .prepare(
+        `SELECT file_id, json_extract(payload, '$.modified_time') AS modified FROM ${table} ` +
+          `WHERE rowid IN (SELECT min(rowid) FROM ${table} WHERE file_id >= ? AND file_id < ? GROUP BY file_id)`,
+      )
+      .iterate(prefix, `${prefix}\u{10FFFF}`) as Iterable<{ file_id: string | null; modified: string | null }>;
+    for (const r of rows) if (r.file_id) out.set(r.file_id, r.modified ?? '');
+    return out;
+  }
+
+  /** The chunks of one document, found through the document index. Not in document order. */
+  async documentChunks(name: string, fileId: string): Promise<Array<Payload | null>> {
+    if (this.dimOf(name) === undefined) return [];
+    this.requireDim(name);
+    const rows = this.db.prepare(`SELECT payload FROM ${tableOf(name)} WHERE file_id = ?`).all(fileId) as Array<{ payload: string }>;
+    return rows.map((r) => JSON.parse(r.payload) as Payload | null);
+  }
+
+  /**
+   * The values a metadata field takes over the whole index, most frequent first, counted in documents. For telling
+   * a caller whose filter matched nothing what it could have asked for.
+   */
+  async fieldValues(name: string, key: string, limit = 12): Promise<Array<{ value: string; documents: number }>> {
+    if (this.dimOf(name) === undefined) return [];
+    this.requireDim(name);
+    const docs = new Map<string, Set<string>>();
+    for (const p of this.metadata(name).values()) {
+      const raw = p?.[key];
+      const file = typeof p?.file_id === 'string' ? p.file_id : '';
+      for (const v of Array.isArray(raw) ? raw : [raw]) {
+        if (typeof v !== 'string' || !v) continue;
+        let set = docs.get(v);
+        if (!set) docs.set(v, (set = new Set()));
+        set.add(file);
+      }
+    }
+    return [...docs.entries()].map(([value, set]) => ({ value, documents: set.size })).sort((a, b) => b.documents - a.documents || a.value.localeCompare(b.value)).slice(0, limit);
+  }
+
+  /** How many documents have an id that starts with `prefix` (the documents of one local folder). */
+  async countDocuments(name: string, prefix: string): Promise<number> {
+    if (this.dimOf(name) === undefined) return 0;
+    this.requireDim(name);
+    const r = this.db.prepare(`SELECT count(DISTINCT file_id) AS n FROM ${tableOf(name)} WHERE file_id >= ? AND file_id < ?`).get(prefix, `${prefix}\u{10FFFF}`) as { n: number };
+    return Number(r.n);
   }
 
   /**
@@ -419,7 +575,11 @@ export class LocalVectorClient {
   async embeddingState(name: string): Promise<{ dim: number; model: string | null; vectors: number } | null> {
     const row = this.db.prepare('SELECT dim, model FROM vec_collections WHERE name = ?').get(name) as { dim: number; model: string | null } | undefined;
     if (!row) return null;
-    return { dim: row.dim, model: row.model ?? null, vectors: this.load(name).ids.length };
+    this.requireDim(name);
+    // Counted, not loaded: this is asked on every search and every status read, and loading every vector to count
+    // them cost hundreds of megabytes each time the index had changed.
+    const { chunks, missing } = this.counts(name);
+    return { dim: row.dim, model: row.model ?? null, vectors: chunks - missing };
   }
 
   /**
@@ -431,7 +591,7 @@ export class LocalVectorClient {
     if (!state) return;
     if (state.vectors > 0) throw new Error(`[index] collection '${name}' holds vectors; clear them before changing the size`);
     this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
-    this.memory.delete(name);
+    this.forget(name);
   }
 
   /** Remember which model made the vectors, so a later change of model is noticed instead of mixing two models. */
@@ -447,14 +607,15 @@ export class LocalVectorClient {
     this.requireDim(name);
     const r = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = NULL WHERE vector IS NOT NULL`).run();
     this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
-    this.memory.delete(name);
+    this.forget(name);
     return Number(r.changes);
   }
 
   /** Chunks stored without a vector (indexed before an embedding model was configured). */
   async missingVectors(name: string, limit: number): Promise<Array<{ id: number; payload: Payload | null }>> {
     this.requireDim(name);
-    const rows = this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL ORDER BY rowid LIMIT ?`).all(limit) as Array<{
+    // Through the index of chunks without a vector: the cost is the batch, however many chunks are already done.
+    const rows = this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL LIMIT ?`).all(limit) as Array<{
       id: string;
       payload: string;
     }>;
@@ -476,7 +637,7 @@ export class LocalVectorClient {
       this.db.exec('ROLLBACK');
       throw e;
     }
-    this.memory.delete(name);
+    this.forget(name);
   }
 }
 

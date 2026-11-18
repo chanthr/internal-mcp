@@ -7,7 +7,8 @@
  */
 import { cli } from '../../core/invocation.js';
 import { embedQuery, embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../drive/embeddings.js';
-import { backfillVectors } from '../drive/indexer.js';
+import { withLock } from '../../core/lock.js';
+import { BACKFILL_LOCK, fillMissingVectors } from '../drive/indexer.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 
 export type Reembedded =
@@ -31,16 +32,23 @@ export async function reembed(onProgress?: (done: number, total: number) => void
       why: `${EMBEDDING_MODEL} returns ${probe.length}-dimension vectors but EMBEDDING_DIM is ${EMBEDDING_DIM}. Set EMBEDDING_DIM=${probe.length} (${cli('setup embeddings')} does this) and run this again.`,
     };
   }
-  const before = await index.stats(DRIVE_COLLECTION);
-  const dropped = await index.clearVectors(DRIVE_COLLECTION, EMBEDDING_DIM);
-  onProgress?.(0, before.chunks);
-  let done = 0;
-  for (;;) {
-    const n = await backfillVectors(1280);
-    if (n === 0) break;
-    done += n;
-    onProgress?.(done, before.chunks);
-  }
+  // The old vectors are dropped only by the run that then makes the new ones. Dropping them while another run was
+  // filling in vectors left the index nearly empty of vectors and nobody at work on it.
+  const result = await withLock(BACKFILL_LOCK, async () => {
+    const before = await index.stats(DRIVE_COLLECTION);
+    const dropped = await index.clearVectors(DRIVE_COLLECTION, EMBEDDING_DIM);
+    onProgress?.(0, before.chunks);
+    let done = 0;
+    for (;;) {
+      const n = await fillMissingVectors(1280);
+      if (n === 0) break;
+      done += n;
+      onProgress?.(done, before.chunks);
+    }
+    return dropped;
+  });
+  if (result === null) return { ok: false, why: 'Vectors are being made right now by another run. Wait until it has finished, then try again.' };
+  const dropped = result;
   const after = await index.stats(DRIVE_COLLECTION);
   return { ok: true, model: EMBEDDING_MODEL, dropped, passages: after.chunks, withVectors: after.withVectors };
 }
