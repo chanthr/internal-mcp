@@ -233,6 +233,7 @@ function NewTool({ connection, connections, onClose }: { connection: string; con
   const [changes, setChanges] = useState(true);
   const [types, setTypes] = useState<Record<string, ParamSpec['type']>>({});
   const [optional, setOptional] = useState<Record<string, boolean>>({});
+  const [about, setAbout] = useState<Record<string, string>>({});
   const [tables, setTables] = useState<TableInfo[] | null>(null);
   const [checked, setChecked] = useState<{ ok: boolean; text: string } | null>(null);
   const check = useAction();
@@ -253,7 +254,9 @@ function NewTool({ connection, connections, onClose }: { connection: string; con
   const mayBeOptional = (n: string) => api && !inPath.includes(n);
 
   const tool = (): DeclaredTool => {
-    const params = Object.fromEntries(names.map((n) => [n, { type: types[n] ?? 'string', ...(mayBeOptional(n) && optional[n] ? { required: false } : {}) }]));
+    const params = Object.fromEntries(
+      names.map((n) => [n, { type: types[n] ?? 'string', ...(about[n]?.trim() ? { description: about[n].trim() } : {}), ...(mayBeOptional(n) && optional[n] ? { required: false } : {}) }]),
+    );
     if (!api) return { name, connection: conn, description, params, sql };
     const request: NonNullable<DeclaredTool['request']> = { method, path: path.trim() };
     const q = queryFromLines(query);
@@ -407,6 +410,13 @@ function NewTool({ connection, connections, onClose }: { connection: string; con
                 { value: 'number', label: 'Number' },
                 { value: 'boolean', label: 'Yes or no' },
               ]}
+            />
+            <TextField
+              label="What it is"
+              size="sm"
+              placeholder="Customer email, e.g. ann@example.com"
+              value={about[n] ?? ''}
+              onChange={(e) => setAbout((a) => ({ ...a, [n]: e.target.value }))}
             />
             {mayBeOptional(n) && <Switch size="sm" label="Optional" checked={optional[n] === true} onChange={(e) => setOptional((o) => ({ ...o, [n]: e.target.checked }))} />}
           </div>

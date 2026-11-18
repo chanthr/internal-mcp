@@ -185,7 +185,7 @@ export default definePlugin({
         });
         if (r.status === 404) throw new ToolError(`No city named ${city}`);
         ctx.log(`weather for ${city} by ${ctx.user.email}`);
-        return r.json();            // any JSON value is sent as pretty JSON
+        return r.json();            // any JSON value is sent as compact JSON
       },
     }),
   ],
@@ -201,7 +201,7 @@ router, a tool list or a permission table.
 | Hides it when not configured | Until every name in `env` is set, and `enabled()` returns true when you add one |
 | Validates input | Bad input returns `[invalid_input] tool '<name>': field: reason` to the model, and `run` is not called |
 | Checks permission | The plugin `id` is the permission group (see [Access control](#access-control)) |
-| Formats the result | A string becomes text, any other value becomes pretty JSON, an MCP result passes through |
+| Formats the result | A string becomes text, any other value becomes compact JSON (the reader is a model, and indentation is a third of an indented answer), an MCP result passes through |
 | Handles errors | `throw new ToolError('...')` returns `[error] ...`. Any other error returns `[fatal] ...` |
 | Logs the call | Tool, person, role, success and duration go to the audit log. Arguments are not stored |
 
@@ -421,6 +421,14 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Keywords + meaning | An embedding model is set (`OPENAI_API_KEY`, or `EMBEDDING_BASE_URL` for another provider or a local model) | Also documents that say the same thing in other words. The two result lists are merged by rank. When the embedding endpoint is down, search answers from keywords and says so |
 | Meaning only | `QDRANT_URL` is set | Vectors live in Qdrant, which holds no keyword index here. An embedding model is required |
 
+What the model reads is kept short, because it pays for every line:
+
+| Tool | What comes back |
+| --- | --- |
+| `search_knowledge` | Up to `topK` parts (default 5, at most 2 per document), each with the document, its date, an ID, the heading and how many terms of the question it holds. Two parts that are neighbours in a document are shown as one passage. When no passage holds half of the terms, the answer says the match is weak. A filter that matches nothing answers with the values that field has |
+| `read_document` | With `part` (the number a result shows): that passage and the parts around it (`around`, default 1), a few thousand characters. Without it: the document from the start, up to `maxChars` (default 20,000), and the `offset` that continues it. Plain text, not JSON |
+| A tool on a database | Rows as a compact table: `{"rowCount":2,"columns":["id","total"],"rows":[[1,10.5],[2,20]]}`, one row per line. The column names are said once |
+
 | Task | How |
 | --- | --- |
 | Add a local folder | `knowledge-mcp setup folder <path>`, or `folders` in the config. The HTTP server scans it at start and every 10 minutes (`KNOWLEDGE_SCAN_INTERVAL_MIN`); a stdio session scans once when it starts; `knowledge-mcp knowledge scan` scans now. Unchanged files are not opened, deleted files leave the index. Text is indexed first and vectors afterwards, so keyword search covers the folder within seconds |
@@ -428,7 +436,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | Add search by meaning later | Set the embedding model and restart. Stored passages get their vectors on the next scan or sync; no document is read again |
 | Change the embedding model | Set the new model, then `knowledge-mcp knowledge reembed`: it drops the old vectors and makes new ones from the stored text. Until then search answers by keywords, because vectors of two models are never mixed |
 | What leaves the machine | Nothing for keyword search. With an embedding model, passage text and each question go to that model's endpoint |
-| Where it lives | `<data dir>/vectors.db`: the text, the keyword index and the vectors. Good for tens of thousands of passages. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
+| Where it lives | `<data dir>/vectors.db`: the text, the keyword index and the vectors. Measured with 90,000 passages (5,000 files): a keyword search takes about 6 ms, a search by meaning about 85 ms, and the vectors take about 4 bytes × dimensions per passage in memory (370 MB at 1,024 dimensions), read on the first search by meaning. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
 | Scanned files | The automatic runs never use paid OCR. `knowledge-mcp drive reindex` adds scanned Drive files when Mathpix is configured; scanned files in local folders are left out |
 | Clean up | A full `drive reindex` deletes Drive documents no longer listed, such as files moved into an excluded folder |
 | Start over | `drive reindex --recreate` empties the index first, local folders included (they are indexed again by the next scan). `--dry-run` only counts passages and skips OCR |

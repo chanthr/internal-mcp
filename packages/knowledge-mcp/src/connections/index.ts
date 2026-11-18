@@ -133,10 +133,16 @@ function exploreTools(name: string, c: SqlConnection): Tool[] {
         const problem = sqlProblem(parsed, true);
         if (problem) throw new ToolError(problem);
         if (parsed.names.length) throw new ToolError(`write the value into the query instead of :${parsed.names[0]} (parameters are not supported here)`);
-        return tableResult(
-          await sqlAdapterFor(name, c).query({ sql: parsed, values: {}, readOnly: true, untrusted: true, maxRows: limit, timeoutMs: c.timeoutMs ?? DEFAULT_SQL_TIMEOUT_MS }),
-          limit,
-        );
+        try {
+          return tableResult(
+            await sqlAdapterFor(name, c).query({ sql: parsed, values: {}, readOnly: true, untrusted: true, maxRows: limit, timeoutMs: c.timeoutMs ?? DEFAULT_SQL_TIMEOUT_MS }),
+            limit,
+          );
+        } catch (e) {
+          // A name the database does not know is the usual mistake of a query written from memory.
+          if (e instanceof ToolError && /no such (table|column)|does not exist|unknown column/i.test(e.message)) throw new ToolError(`${e.message}. Call ${names.tables} for the real table and column names.`);
+          throw e;
+        }
       },
     }),
   ];

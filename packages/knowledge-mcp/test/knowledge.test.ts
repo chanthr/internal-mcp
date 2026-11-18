@@ -92,12 +92,14 @@ test('scan: supported files are indexed; excluded folders, dot and build folders
 
 test('search works by keywords alone, in Korean and English, and shows the document date', async () => {
   const en = await search(admin, { query: 'which branch do production deploys come from?' });
-  assert.match(en, /matched by keyword\n/);
-  assert.match(en, /### 1\. \[2026-10-01, \d+mo old\] deploy\.md|### 1\. \[2026-10-01\] deploy\.md/);
-  assert.match(en, /Document ID:\*\* `local:docs\/guides\/deploy\.md`/);
+  assert.match(en, /matched by keyword\./);
+  assert.match(en, /^## 1\. deploy\.md — 2026-10-01(, \d+mo old)?$/m);
+  assert.match(en, /^ID: `local:docs\/guides\/deploy\.md`$/m);
+  // How much of the question the passage holds.
+  assert.match(en, /^Match: keyword \(\d of \d terms of the question\)/m);
   assert.ok(!en.includes('node_modules') && !en.includes('pkg'), 'build folders are not indexed');
   const ko = await search(admin, { query: '휴가 신청서' });
-  assert.match(ko, /### 1\. .*leave\.md/);
+  assert.match(ko, /^## 1\. leave\.md/m);
   const none = await search(admin, { query: 'zzzz qqqq' });
   assert.match(none, /No document contains these words/);
   assert.match(await search(admin, { query: 'budget', source: 'handbook' }), /notes\.txt/);
@@ -106,9 +108,11 @@ test('search works by keywords alone, in Korean and English, and shows the docum
 });
 
 test('read_document: by id, and never outside the folder or the caller\'s scope', async () => {
-  const ok = JSON.parse(text((await read(admin, { documentId: 'local:docs/guides/deploy.md' })) as never));
-  assert.match(ok.body, /Rollback uses the previous image/);
-  assert.equal(ok.meta.path, 'docs/guides/deploy.md');
+  // Plain text with a short head: which document, and how much of it this is.
+  const ok = text((await read(admin, { documentId: 'local:docs/guides/deploy.md' })) as never);
+  assert.match(ok, /^# deploy\.md\nID: `local:docs\/guides\/deploy\.md` · modified \d{4}-\d{2}-\d{2} · \d+ characters, the whole document\n\n/);
+  assert.match(ok, /Rollback uses the previous image/);
+  assert.ok(!ok.includes('\\n'), 'the text is not escaped');
   for (const id of [
     'local:docs/../secret.md',
     'local:docs/guides/../../etc/passwd',
@@ -128,10 +132,10 @@ test('read_document: by id, and never outside the folder or the caller\'s scope'
   assert.match(text((await read(scoped, { documentId: 'local:docs/guides/leave.md' })) as never), /사흘 전에/);
   assert.equal(((await read(scoped, { documentId: 'local:docs/notes.txt' })) as { isError?: boolean }).isError, true);
   assert.match(await search(scoped, { query: 'quarterly budget' }), /No results/);
-  const batch = JSON.parse(text((await read(admin, { documentIds: ['local:docs/notes.txt', 'local:docs/missing.md'] })) as never));
-  assert.equal(batch.count, 2);
-  assert.match(batch.documents[0].body, /Quarterly budget/);
-  assert.match(batch.documents[1].error, /not found/);
+  const batch = text((await read(admin, { documentIds: ['local:docs/notes.txt', 'local:docs/missing.md'] })) as never).split('\n\n---\n\n');
+  assert.equal(batch.length, 2);
+  assert.match(batch[0], /^# notes\.txt\n[\s\S]*Quarterly budget/);
+  assert.match(batch[1], /^# local:docs\/missing\.md\n\[error\] \[not found\]/);
 });
 
 test('scan follows edits and deletions', async () => {
@@ -222,9 +226,26 @@ test('adding an embedding model later: stored chunks get vectors without re-read
     const stats = await (await getLocalIndex())!.stats(DRIVE_COLLECTION);
     assert.equal(stats.withVectors, stats.chunks);
     const out = await search(admin, { query: 'production deploys main branch' });
-    assert.match(out, /matched by keyword \+ semantic\n/);
-    assert.match(out, /### 1\. .*deploy\.md/);
-    assert.match(out, /\(keyword \+ semantic\)/);
+    assert.match(out, /matched by keyword \+ semantic\./);
+    assert.match(out, /^## 1\. deploy\.md/m);
+    assert.match(out, /^Match: keyword \+ semantic /m);
+    // New vectors for everything are made only by a run that holds the lock. While another run is filling in
+    // vectors, nothing is dropped: dropping them then left the index almost without vectors and nobody at work.
+    const { reembed } = await import('../src/plugins/knowledge/reembed.js');
+    const { acquireLock, releaseLock } = await import('../src/core/lock.js');
+    assert.equal(acquireLock('backfill'), true);
+    try {
+      const refused = await reembed();
+      assert.equal(refused.ok, false);
+      assert.match((refused as { why: string }).why, /being made right now by another run/);
+      assert.equal((await (await getLocalIndex())!.stats(DRIVE_COLLECTION)).withVectors, stats.chunks, 'nothing was dropped');
+    } finally {
+      releaseLock('backfill');
+    }
+    const seen: number[] = [];
+    const redone = await reembed((done) => seen.push(done));
+    assert.deepEqual([redone.ok, redone.ok && redone.withVectors], [true, stats.chunks]);
+    assert.deepEqual([seen[0], seen.at(-1)], [0, stats.chunks]);
   } finally {
     delete process.env.EMBEDDING_BASE_URL;
   }
@@ -235,7 +256,7 @@ test('when the embedding endpoint is down, search still answers from keywords an
   process.env.EMBED_QUERY_RETRIES = '0';
   try {
     const out = await search(admin, { query: 'production deploys' });
-    assert.match(out, /matched by keyword\n/);
+    assert.match(out, /matched by keyword\./);
     assert.match(out, /Search by meaning is unavailable right now/);
     assert.match(out, /deploy\.md/);
   } finally {

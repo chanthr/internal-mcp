@@ -52,6 +52,26 @@ export function Tools() {
   );
 }
 
+/**
+ * The answer as a person reads it. A model is sent rows as a compact table (the column names once, a row per line)
+ * because room is what it pays for; here the same rows are set in columns. Anything else is shown as it came.
+ */
+function readable(text: string): string {
+  if (!text.startsWith('{"rowCount":')) return text;
+  try {
+    const t = JSON.parse(text) as { rowCount: number; columns?: string[]; rows?: unknown[][]; rowsChanged?: number; note?: string };
+    if (!Array.isArray(t.columns) || !Array.isArray(t.rows)) return text;
+    const shown = (v: unknown) => (v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)).replace(/\s+/g, ' ').slice(0, 60);
+    const cells = [t.columns, ...t.rows.map((r) => r.map(shown))];
+    const widths = t.columns.map((_, i) => Math.max(...cells.map((r) => (r[i] ?? '').length)));
+    const lines = cells.map((r) => r.map((c, i) => c.padEnd(widths[i])).join('  ').trimEnd());
+    lines.splice(1, 0, widths.map((w) => '─'.repeat(w)).join('  '));
+    return [...lines, '', `${t.rowCount} row${t.rowCount === 1 ? '' : 's'}${t.note ? `. ${t.note}` : ''}`].join('\n');
+  } catch {
+    return text;
+  }
+}
+
 /** One tool: what it is, a form made from its inputs, and the answer of a real call. */
 function Try({ tool }: { tool: ToolView }) {
   const props = tool.inputSchema.properties ?? {};
@@ -133,7 +153,7 @@ function Try({ tool }: { tool: ToolView }) {
           {run.error && <span className="error" role="alert">{run.error}</span>}
         </div>
       </form>
-      {ran && <ToolCallCard name={tool.name} status={ran.ok ? 'success' : 'error'} args={ran.args} result={ran.ok ? ran.text : undefined} error={ran.ok ? undefined : ran.text} duration={ran.ms} defaultOpen maxCodeHeight={420} />}
+      {ran && <ToolCallCard name={tool.name} status={ran.ok ? 'success' : 'error'} args={ran.args} result={ran.ok ? readable(ran.text) : undefined} error={ran.ok ? undefined : ran.text} duration={ran.ms} defaultOpen maxCodeHeight={420} />}
     </div>
   );
 }

@@ -38,6 +38,7 @@ Object.assign(process.env, {
 });
 
 const { refusal, consoleToken, consoleEnabled, foreignPage } = await import('../src/admin/auth.js');
+const { readTable } = await import('./helpers/table.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
@@ -277,7 +278,7 @@ test('folders, connections and tools are saved through the same checks as the se
 test('a tool can be tried, tables can be listed, and a secret typed in is never shown again', async () => {
   const run = await api('POST', '/run', { name: 'shop_query', args: { sql: 'select count(*) as n from orders' } });
   assert.equal(run.json.ok, true);
-  assert.equal(JSON.parse(run.json.text).rows[0].n, 2);
+  assert.equal(readTable(run.json.text).rows[0].n, 2);
   assert.equal((await api('POST', '/run', { name: 'shop_query', args: { sql: 'delete from orders' } })).json.ok, false);
   assert.match((await api('POST', '/run', { name: 'no_such_tool', args: {} })).json.text, /Unknown tool/);
   // A built-in tool asks who is calling: the console calls as the local admin, like a client on this machine.

@@ -15,7 +15,8 @@ import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
 import { classifyAndPath, isReadableClass, ownerEmails } from '../path.js';
 import { stripEmbeddedImages } from '../clean_text.js';
 import { extractText } from '../extract_text.js';
-import { getQdrantClient, DRIVE_COLLECTION } from '../qdrant.js';
+import { getQdrantClient, DRIVE_COLLECTION, getLocalIndex } from '../qdrant.js';
+import { joinChunks } from '../chunk_join.js';
 import { MAX_FILE_BYTES } from '../settings.js';
 
 const DESCRIPTION =
@@ -73,33 +74,30 @@ function isExtractableBinary(mime: string): boolean {
  */
 export async function reassembleFromIndex(fileId: string): Promise<string | null> {
   try {
-    const res = await (await getQdrantClient()).scroll(DRIVE_COLLECTION, {
-      filter: { must: [{ key: 'file_id', match: { value: fileId } }] },
-      limit: 1000,
-      with_payload: true,
-      with_vector: false,
-    });
-    const chunks = (res.points ?? [])
-      .map((pt) => {
-        const p = pt.payload as Record<string, unknown> | undefined;
-        return {
-          content: typeof p?.content === 'string' ? (p.content as string) : null,
-          idx: typeof p?.chunk_index === 'number' ? (p.chunk_index as number) : 0,
-        };
-      })
-      .filter((c): c is { content: string; idx: number } => c.content !== null)
-      .sort((a, b) => a.idx - b.idx);
-    if (chunks.length === 0) return null;
-    return chunks
-      .map((c, i) => {
-        if (i === 0 || !c.content.startsWith('…')) return c.content;
-        const nl = c.content.indexOf('\n\n'); // strip the overlap prefix (…tail\n\n)
-        return nl >= 0 ? c.content.slice(nl + 2) : c.content;
-      })
-      .join('\n\n');
+    const chunks = await indexedChunks(fileId);
+    return chunks.length ? joinChunks(chunks.map((c) => c.content)) : null;
   } catch {
     return null;
   }
+}
+
+/** The chunks the index holds for one document, in document order. */
+export async function indexedChunks(fileId: string): Promise<Array<{ content: string; idx: number; payload: Record<string, unknown> }>> {
+  const local = await getLocalIndex();
+  const payloads: Array<Record<string, unknown> | null | undefined> = local
+    ? await local.documentChunks(DRIVE_COLLECTION, fileId)
+    : (
+        await (await getQdrantClient()).scroll(DRIVE_COLLECTION, {
+          filter: { must: [{ key: 'file_id', match: { value: fileId } }] },
+          limit: 1000,
+          with_payload: true,
+          with_vector: false,
+        })
+      ).points.map((pt) => pt.payload as Record<string, unknown> | undefined);
+  return payloads
+    .filter((p): p is Record<string, unknown> => typeof p?.content === 'string')
+    .map((p) => ({ content: p.content as string, idx: typeof p.chunk_index === 'number' ? p.chunk_index : 0, payload: p }))
+    .sort((x, y) => x.idx - y.idx);
 }
 
 type DriveClient = Awaited<ReturnType<typeof getDriveClient>>;

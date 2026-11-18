@@ -78,7 +78,7 @@ test('MCP_HOME names the folder of the settings and the data, whatever folder th
     assert.ok(names.includes('home_orders'), names.join(', '));
     assert.ok(!names.includes('project_orders') && !names.includes('cwd_orders'), names.join(', '));
     const r = await client.callTool({ name: 'home_orders', arguments: {} });
-    assert.match((r.content as Array<{ text: string }>)[0]!.text, /"total": ?10/);
+    assert.deepEqual(JSON.parse((r.content as Array<{ text: string }>)[0]!.text), { rowCount: 1, columns: ['id', 'total'], rows: [[1, 10]] });
     assert.ok(existsSync(join(home, 'data')), 'the data directory is in the home folder');
     assert.ok(!existsSync(join(project, 'data')));
   } finally {

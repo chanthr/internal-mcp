@@ -17,12 +17,15 @@ function isToolResult(v: unknown): v is ToolResult {
   return !!v && typeof v === 'object' && Array.isArray((v as { content?: unknown }).content);
 }
 
-/** string → text, MCP result → as is, anything else → pretty JSON text. */
+/**
+ * string → text, MCP result → as is, anything else → JSON text. Compact: the reader is a model, and indentation is
+ * a third of an indented answer.
+ */
 export function normalizeResult(v: ToolReturn): ToolResult {
   if (typeof v === 'string') return textResult(v);
   if (isToolResult(v)) return v;
   if (v === undefined) return textResult('(no result)');
-  return textResult(JSON.stringify(v, null, 2));
+  return textResult(JSON.stringify(v));
 }
 
 /** zod 3 and zod 4 errors both carry `issues` with path and message. */
