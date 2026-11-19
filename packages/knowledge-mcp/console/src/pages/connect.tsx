@@ -62,43 +62,69 @@ export function Connect() {
   );
 }
 
-/** One client: whether this server is in it, one button that puts it there, and the same thing by hand on request. */
 interface TunnelView {
   installed: boolean;
   signedIn: boolean;
+  /** The domain this server's Cloudflare sign-in is for, when Cloudflare said. */
+  signedInFor: string | null;
+  /** An address of one's own answered from outside. */
+  verified: boolean;
   running: boolean;
   mode: 'quick' | 'named' | null;
   url: string | null;
   hostname: string | null;
   problem: string | null;
 }
+interface AddressCheck {
+  hostname: string;
+  apex: string;
+  signedInFor: string | null;
+  unknown: string | null;
+  ready: boolean;
+}
 
 /**
  * A public address for this server through a Cloudflare Tunnel: the server stays here, Cloudflare gives it an
- * https address. A temporary one needs nothing; an address of one's own needs a domain in a Cloudflare account.
+ * https address. A temporary one needs nothing. An address of one's own needs a domain in a Cloudflare account:
+ * the address is checked first (is its domain on Cloudflare, is this server signed in for it), and it counts as
+ * working only once it answers from outside.
  */
 function Tunnel({ http, local }: { http: string | null; local: string | null }) {
   const [t, setT] = useState<TunnelView | null>(null);
   const [own, setOwn] = useState(false);
   const [hostname, setHostname] = useState('');
+  const [check, setCheck] = useState<AddressCheck | null>(null);
   const act = useAction();
+  const checking = useAction();
   const load = useCallback(() => call<TunnelView>('GET', '/tunnel').then((v) => (setT(v), setHostname((h) => h || v.hostname || '')), () => undefined), []);
   useEffect(() => void load(), [load]);
   if (!t) return null;
   const start = (body: object) => void act.run(async () => setT(await call<TunnelView>('POST', '/tunnel', body)));
+  const look = (name = hostname) => void checking.run(async () => setCheck(await call<AddressCheck>('POST', '/tunnel/check', { hostname: name })));
+  const afterSignIn = () => void load().then(() => check && look(check.hostname));
   // What a client is given: the entry above, with the public address in place of this machine's.
   const entry = t.url && http && local ? http.split(local).join(`${t.url}/mcp`) : null;
+  const wrongDomain = !!check && !!check.signedInFor && check.signedInFor !== check.apex;
   return (
     <div className="rows">
       {t.running && t.url ? (
         <Row
-          title={`${t.url}/mcp`}
+          title={
+            <>
+              {`${t.url}/mcp`} {t.mode === 'named' && (t.verified ? <Badge tone="success">Answers</Badge> : <Badge tone="warning">Not answering yet</Badge>)}
+            </>
+          }
           help={
-            t.mode === 'quick'
-              ? 'A temporary address from Cloudflare, for trying it out. It changes each time it is started, and Cloudflare gives no guarantee for it. The console stays on this computer.'
-              : 'Your address, through a Cloudflare Tunnel. The server and your documents stay on this computer, and so does the console.'
+            t.problem && !t.verified && t.mode === 'named'
+              ? t.problem
+              : t.mode === 'quick'
+                ? 'A temporary address from Cloudflare, for trying it out. It changes each time it is started, and Cloudflare gives no guarantee for it. The console stays on this computer.'
+                : 'Your address, through a Cloudflare Tunnel. It answered from outside. The server and your documents stay on this computer, and so does the console.'
           }
         >
+          {t.mode === 'named' && !t.verified && (
+            <Button size="sm" variant="secondary" loading={act.busy} onClick={() => void act.run(async () => setT(await call<TunnelView>('POST', '/tunnel/recheck')))}>Check again</Button>
+          )}
           <Button size="sm" variant="ghost" loading={act.busy} onClick={() => void act.run(async () => setT(await call<TunnelView>('DELETE', '/tunnel')))}>Stop</Button>
         </Row>
       ) : !t.installed ? (
@@ -115,28 +141,73 @@ function Tunnel({ http, local }: { http: string | null; local: string | null }) 
           </Row>
           <Row
             title="Your own address"
-            help={t.problem && t.mode === 'named' ? t.problem : 'A name on a domain in your Cloudflare account, like mcp.example.com. It stays the same, and comes back when the server is started again.'}
+            help={
+              t.problem && t.mode === 'named'
+                ? t.problem
+                : t.signedIn
+                  ? `A name on a domain in your Cloudflare account. This server is signed in to Cloudflare${t.signedInFor ? ` for ${t.signedInFor}` : ''}.`
+                  : 'A name on a domain in your Cloudflare account, like mcp.example.com. It stays the same, and comes back when the server is started again.'
+            }
           >
+            {t.signedIn && (
+              <Button size="sm" variant="ghost" onClick={() => void act.run(async () => { setT(await call<TunnelView>('DELETE', '/tunnel/sign-in')); setCheck(null); })}>Sign out</Button>
+            )}
             {!own && <Button size="sm" variant="secondary" onClick={() => setOwn(true)}>Set up</Button>}
           </Row>
           {own && (
             <div className="row-form">
-              {!t.signedIn ? (
-                <>
-                  <p className="field-help">Sign in to Cloudflare once and pick the domain. cloudflared keeps what it is given on this computer.</p>
-                  <CliStep tool="cloudflared" action="sign-in" label="Sign in to Cloudflare" onDone={() => void load()} />
-                </>
-              ) : (
-                <form
-                  className="inline"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    start({ mode: 'named', hostname });
+              <form
+                className="inline"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  look();
+                }}
+              >
+                <TextField
+                  label="Address"
+                  placeholder="mcp.example.com"
+                  value={hostname}
+                  onChange={(e) => {
+                    setHostname(e.target.value);
+                    setCheck(null);
                   }}
-                >
-                  <TextField label="Address" placeholder="mcp.example.com" hint="The tunnel and its DNS record are made for you. A record that is already there is not written over." value={hostname} onChange={(e) => setHostname(e.target.value)} autoComplete="off" spellCheck={false} />
-                  <Button type="submit" variant="secondary" loading={act.busy} disabled={hostname.trim().length < 4}>Start</Button>
-                </form>
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <Button type="submit" variant="secondary" loading={checking.busy} disabled={hostname.trim().length < 4}>Check</Button>
+              </form>
+              {checking.error ? (
+                <p className="error" role="alert">{checking.error}</p>
+              ) : (
+                !check && <p className="field-help">Its domain must be in your Cloudflare account. It is checked before anything is made.</p>
+              )}
+              {check && !t.signedIn && (
+                <>
+                  <p className="field-help">
+                    {check.apex} is on Cloudflare. Sign in to Cloudflare, and on its page pick <b>{check.apex}</b>. What cloudflared is given is kept with this server, apart from any cloudflared sign-in of yours.
+                  </p>
+                  <CliStep tool="cloudflared" action="sign-in" label="Sign in to Cloudflare" onDone={afterSignIn} />
+                </>
+              )}
+              {check && t.signedIn && wrongDomain && (
+                <>
+                  <p className="error" role="alert">
+                    This server is signed in for {check.signedInFor}, and {check.hostname} is under {check.apex}. Sign in again and pick {check.apex}.
+                  </p>
+                  <div>
+                    <Button size="sm" variant="secondary" onClick={() => void act.run(async () => setT(await call<TunnelView>('DELETE', '/tunnel/sign-in')))}>Sign in again</Button>
+                  </div>
+                </>
+              )}
+              {check && t.signedIn && !wrongDomain && (
+                <div className="inline">
+                  <p className="field-help">
+                    {check.signedInFor
+                      ? `Signed in for ${check.apex}. The tunnel and the DNS record of ${check.hostname} are made in that account; a record already there is not written over.`
+                      : `Signed in to Cloudflare, but Cloudflare did not say for which domain (${check.unknown}). Start only if you picked ${check.apex} when signing in: a record made under another domain is reported, for you to remove.`}
+                  </p>
+                  <Button variant="secondary" loading={act.busy} onClick={() => start({ mode: 'named', hostname: check.hostname })}>Start</Button>
+                </div>
               )}
             </div>
           )}

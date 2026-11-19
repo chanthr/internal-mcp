@@ -13,7 +13,9 @@
  * always keeps it); this server reads none of it here.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import { backgroundExec, hasTool, type Exec } from '../setup/auto.js';
+import { cloudflaredHome } from './tunnel.js';
 
 export type CliTool = 'gcloud' | 'gh' | 'cloudflared';
 export type CliAction = 'install' | 'sign-in';
@@ -33,9 +35,12 @@ const SIGN_IN: Record<CliTool, string[]> = {
   gcloud: ['gcloud', 'auth', 'login', '--brief', '--quiet'],
   // Without a terminal gh prints a one-time code and the address to type it at, and waits for GitHub.
   gh: ['gh', 'auth', 'login', '--hostname', 'github.com', '--web'],
-  // cloudflared opens the browser, the person picks the domain, and it keeps the certificate it is given.
+  // cloudflared opens the browser, the person picks the domain, and it keeps the certificate it is given: in this
+  // server's data directory, because it runs with HOME there (HOME_OF below), not among the person's own.
   cloudflared: ['cloudflared', 'tunnel', 'login'],
 };
+/** A tool whose sign-in is this server's own and not the person's: where it keeps it. */
+const HOME_OF: Partial<Record<CliTool, () => string>> = { cloudflared: cloudflaredHome };
 const WINGET: Record<CliTool, string> = { gcloud: 'Google.CloudSDK', gh: 'GitHub.cli', cloudflared: 'Cloudflare.cloudflared' };
 
 /**
@@ -134,11 +139,13 @@ export async function startCliRun(tool: CliTool, action: CliAction): Promise<Cli
     run.ended = { ok, error };
     stop(run);
   };
+  const home = action === 'sign-in' ? HOME_OF[tool]?.() : undefined;
+  if (home) mkdirSync(home, { recursive: true, mode: 0o700 });
   try {
     // No terminal and no input: a tool that asks a question gets no answer and says so, instead of waiting.
     run.child = spawn(cmd, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, NO_COLOR: '1', CLOUDSDK_CORE_DISABLE_PROMPTS: '1', NONINTERACTIVE: '1', HOMEBREW_NO_ENV_HINTS: '1' },
+      env: { ...process.env, NO_COLOR: '1', CLOUDSDK_CORE_DISABLE_PROMPTS: '1', NONINTERACTIVE: '1', HOMEBREW_NO_ENV_HINTS: '1', ...(home ? { HOME: home } : {}) },
     });
   } catch (e) {
     end(false, `${cmd} could not be started (${e instanceof Error ? e.message : String(e)}).`);
