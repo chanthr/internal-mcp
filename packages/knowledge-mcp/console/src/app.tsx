@@ -11,6 +11,7 @@ import { Data } from './pages/data';
 import { Apps } from './pages/apps';
 import { Agent } from './pages/agent';
 import { Tools } from './pages/tools';
+import { Chat } from './pages/chat';
 import { Connect } from './pages/connect';
 import { People } from './pages/people';
 import { Activity } from './pages/activity';
@@ -62,6 +63,7 @@ const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: str
   {
     group: 'Use',
     items: [
+      { id: 'chat', label: 'Chat', render: () => <Chat /> },
       { id: 'tools', label: 'Tools', render: () => <Tools /> },
       { id: 'connect', label: 'Connect a client', render: () => <Connect /> },
     ],

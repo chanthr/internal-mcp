@@ -179,3 +179,23 @@ p { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* Chat: the conversation, and the box to write in, kept at the bottom of the page */
+.chat { display: flex; flex-direction: column; gap: 20px; }
+.chat-turns { display: flex; flex-direction: column; gap: 20px; }
+.chat-user { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 14px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-answer { display: flex; flex-direction: column; gap: 10px; }
+.chat-text { overflow-wrap: anywhere; line-height: 1.6; }
+.md > * + * { margin-top: 10px; }
+.md p, .md ul, .md ol, .md pre { margin: 0; }
+.md ul, .md ol { padding-left: 22px; }
+.md li + li { margin-top: 4px; }
+.md .md-h { font-weight: 600; }
+.md code { font-family: var(--mono); font-size: 0.92em; padding: 1px 4px; border-radius: 4px; background: var(--hover); }
+.md pre { padding: 10px 12px; border-radius: 8px; background: var(--hover); overflow-x: auto; }
+.md pre code { padding: 0; background: none; }
+.md a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.chat-wait { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.chat-meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chat-input { position: sticky; bottom: 16px; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--sheet); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06); }
+.chat-actions { display: flex; justify-content: flex-end; gap: 8px; }

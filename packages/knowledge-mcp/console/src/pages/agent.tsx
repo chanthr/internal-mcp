@@ -38,7 +38,7 @@ export function Agent() {
   const saved = providerOf(llm.provider, llm.baseUrl);
   return (
     <Page title="Agent" text="Work the server does by itself, with a model you connect.">
-      <Section title="Model" text="Used only for the jobs on this page. Search and the tools work without it.">
+      <Section title="Model" text="Used for the jobs on this page and for Chat. Search and the tools work without it.">
         <div className="rows">
           <Row
             title={llm.set ? llm.model : 'No model connected'}
@@ -222,7 +222,7 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
       open
       onOpenChange={(o) => !o && onClose()}
       title="Connect a model"
-      description="The key is saved in .env on this machine. Text of your documents goes to this provider only while a job on the Agent page runs."
+      description="The key is saved in .env on this machine. Text of your documents goes to this provider only while a job on the Agent page runs, or while you chat."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>

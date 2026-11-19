@@ -1,6 +1,7 @@
 /**
- * A language model this server can use for work it does itself: building the wiki, describing passages before
- * they are indexed. Until one is connected nothing here runs, and the server calls no model at all.
+ * A language model this server can use for work it does itself (building the wiki, writing questions to measure
+ * search with) and for the console's chat (llm_chat.ts). Until one is connected nothing here runs, and the server
+ * calls no model at all.
  *
  * Two kinds of connection:
  *   anthropic   Claude, through Anthropic's own API and its official SDK.
@@ -75,8 +76,8 @@ export interface LlmRequest {
   signal?: AbortSignal;
 }
 
-const CALL_TIMEOUT_MS = 5 * 60_000;
-const host = (url: string): string => {
+export const CALL_TIMEOUT_MS = 5 * 60_000;
+export const host = (url: string): string => {
   try {
     return new URL(url).host;
   } catch {
@@ -86,10 +87,10 @@ const host = (url: string): string => {
 
 // ── Claude, through Anthropic's SDK ──
 
-const claude = (s: Pick<LlmSettings, 'apiKey'>): Anthropic => new Anthropic({ apiKey: s.apiKey, ...(anthropicEndpoint.baseURL ? { baseURL: anthropicEndpoint.baseURL } : {}) });
+export const claude = (s: Pick<LlmSettings, 'apiKey'>): Anthropic => new Anthropic({ apiKey: s.apiKey, ...(anthropicEndpoint.baseURL ? { baseURL: anthropicEndpoint.baseURL } : {}) });
 
 /** What went wrong, from the SDK's own error classes, in words for the page. */
-function claudeError(e: unknown): LlmError {
+export function claudeError(e: unknown): LlmError {
   if (e instanceof LlmError) return e;
   if (e instanceof Anthropic.AuthenticationError) return new LlmError('Anthropic did not accept the API key.');
   if (e instanceof Anthropic.PermissionDeniedError) return new LlmError('This API key may not use that model.');
@@ -105,7 +106,7 @@ function claudeError(e: unknown): LlmError {
  * these: without it a declined request simply stops. (Anthropic's guidance for these models; other models take no
  * such parameter.)
  */
-const HAS_FALLBACK = /^claude-(fable-5-[12]|opus-5(-5)?|sonnet-5-5)$/;
+export const HAS_FALLBACK = /^claude-(fable-5-[12]|opus-5(-5)?|sonnet-5-5)$/;
 
 async function askClaude(s: LlmSettings, req: LlmRequest): Promise<LlmAnswer> {
   const client = claude(s);
@@ -182,7 +183,7 @@ const said = (body: Record<string, unknown>): string => {
   return String((typeof error === 'string' ? error : error?.message) ?? '').slice(0, 200);
 };
 
-function openaiError(s: Pick<LlmSettings, 'baseUrl'>, status: number, body: Record<string, unknown>): LlmError {
+export function openaiError(s: Pick<LlmSettings, 'baseUrl'>, status: number, body: Record<string, unknown>): LlmError {
   const where = host(s.baseUrl ?? '');
   if (status === 401 || status === 403) return new LlmError(`${where} did not accept the API key.`);
   if (status === 404) return new LlmError(`${where} does not know that model, or this is not the address of its API.`);

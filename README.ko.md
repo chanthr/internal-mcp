@@ -108,6 +108,7 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 | Databases and APIs | Postgres, SQLite, HTTP API를 연결합니다. 질의를 한 번 써서 도구로 저장합니다. 화면이 테이블 목록을 보여 주고, 저장하기 전에 실제 데이터베이스에서 질의를 점검합니다 |
 | Apps | Slack, GitHub, Railway를 연결합니다. 로그인이 되는 곳은 로그인으로, 아니면 토큰으로 연결합니다. 자체 MCP 서버가 있는 앱(Notion, Supabase, Linear, Sentry 등)도 추가합니다. 그 앱에서 로그인하면 읽기 도구가 앱 이름을 달고 들어옵니다 |
 | Agent | 서버가 스스로 하는 일에 쓸 언어 모델을 연결합니다. Claude(Anthropic), OpenRouter, OpenAI, Ollama로 띄운 로컬 모델, OpenAI의 chat completions를 말하는 엔드포인트라면 무엇이든 됩니다. 모델은 제공자가 내놓는 목록에서 고르고, 저장하기 전에 질문 하나로 확인합니다. 모델을 연결하기 전에는 서버가 어떤 모델도 부르지 않습니다 |
+| Chat | Agent 화면에 연결한 모델에게 묻고, 이 서버의 도구로 답하는 과정을 봅니다. 도구를 부를 때마다 무엇을 받았는지 바로 보입니다. 모델은 읽기만 하는 도구와 모든 클라이언트가 받는 안내문을 받습니다. 대화는 저장하지 않습니다 |
 | Tools | AI 클라이언트가 부를 수 있는 도구 전부입니다. 값을 넣고 실행하면 클라이언트가 받는 결과가 그대로 보입니다 |
 | Connect a client | 버튼 하나로 Claude Code, Claude Desktop, Cursor, VS Code에 이 서버를 추가합니다. 이미 추가된 곳도 보여 줍니다. 직접 넣을 항목도 복사할 수 있습니다 |
 | People and keys | 키를 만들고 취소합니다. 사람마다 쓸 수 있는 도구를 정합니다 |
