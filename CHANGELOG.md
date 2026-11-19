@@ -154,6 +154,20 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **Found by a security review of what 0.4.0 adds, and closed.**
+  - *One Markdown file could stop the server.* Reading a document's links used patterns that took time with the
+    cube of a run of spaces after a heading (4,000 spaces: 19 s; more: hours), in the scan that every request
+    waits for. Links are now read in time proportional to the text, a document is read for links up to 4 MB,
+    and a test holds each hostile shape under a time limit.
+  - *An MCP server could borrow another service's sign-in.* A server added from the console says where to sign in
+    and for which address. One that named another service's address would have been handed what the person
+    allowed there. The address it names must now be its own, and when the sign-in happens at another owner's
+    site the console says both names and asks before going there.
+  - *A server's sign-in could send this server into the network behind it.* The addresses it gives for
+    registering and for the token must be https addresses on the internet, unless the MCP server is itself on
+    this machine.
+  - *`linked_documents` told a document that is hidden from one that is not there.* For someone limited to some
+    folders, a link out of them is now listed exactly like a link to a document that does not exist.
 - **When gcloud's sign-in has expired the console says what to run.** With an organization account Google asks
   for the sign-in again after a while, and gcloud, started by the console, has no terminal to ask in. Pressing
   *Account with gcloud* then showed gcloud's own sentence ("Reauthentication failed. cannot prompt during

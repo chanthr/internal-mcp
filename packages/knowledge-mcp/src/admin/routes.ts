@@ -65,7 +65,7 @@ import {
   startMcpLogin,
   startRailwayLogin,
 } from './logins.js';
-import { mcpTarget, needsSignIn, prefixOf, removeUpstream, signOutMcp, tokenEnvOf, toolsFound, upsertUpstream, upstreamEntries } from './upstreams.js';
+import { mcpTarget, needsSignIn, prefixOf, removeUpstream, signOutMcp, tokenEnvOf, toolsFound, upsertUpstream, upstreamEntries, sameOwner } from './upstreams.js';
 import { probeUpstream } from '../core/upstream.js';
 import { readUpstreamLogin, UPSTREAM_NAME, upstreamSignedIn } from '../core/upstream_login.js';
 import { canReload, requestReload } from './supervisor.js';
@@ -671,7 +671,13 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         return change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });
       }
       // The server wants a sign-in: the page goes there, and the server is added when the sign-in is saved.
-      if (await needsSignIn(target.url)) return void res.json({ signIn: await startMcpLogin(origin(req), target) });
+      if (await needsSignIn(target.url)) {
+        const { url, at } = await startMcpLogin(origin(req), target);
+        const server = new URL(target.url).host;
+        // `elsewhere`: the sign-in happens at another owner's address than the server being added. The page asks
+        // before it goes there, because what is allowed there is handed to the server.
+        return void res.json({ signIn: url, at, server, elsewhere: !sameOwner(at, server) });
+      }
       const seen = await lookAt({ name: target.name, url: target.url, prefix: prefixOf(target) });
       upsertUpstream(dir, { name: target.name, url: target.url });
       change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });

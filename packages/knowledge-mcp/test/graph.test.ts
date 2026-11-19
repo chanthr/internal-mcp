@@ -107,6 +107,27 @@ test('what counts as a link in a Markdown document', () => {
   assert.equal(extractLinks('Intro.\n\n# The real title #\n').title, 'The real title');
 });
 
+test('no document can hold the server up: reading links takes time in proportion to the text', () => {
+  const quick = (text: string) => {
+    const started = performance.now();
+    const read = extractLinks(text);
+    return [read, performance.now() - started] as const;
+  };
+  for (const [name, text] of [
+    ['a heading followed by a long run of spaces', `# a${' '.repeat(100_000)}b\n`],
+    ['a line of opening brackets', `${'['.repeat(200_000)}\n`],
+    ['a line of backticks', `${'`'.repeat(200_000)}\n`],
+    ['a link that never closes, then spaces', `[x](${' '.repeat(200_000)}\n`],
+    ['fences that never close', Array.from({ length: 3000 }, (_, i) => '`'.repeat(3 + (i % 40))).join('\n')],
+  ] as const) {
+    const [, ms] = quick(text);
+    assert.ok(ms < 1500, `${name}: ${ms.toFixed(0)} ms`);
+  }
+  // And it still reads what it read before.
+  const [read] = quick(['# Plan ##', '', 'See [[Home]] and [the list](notes/list.md "the list"). Not `[[code]]`.', '', '```', '[[in a block]]', '```', '', '~~~~', '[x](y.md)', '~~~~', '[ref]: other/ref.md'].join('\n'));
+  assert.deepEqual([read.title, read.links.map((l) => l.to).sort()], ['Plan', ['Home', 'notes/list.md', 'other/ref.md']]);
+});
+
 test('a target finds its document the way a person would mean it', () => {
   const entry = (links: string[], extra: object = {}) => ({ modified: 'm', links: links.map((to) => ({ to })), ...extra });
   const g = buildGraph({
@@ -182,9 +203,19 @@ test('scanning the folders writes the links down, and the graph is the same for 
   const lonely = /## \d+\. alone\.md[^]*?(?=\n## |$)/.exec(await search('No links here'))?.[0] ?? '';
   assert.ok(lonely.includes('ID: `local:vault/alone.md`') && !lonely.includes('Links:'), lonely);
 
-  // Someone limited to one folder sees that folder's documents and nothing that leads out of it.
-  assert.match(await links({}, handbookOnly), /^1 document · 0 links · 1 document with no links · 0 links to a document that does not exist$/m);
-  assert.match(await links({ documentId: 'local:handbook/Policy.md' }, handbookOnly), /Nothing links to this document and it links to nothing\./);
+  // Someone limited to one folder sees that folder's documents and nothing that leads out of it. What their
+  // document links to in a folder they may not see is told exactly like a link to a document that is not there:
+  // told apart, the answer would say which names exist where they have no business.
+  assert.match(await links({}, handbookOnly), /^1 document · 0 links · 1 document with no links · 2 links to a document that does not exist$/m);
+  const policy = await links({ documentId: 'local:handbook/Policy.md' }, handbookOnly);
+  assert.match(policy, /Nothing links to this document and it links to nothing\./);
+  assert.match(policy, /## Links to a document that does not exist \(2\)/);
+  // Listed as they are written in the caller's own document, which is all the caller learns.
+  assert.ok(!policy.includes('## Links to (') && policy.includes('- Home\n- vault/guides/setup.md'), policy);
+  // To somebody who sees both folders the same two are links, and nothing is missing.
+  const whole = await links({ documentId: 'local:handbook/Policy.md' });
+  assert.match(whole, /## Links to \(2\)/);
+  assert.ok(!whole.includes('does not exist'), whole);
   assert.match(await links({ documentId: 'local:vault/Home.md' }, handbookOnly), /No such document/);
   assert.ok(!(await search('Policy vault', handbookOnly)).includes('Links:'));
 

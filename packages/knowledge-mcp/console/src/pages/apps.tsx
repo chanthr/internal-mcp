@@ -58,8 +58,35 @@ export function Apps() {
   const [open, setOpen] = useState<AppId | null>(null);
   const [adding, setAdding] = useState(false);
   const app = APPS.find((a) => a.id === open);
+  const [elsewhere, setElsewhere] = useState<Elsewhere | null>(null);
+  useEffect(() => {
+    askElsewhere = setElsewhere;
+    return () => {
+      askElsewhere = null;
+    };
+  }, []);
+  const answer = (yes: boolean) => {
+    elsewhere?.go(yes);
+    setElsewhere(null);
+  };
   return (
     <Page title="Apps" text="Other places the assistant can look.">
+      {elsewhere && (
+        <Dialog
+          open
+          onOpenChange={(o) => !o && answer(false)}
+          title={`Sign in at ${elsewhere.at}?`}
+          description={`${elsewhere.server} sends you to ${elsewhere.at} to sign in. What you allow there is handed to ${elsewhere.server}. Go on only if you trust ${elsewhere.server} with it.`}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => answer(false)}>Cancel</Button>
+              <Button onClick={() => answer(true)}>Go to {elsewhere.at}</Button>
+            </>
+          }
+        >
+          {null}
+        </Dialog>
+      )}
       <Section title="Built in" text="This server's own read-only tools. Sign in where the app allows it, or paste a token.">
         <div className="rows">
           {APPS.map((a) => <AppRow key={a.id} app={a} onConnect={() => setOpen(a.id)} />)}
@@ -81,14 +108,27 @@ export function Apps() {
   );
 }
 
+/** A sign-in that happens at another owner's address than the server being added: the page asks first. */
+interface Elsewhere {
+  at: string;
+  server: string;
+  go: (yes: boolean) => void;
+}
+let askElsewhere: ((e: Elsewhere) => void) | null = null;
+
 /** Ask the server to add an MCP server. It answers with the address to sign in at, or adds it at once. */
 async function addServer(body: { name: string; url: string; token?: string }): Promise<Changed> {
-  const r = await call<Changed | { signIn: string }>('POST', '/upstreams', body);
+  const r = await call<Changed | { signIn: string; at: string; server: string; elsewhere: boolean }>('POST', '/upstreams', body);
   if ('signIn' in r) {
-    location.assign(r.signIn as string);
+    const to = r as { signIn: string; at: string; server: string; elsewhere: boolean };
+    if (to.elsewhere) {
+      const yes = await new Promise<boolean>((go) => (askElsewhere ? askElsewhere({ at: to.at, server: to.server, go }) : go(false)));
+      if (!yes) throw new Error('Not added: the sign-in was not started.');
+    }
+    location.assign(to.signIn);
     return new Promise<never>(() => undefined); // the page is on its way out
   }
-  return r;
+  return r as Changed;
 }
 
 const hostOf = (url: string) => {

@@ -38,6 +38,7 @@ const { railwayEndpoints, railwayAuth, railwayConfigured, readRailwayLogin, writ
 const { railwayProjects, handleRailwayLogs } = await import('../src/plugins/railway/tools.js');
 const { authStore } = await import('../src/core/context.js');
 const { installCommand } = await import('../src/admin/cli_runs.js');
+const { signInAddress, sameOwner } = await import('../src/admin/upstreams.js');
 const { credentialsFromJson } = await import('../src/plugins/drive/client.js');
 const { UpstreamManager, isExposed } = await import('../src/core/upstream.js');
 const { upstreamToken, readUpstreamLogin, writeUpstreamLogin } = await import('../src/core/upstream_login.js');
@@ -578,11 +579,34 @@ test('a tool that is missing or signed out is installed and signed in from the c
   assert.deepEqual(await installCommand('gh', has(), 'win32'), null);
 });
 
+test('a server cannot borrow another service\'s sign-in, or send this server into the network behind it', async () => {
+  // It says its sign-in is for somebody else's address: signing in would hand that address's access to it.
+  const borrower = await fakeMcpServer('sign-in', { resource: 'https://mcp.example.org/mcp' });
+  const refused = await api('POST', '/upstreams', { name: 'borrower', url: borrower.url });
+  assert.deepEqual([refused.status, /says its sign-in is for another address \(https:\/\/mcp\.example\.org\/mcp\)\..*Not added\./.test(refused.json.error)], [422, true], refused.text);
+  assert.equal(borrower.st.registered.length, 0, 'nothing was registered anywhere');
+
+  // Where its sign-in sends this server (to register, for the token): not this machine, not a private network,
+  // and not without https. A server that is itself on this machine may say what it likes.
+  for (const address of ['http://127.0.0.1:6333/collections', 'https://localhost/token', 'http://169.254.169.254/latest', 'https://10.0.0.5/register', 'https://192.168.1.10/x', 'https://[::1]/x', 'https://db.internal/x', 'http://auth.example.com/token']) {
+    assert.throws(() => signInAddress(address, 'the token', false), /an address on this machine or a private network, or one without https\. Not added\./, address);
+    assert.doesNotThrow(() => signInAddress(address, 'the token', true));
+  }
+  for (const address of ['https://auth.example.com/token', 'https://8.8.8.8/x', undefined]) assert.doesNotThrow(() => signInAddress(address, 'the token', false));
+  assert.throws(() => signInAddress('not an address', 'the token', false), /is not an address/);
+
+  // Is the sign-in at the server's own owner? The page asks before going anywhere else.
+  assert.deepEqual(
+    [sameOwner('mcp.notion.com', 'www.notion.com'), sameOwner('mcp.example.co.uk', 'login.example.co.uk'), sameOwner('a.example.co.uk', 'b.other.co.uk'), sameOwner('mcp.evil.example', 'mcp.notion.com'), sameOwner('127.0.0.1:1', '127.0.0.1:2')],
+    [true, true, false, false, true],
+  );
+});
+
 /**
  * An MCP server as a service runs one: it answers MCP requests over HTTP POST, and (when it wants a sign-in) says
  * where to sign in, lets a client register itself, and hands out tokens that run out.
  */
-async function fakeMcpServer(kind: 'sign-in' | 'token' | 'open', opts: { selfRegistration?: boolean } = {}) {
+async function fakeMcpServer(kind: 'sign-in' | 'token' | 'open', opts: { selfRegistration?: boolean; resource?: string } = {}) {
   const st = { registered: [] as any[], unregistered: [] as string[], revoked: [] as string[], refreshes: 0, challenge: '', valid: 'mat-1', refresh: 'mrt-1', ended: false, calls: [] as string[], tokenForms: [] as URLSearchParams[] };
   const tools = [
     { name: 'notion-search', description: 'Search pages', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } },
@@ -596,7 +620,7 @@ async function fakeMcpServer(kind: 'sign-in' | 'token' | 'open', opts: { selfReg
   base = await fake((req, body) => {
     const url = (req.url ?? '').split('?')[0];
     if (url.startsWith('/.well-known/oauth-protected-resource')) {
-      return kind === 'sign-in' ? { json: { resource: `${base}/mcp`, authorization_servers: [base], scopes_supported: ['read', 'write'] } } : { status: 404, json: {} };
+      return kind === 'sign-in' ? { json: { resource: opts.resource ?? `${base}/mcp`, authorization_servers: [base], scopes_supported: ['read', 'write'] } } : { status: 404, json: {} };
     }
     if (url.startsWith('/.well-known/oauth-authorization-server')) {
       if (kind !== 'sign-in') return { status: 404, json: {} };
@@ -700,6 +724,8 @@ test("another service's MCP server: sign in from the console, and its read tools
   assert.equal(added.status, 200, added.text);
   const q = new URL(added.json.signIn).searchParams;
   assert.equal(added.json.signIn.split('?')[0], `${notion.base}/authorize`);
+  // The page is told where the sign-in happens. Here it is the server's own address, so nothing is asked.
+  assert.deepEqual([added.json.at, added.json.server, added.json.elsewhere], [new URL(notion.base).host, new URL(notion.url).host, false]);
   assert.deepEqual(
     [q.get('client_id'), q.get('redirect_uri'), q.get('response_type'), q.get('code_challenge_method'), q.get('resource'), q.get('scope')],
     ['c-1', `${base}/console/login/mcp`, 'code', 'S256', notion.url, 'read write offline_access'],
