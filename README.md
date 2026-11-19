@@ -495,7 +495,7 @@ yesterday's dangling link whole. Only links that plainly meant a document and ma
 | Change the embedding model | Set the new model, then `knowledge-mcp knowledge reembed`: it drops the old vectors and makes new ones from the stored text. Until then search answers by keywords, because vectors of two models are never mixed |
 | What leaves the machine | Nothing for keyword search. With an embedding model, passage text and each question go to that model's endpoint |
 | Where it lives | `<data dir>/vectors.db`: the text, the keyword index and the vectors. Measured with 90,000 passages (5,000 files): a keyword search takes about 6 ms, a search by meaning about 85 ms, and the vectors take about 4 bytes × dimensions per passage in memory (370 MB at 1,024 dimensions), read on the first search by meaning. Set `QDRANT_URL` (and reindex) for larger indexes or several servers |
-| Scanned files | The automatic runs never use paid OCR. `knowledge-mcp drive reindex` adds scanned Drive files when Mathpix is configured; scanned files in local folders are left out |
+| Scanned files | A folder scan never reads scans itself: it counts them. Reading them is a run of its own, started under Documents → Scanned files in the console (or after each scan, for an OCR on this computer when you turn that on). What was read is kept, so a scan is not read again while the file is unchanged. `knowledge-mcp drive reindex` reads scanned Drive files when an OCR is set (`--no-ocr` leaves them out) |
 | Clean up | A full `drive reindex` deletes Drive documents no longer listed, such as files moved into an excluded folder |
 | Start over | `drive reindex --recreate` empties the index first, local folders included (they are indexed again by the next scan). `--dry-run` only counts passages and skips OCR |
 
@@ -507,7 +507,28 @@ A lock file keeps two processes on one data directory from indexing at the same 
 | Google Docs, Slides | Drive export |
 | Google Sheets | Drive export, every tab as its own section |
 | Word, PowerPoint, Excel, PDF with text | Local parsers |
-| Scanned PDF, PNG, JPEG, WebP | Mathpix OCR, Drive only, when `MATHPIX_APP_ID` and `MATHPIX_APP_KEY` are set |
+| Scanned PDF, PNG, JPEG, WebP | OCR, when one is set: each page is drawn and read by a vision model (a model on this computer through Ollama, Hugging Face Inference Providers, or any endpoint that speaks OpenAI's chat completions with images), or by Mathpix. Images in local folders are listed only while an OCR is set |
+
+**Reading scanned documents (OCR).** Under Documents → Scanned files in the console, choose what reads them:
+
+| Choice | What it is |
+| --- | --- |
+| This computer | A vision model in Ollama. The console fetches the model. Pages never leave the computer and nothing is billed |
+| Hugging Face | Inference Providers (`https://router.huggingface.co/v1`) with a token. Pages go to Hugging Face and the partner that runs the model |
+| Another endpoint | Any API that speaks OpenAI's chat completions and takes images: OpenRouter, vLLM, LM Studio |
+| Mathpix | As before: `MATHPIX_APP_ID`, `MATHPIX_APP_KEY` |
+
+Before a model is saved it has to read a test page back. In the config it is `OCR_PROVIDER` (`model` or `mathpix`),
+`OCR_BASE_URL`, `OCR_API_KEY`, `OCR_MODEL` and `OCR_PROMPT` (glm-ocr and deepseek-ocr get the prompt their model card
+gives). `OCR_MAX_PAGES` (200) caps the pages read from one file. Measured on 16 Korean PDF pages whose text is known,
+read through Ollama on an Apple Silicon Mac:
+
+| Model | Characters wrong (median a page) | Seconds a page |
+| --- | --- | --- |
+| `qwen3-vl:8b-instruct` | about 1 in 100 | 15 |
+| `glm-ocr:q8_0` | about 1 in 10 | 6 |
+| `deepseek-ocr:3b` | about 4 in 100, but 5 of the 16 pages came back as one phrase repeated | 8 |
+
 
 Files larger than `DRIVE_MAX_FILE_BYTES` (50 MB by default) are not read or indexed. In a local folder, dot files,
 `node_modules`, the folder names in `drive.excludeFolders` and symbolic links are skipped, and at most 20,000 files

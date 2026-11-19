@@ -11,12 +11,14 @@ import { Spinner } from '../ui/spinner';
 import { SegmentedControl } from '../ui/segmented-control';
 import { TextArea } from '../ui/text-area';
 import { TextField } from '../ui/text-field';
+import { Scanned } from './scanned';
 
 export function Documents() {
   return (
     <Page title="Documents" text="What the assistant can search and read.">
       <Folders />
       <Drive />
+      <Scanned />
       <Meaning />
       <Passages />
     </Page>
