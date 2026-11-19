@@ -9,6 +9,7 @@ import { Documents } from './pages/documents';
 import { Graph } from './pages/graph';
 import { Data } from './pages/data';
 import { Apps } from './pages/apps';
+import { Agent } from './pages/agent';
 import { Tools } from './pages/tools';
 import { Connect } from './pages/connect';
 import { People } from './pages/people';
@@ -55,6 +56,7 @@ const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: str
       { id: 'graph', label: 'Graph', render: () => <Graph /> },
       { id: 'data', label: 'Databases and APIs', render: () => <Data /> },
       { id: 'apps', label: 'Apps', render: () => <Apps /> },
+      { id: 'agent', label: 'Agent', render: () => <Agent /> },
     ],
   },
   {

@@ -37,6 +37,7 @@ import { folderLeftOut, folderReading, LOCAL_PREFIX, localFolders, scanFoldersSo
 import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
+import { checkLlm, listLlmModels, llmSettings, type LlmKind } from '../core/llm.js';
 import { openInBrowser } from './launch.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
@@ -123,6 +124,8 @@ const SERVICE_ENV: Record<string, string[]> = {
   slack: ['SLACK_BOT_TOKEN'],
   github: ['GITHUB_PAT', 'GITHUB_TOKEN'],
   railway: ['RAILWAY_TOKEN'],
+  // A model the server uses for its own work (core/llm.ts).
+  llm: ['LLM_PROVIDER', 'LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'],
 };
 const isSet = (names: string[]) => names.some((n) => !!process.env[n]?.trim());
 
@@ -177,6 +180,19 @@ function nodeView(g: Graph, n: GraphNode) {
 }
 
 /** How Railway is connected: a token in the environment wins over a sign-in. */
+/** The model the server uses for its own work: which one and where, never the key. */
+function llmView(): { set: boolean; provider: LlmKind | null; model: string | null; baseUrl: string | null; keySet: boolean } {
+  const s = llmSettings();
+  const provider = process.env.LLM_PROVIDER?.trim();
+  return {
+    set: !!s,
+    provider: s?.kind ?? (provider === 'anthropic' || provider === 'openai' ? provider : null),
+    model: s?.model ?? null,
+    baseUrl: s?.baseUrl ?? (process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') || null),
+    keySet: !!process.env.LLM_API_KEY?.trim(),
+  };
+}
+
 /** `logs`: a sign-in that asked for the access Railway shows logs to. null for a token (it reads what it was made for). */
 function railwayVia(): { set: boolean; via: 'token' | 'login' | null; who: string | null; logs: boolean | null } {
   if (isSet(SERVICE_ENV.railway)) return { set: true, via: 'token', who: null, logs: null };
@@ -294,6 +310,22 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     return baseUrl === savedBase ? process.env.EMBEDDING_API_KEY?.trim() || undefined : undefined;
   };
 
+  // A model for the server's own work (core/llm.ts): what the page sends to list a provider's models and to save.
+  const llmBody = z.object({ provider: z.enum(['anthropic', 'openai']), baseUrl: webUrl(500).optional().or(z.literal('')), apiKey: visible(500).optional() });
+  /**
+   * The connection the page describes. A key that is already saved is used for the provider and address it was
+   * saved for and for no other: a key is never sent to an address it was not given for.
+   */
+  const llmFrom = (body: z.infer<typeof llmBody>): { kind: LlmKind; baseUrl?: string; apiKey?: string } => {
+    const kind = body.provider;
+    const baseUrl = kind === 'openai' ? body.baseUrl?.replace(/\/+$/, '') || undefined : undefined;
+    if (kind === 'openai' && !baseUrl) throw new Error('The address of the API is needed (it usually ends in /v1).');
+    const savedFor = process.env.LLM_PROVIDER?.trim() === kind && (kind === 'anthropic' || process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') === baseUrl);
+    const apiKey = body.apiKey || (savedFor ? process.env.LLM_API_KEY?.trim() || undefined : undefined);
+    if (kind === 'anthropic' && !apiKey) throw new Error('Claude needs an API key.');
+    return { kind, baseUrl, apiKey };
+  };
+
   // ── What is set up ──
   api.get(
     '/state',
@@ -346,6 +378,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           slack: { set: isSet(SERVICE_ENV.slack) },
           github: { set: isSet(SERVICE_ENV.github) },
           railway: railwayVia(),
+          llm: llmView(),
           embeddings: {
             set: embeddingsConfigured(),
             model: embeddingsConfigured() ? EMBEDDING_MODEL : null,
@@ -515,6 +548,18 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         // A token and a sign-in are two ways to the same thing: the token is used, so the sign-in goes.
         if (railwaySignedIn()) await signOutRailway();
         return change(res, { found: r.who });
+      }
+      if (id === 'llm') {
+        const body = llmBody.extend({ model: modelName }).parse(req.body);
+        const settings = llmFrom(body);
+        const r = await checkLlm({ ...settings, model: body.model });
+        updateEnvFile(envPath, {
+          LLM_PROVIDER: settings.kind,
+          LLM_BASE_URL: settings.kind === 'openai' ? settings.baseUrl : undefined,
+          LLM_MODEL: r.model,
+          ...(body.apiKey ? { LLM_API_KEY: body.apiKey } : {}),
+        });
+        return change(res, { found: `${r.model} answered` });
       }
       if (id === 'embeddings') {
         const body = z
@@ -707,6 +752,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (UPSTREAM_NAME.test(name)) await signOutMcp(name);
       if (gone.tokenEnv && gone.tokenEnv === tokenEnvOf(name)) updateEnvFile(join(dir, '.env'), { [gone.tokenEnv]: undefined });
       change(res);
+    }),
+  );
+  api.post(
+    '/llm/models',
+    wrap(async (req, res) => {
+      res.json({ models: await listLlmModels(llmFrom(llmBody.parse(req.body))) });
     }),
   );
   api.post(
