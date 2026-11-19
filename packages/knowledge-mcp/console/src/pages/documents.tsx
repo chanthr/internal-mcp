@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { call, type Changed } from '../api';
+import { call, signIn, type Changed } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -70,27 +70,31 @@ function Drive() {
   const { state, apply } = useServer();
   const drive = state.services.drive;
   const [open, setOpen] = useState(false);
-  const [key, setKey] = useState('');
   const [owner, setOwner] = useState('');
   const [found, setFound] = useState<string | null>(null);
-  const connect = useAction();
   const trust = useAction();
   const off = useAction();
+  const signedIn = drive.via === 'login';
+  const status = signedIn
+    ? `Signed in as ${drive.account ?? 'a Google account'}. Reads ${drive.reads.join(', ') || 'no folder yet'}.`
+    : drive.set
+      ? 'Share a folder or a document with the service account to make it searchable.'
+      : 'Sign in with Google, or share documents with a service account.';
   return (
-    <Section title="Google Drive" text="Folders and documents shared with a service account.">
+    <Section title="Google Drive" text="Your own Drive through a sign-in, or what is shared with a service account.">
       <div className="rows">
-        <Row title={drive.set ? 'Connected' : 'Not connected'} help={off.error ?? found ?? (drive.set ? 'Share a folder or a document with the service account to make it searchable.' : 'Needs a service account key from Google Cloud.')}>
+        <Row title={drive.set ? 'Connected' : 'Not connected'} help={off.error ?? found ?? status}>
           {drive.set && (
             <AskFirst
               label="Disconnect"
               title="Disconnect Google Drive?"
-              text="The server stops reading Drive, and a key that was pasted here is deleted from this machine."
+              text={signedIn ? 'The server stops reading Drive. The sign-in is deleted from this machine and withdrawn at Google.' : 'The server stops reading Drive, and a key that was pasted here is deleted from this machine.'}
               confirm="Disconnect"
               disabled={off.busy}
               onConfirm={() => off.run(() => apply(() => call<Changed>('DELETE', '/services/drive')))}
             />
           )}
-          <Button size="sm" variant="secondary" onClick={() => setOpen(true)}>{drive.set ? 'Replace key' : 'Connect'}</Button>
+          <Button size="sm" variant="secondary" onClick={() => setOpen(true)}>{drive.set ? 'Change' : 'Connect'}</Button>
         </Row>
         {drive.set && (
           <form
@@ -119,49 +123,197 @@ function Drive() {
               <p className="field-help">
                 {drive.trusted.length
                   ? `Trusted now: ${drive.trusted.join(', ')}`
-                  : 'Nobody yet, so documents shared outside your folders stay hidden. Anyone can share a document with a service account; only trusted owners are shown.'}
+                  : signedIn
+                    ? 'Nobody yet, so documents other people shared with you stay hidden. Anyone can share a document with you; only trusted owners are shown.'
+                    : 'Nobody yet, so documents shared outside your folders stay hidden. Anyone can share a document with a service account; only trusted owners are shown.'}
               </p>
             )}
           </form>
         )}
       </div>
-      <Dialog
-        open={open}
-        onOpenChange={setOpen}
-        title="Connect Google Drive"
-        description="Paste the key file of a service account. It is checked with Google, then saved on this machine."
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-            <Button
-              loading={connect.busy}
-              disabled={key.trim().length < 50}
-              onClick={() =>
-                void connect.run(async () => {
-                  const r = await apply(() => call<Changed & { email?: string }>('POST', '/services/drive', { key }));
-                  setFound(r.email ? `Connected as ${r.email}. Share a folder or a document with this address.` : null);
-                  setKey('');
-                  setOpen(false);
-                })
-              }
-            >
-              Check and save
-            </Button>
-          </>
-        }
-      >
-        <TextArea
-          label="Service account key (JSON)"
-          hint="No key yet? In a terminal: npm run setup -- drive --gcloud. It creates the account and the key for you."
-          error={connect.error ?? undefined}
-          minRows={6}
-          maxRows={10}
-          value={key}
-          onChange={(e) => setKey(e.target.value)}
-          spellCheck={false}
-        />
-      </Dialog>
+      {open && <ConnectDrive onClose={() => setOpen(false)} onFound={setFound} />}
     </Section>
+  );
+}
+
+type Way = 'google' | 'gcloud' | 'key';
+interface Gcloud {
+  installed: boolean;
+  account: string | null;
+  project: string | null;
+  projects: Array<{ id: string; name: string }>;
+  problem: string | null;
+}
+const WAY_TEXT: Record<Way, string> = {
+  google: 'Sign in once. The server then reads your Drive as you. It only reads.',
+  gcloud: 'gcloud makes a service account. You then share folders with it, like with a colleague.',
+  key: 'Paste the key file of a service account. It is checked with Google, then saved on this machine.',
+};
+
+function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (text: string | null) => void }) {
+  const { apply } = useServer();
+  const [way, setWay] = useState<Way>('google');
+  const go = useAction();
+  // Sign in with Google
+  const [saved, setSaved] = useState<{ clientSaved: boolean; account: string | null } | null>(null);
+  const [otherClient, setOtherClient] = useState(false);
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [scope, setScope] = useState<'all' | 'folders'>('all');
+  const [folders, setFolders] = useState('');
+  // A service account made by gcloud
+  const [gcloud, setGcloud] = useState<Gcloud | null>(null);
+  const [project, setProject] = useState('');
+  // A pasted key
+  const [key, setKey] = useState('');
+
+  useEffect(() => {
+    call<{ clientSaved: boolean; account: string | null }>('GET', '/logins/google').then(setSaved, () => undefined);
+  }, []);
+  const lookForGcloud = () => {
+    setGcloud(null);
+    call<Gcloud>('GET', '/logins/gcloud').then(
+      (g) => {
+        setGcloud(g);
+        setProject((p) => p || g.project || g.projects[0]?.id || '');
+      },
+      (e) => setGcloud({ installed: false, account: null, project: null, projects: [], problem: e instanceof Error ? e.message : String(e) }),
+    );
+  };
+  useEffect(() => {
+    if (way === 'gcloud' && !gcloud) lookForGcloud();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [way]);
+
+  const useSaved = !!saved?.clientSaved && !otherClient;
+  const ready =
+    way === 'google'
+      ? (useSaved || (clientId.trim().length > 20 && (clientSecret.trim().length >= 10 || clientId.trim().startsWith('{')))) && (scope === 'all' || folders.trim().length >= 10)
+      : way === 'gcloud'
+        ? !!gcloud?.account && project.trim().length >= 6
+        : key.trim().length >= 50;
+  const run = () =>
+    void go.run(async () => {
+      if (way === 'google') {
+        await signIn('/logins/google', { ...(useSaved ? {} : { clientId, clientSecret }), folders: scope === 'folders' ? folders.split('\n') : null });
+        return;
+      }
+      const r = await apply(() => call<Changed & { email?: string }>('POST', '/services/drive', way === 'gcloud' ? { gcloud: { project: project.trim() } } : { key }));
+      onFound(r.email ? `Connected as ${r.email}. Share a folder or a document with this address.` : null);
+      onClose();
+    });
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => !o && onClose()}
+      title="Connect Google Drive"
+      description={WAY_TEXT[way]}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button loading={go.busy} disabled={!ready} onClick={run}>
+            {way === 'google' ? 'Sign in with Google' : way === 'gcloud' ? 'Create the account' : 'Check and save'}
+          </Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <SegmentedControl<Way>
+          aria-label="How to connect"
+          variant="tray"
+          value={way}
+          onChange={setWay}
+          options={[
+            { value: 'google', label: 'Sign in with Google' },
+            { value: 'gcloud', label: 'Account with gcloud' },
+            { value: 'key', label: 'Paste a key' },
+          ]}
+        />
+        {way === 'google' && (
+          <>
+            {useSaved ? (
+              <p className="field-help">
+                Uses the OAuth client saved here{saved?.account ? ` (last signed in as ${saved.account})` : ''}.{' '}
+                <button type="button" className="link" onClick={() => setOtherClient(true)}>Use another client</button>
+              </p>
+            ) : (
+              <>
+                <ol className="steps">
+                  <li>
+                    Google lets an app read Drive only through an OAuth client of your own Google Cloud project. In a project,{' '}
+                    <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">switch on the Google Drive API</a>.
+                  </li>
+                  <li>
+                    On <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Credentials</a>, create an OAuth client ID of the type Desktop app. Google asks for a consent screen
+                    first: Internal for a company account. With a personal account choose External and then Publish app, or the sign-in ends every 7 days.
+                  </li>
+                  <li>Copy the client ID and the client secret here. This is done once.</li>
+                </ol>
+                <TextField label="Client ID" placeholder="1234-abc.apps.googleusercontent.com" value={clientId} onChange={(e) => setClientId(e.target.value)} autoComplete="off" spellCheck={false} />
+                <TextField label="Client secret" type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} autoComplete="off" />
+              </>
+            )}
+            <SegmentedControl<'all' | 'folders'>
+              aria-label="What to read"
+              variant="tray"
+              value={scope}
+              onChange={setScope}
+              options={[
+                { value: 'all', label: 'All of My Drive' },
+                { value: 'folders', label: 'Chosen folders' },
+              ]}
+            />
+            {scope === 'folders' ? (
+              <TextArea
+                label="Folders"
+                hint="Open each folder in Drive and paste its address, one per line."
+                minRows={2}
+                maxRows={5}
+                value={folders}
+                onChange={(e) => setFolders(e.target.value)}
+                spellCheck={false}
+              />
+            ) : (
+              <p className="field-help">Everything in your My Drive becomes searchable by everyone who may use this server. What other people shared with you stays hidden until you trust its owner.</p>
+            )}
+          </>
+        )}
+        {way === 'gcloud' &&
+          (!gcloud ? (
+            <Spinner label="Looking for gcloud" />
+          ) : !gcloud.installed ? (
+            <p className="field-help">{gcloud.problem ?? 'The gcloud CLI is not on this machine. Install the Google Cloud SDK, or connect another way.'}</p>
+          ) : !gcloud.account ? (
+            <p className="field-help">
+              gcloud is not signed in. In a terminal: <code>gcloud auth login</code>.{' '}
+              <button type="button" className="link" onClick={lookForGcloud}>Look again</button>
+            </p>
+          ) : (
+            <>
+              {gcloud.projects.length ? (
+                <Select
+                  label="Project"
+                  value={project}
+                  onChange={(v) => setProject(v)}
+                  options={gcloud.projects.map((p) => ({ value: p.id, label: p.name && p.name !== p.id ? `${p.name} (${p.id})` : p.id }))}
+                  hint={`gcloud is signed in as ${gcloud.account}.`}
+                />
+              ) : (
+                <TextField label="Project ID" hint={gcloud.problem ?? `gcloud is signed in as ${gcloud.account}.`} value={project} onChange={(e) => setProject(e.target.value)} autoComplete="off" spellCheck={false} />
+              )}
+              <p className="field-help">
+                Switches on the Drive API there, creates the service account knowledge-mcp-drive and saves its key on this machine. The account gets no role in the project: it reads only what is shared
+                with it. It takes up to a minute.
+              </p>
+            </>
+          ))}
+        {way === 'key' && (
+          <TextArea label="Service account key (JSON)" minRows={6} maxRows={10} value={key} onChange={(e) => setKey(e.target.value)} spellCheck={false} />
+        )}
+        {go.error && <p className="error" role="alert">{go.error}</p>}
+      </div>
+    </Dialog>
   );
 }
 

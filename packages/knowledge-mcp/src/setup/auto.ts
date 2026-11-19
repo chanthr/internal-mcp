@@ -7,8 +7,11 @@
  *
  * Commands run through `Exec`, so tests replace the real CLIs with a script. Nothing here prints a secret: the key
  * goes to a file, and the GitHub token is returned to the caller, which writes it to .env.
+ *
+ * Every step awaits its command. A command line waits for each one (`systemExec`); the server does not stop
+ * answering while gcloud works, which can take half a minute (`backgroundExec`).
  */
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync } from 'node:fs';
 
 export interface ExecResult {
@@ -16,24 +19,37 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
 }
-export type Exec = (cmd: string, args: string[]) => ExecResult;
+export type Exec = (cmd: string, args: string[]) => ExecResult | Promise<ExecResult>;
+/** A command that is waited for on the spot (a quick one, in code that is not async). */
+export type SyncExec = (cmd: string, args: string[]) => ExecResult;
 
-export const systemExec: Exec = (cmd, args) => {
+export const systemExec: SyncExec = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 120_000 });
   if (r.error) return { status: 127, stdout: '', stderr: r.error.message };
   return { status: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 };
 
+/** The same, without holding up the process that asks: for a server that has other requests to answer. */
+export const backgroundExec: Exec = (cmd, args) =>
+  new Promise((resolve) => {
+    execFile(cmd, args, { encoding: 'utf8', timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (!error) return resolve({ status: 0, stdout, stderr });
+      const code = (error as { code?: unknown }).code;
+      // A number is the command's own exit code. Anything else (ENOENT, a timeout) means it did not run to an end.
+      resolve({ status: typeof code === 'number' ? code : 127, stdout: stdout ?? '', stderr: stderr || error.message });
+    });
+  });
+
 /** Is the command installed? */
-export function hasTool(exec: Exec, cmd: string): boolean {
-  return exec(cmd, ['--version']).status === 0;
+export async function hasTool(exec: Exec, cmd: string): Promise<boolean> {
+  return (await exec(cmd, ['--version'])).status === 0;
 }
 
 // ── Google Cloud ──
 
 /** The account gcloud is signed in with, or null. */
-export function gcloudAccount(exec: Exec): string | null {
-  const r = exec('gcloud', ['auth', 'list', '--filter=status:ACTIVE', '--format=value(account)']);
+export async function gcloudAccount(exec: Exec): Promise<string | null> {
+  const r = await exec('gcloud', ['auth', 'list', '--filter=status:ACTIVE', '--format=value(account)']);
   const account = r.stdout.trim().split('\n')[0]?.trim();
   return r.status === 0 && account ? account : null;
 }
@@ -44,8 +60,8 @@ export interface GcloudProject {
 }
 
 /** Projects the account can see. Throws when the login has expired, with the command that fixes it. */
-export function gcloudProjects(exec: Exec): GcloudProject[] {
-  const r = exec('gcloud', ['projects', 'list', '--format=json(projectId,name)', '--sort-by=projectId']);
+export async function gcloudProjects(exec: Exec): Promise<GcloudProject[]> {
+  const r = await exec('gcloud', ['projects', 'list', '--format=json(projectId,name)', '--sort-by=projectId']);
   if (r.status !== 0) {
     if (/reauth|login|credential/i.test(r.stderr)) throw new Error('gcloud needs a fresh sign-in. Run: gcloud auth login');
     throw new Error(`gcloud projects list failed: ${lastLine(r.stderr)}`);
@@ -60,8 +76,8 @@ export function gcloudProjects(exec: Exec): GcloudProject[] {
 }
 
 /** The project gcloud is set to, or null. */
-export function gcloudDefaultProject(exec: Exec): string | null {
-  const r = exec('gcloud', ['config', 'get-value', 'project']);
+export async function gcloudDefaultProject(exec: Exec): Promise<string | null> {
+  const r = await exec('gcloud', ['config', 'get-value', 'project']);
   const p = r.stdout.trim();
   return r.status === 0 && p && p !== '(unset)' ? p : null;
 }
@@ -99,7 +115,7 @@ export function serviceAccountCommands(plan: ServiceAccountPlan): string[][] {
  * The account gets no project role: it can only read what is shared with it in Drive.
  * Returns the address to share documents with.
  */
-export function createDriveServiceAccount(exec: Exec, plan: ServiceAccountPlan): { email: string; created: boolean } {
+export async function createDriveServiceAccount(exec: Exec, plan: ServiceAccountPlan): Promise<{ email: string; created: boolean }> {
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(plan.name)) {
     throw new Error(`service account name "${plan.name}" must be 6-30 characters: lowercase letters, digits and dashes`);
   }
@@ -107,20 +123,20 @@ export function createDriveServiceAccount(exec: Exec, plan: ServiceAccountPlan):
   const email = serviceAccountEmail(plan);
   const [enable, create, key] = serviceAccountCommands(plan);
 
-  const en = exec(enable[0], enable.slice(1));
+  const en = await exec(enable[0], enable.slice(1));
   if (en.status !== 0) {
     if (/billing/i.test(en.stderr)) throw new Error(`Could not enable the Drive API in ${plan.project}: the project has no billing account. Pick another project, or link billing.`);
     if (/PERMISSION_DENIED|does not have permission/i.test(en.stderr)) throw new Error(`Could not enable the Drive API in ${plan.project}: your account lacks permission (needs Service Usage Admin or Owner).`);
     throw new Error(`Could not enable the Drive API in ${plan.project}: ${lastLine(en.stderr)}`);
   }
 
-  const exists = exec('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${plan.project}`, '--format=value(email)']).status === 0;
+  const exists = (await exec('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${plan.project}`, '--format=value(email)'])).status === 0;
   if (!exists) {
-    const cr = exec(create[0], create.slice(1));
+    const cr = await exec(create[0], create.slice(1));
     if (cr.status !== 0) throw new Error(`Could not create the service account: ${lastLine(cr.stderr)}`);
   }
 
-  const k = exec(key[0], key.slice(1));
+  const k = await exec(key[0], key.slice(1));
   if (k.status !== 0) {
     if (/disableServiceAccountKeyCreation|Key creation is not allowed/i.test(k.stderr)) {
       throw new Error(
@@ -141,8 +157,8 @@ export function createDriveServiceAccount(exec: Exec, plan: ServiceAccountPlan):
 // ── GitHub ──
 
 /** The token of the signed-in gh CLI, or null when gh is missing or signed out. */
-export function ghToken(exec: Exec): string | null {
-  const r = exec('gh', ['auth', 'token']);
+export async function ghToken(exec: Exec): Promise<string | null> {
+  const r = await exec('gh', ['auth', 'token']);
   const token = r.stdout.trim();
   return r.status === 0 && token ? token : null;
 }

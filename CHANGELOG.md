@@ -6,6 +6,11 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Changed
 
+- **The read-only gateway goes by what a remote says about its tools.** A tool the remote marks as read-only
+  (`readOnlyHint`) is shown whatever it is called, and one it marks as changing things is hidden even when its
+  name starts with a read verb. A tool without a mark is judged by its first word as before, now skipping the
+  service's own name in front (`notion-search` reads as `search`). An upstream you already list may show a few
+  tools more or fewer; `expose` still overrides.
 - **What a model reads costs less.** `search_knowledge` shows two neighbouring parts of a document as one passage
   instead of twice the same edge, says how many terms of the question each passage holds, calls a poor keyword
   match weak, and answers a filter that matched nothing with the values that field has. `read_document` reads
@@ -42,6 +47,21 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Add an app that has an MCP server of its own.** In the console, *Apps → Add an app*: pick Notion,
+  Supabase, Linear, Atlassian, Sentry, Vercel, Stripe, Airtable, Figma and others from a list, or give the
+  address of any MCP server. Where the server follows MCP's sign-in rules, this server registers itself there
+  and you sign in at the app: nothing to create, no token to copy. The gateway uses that sign-in and renews it
+  by itself (`"signIn": true` on the entry in `upstreams`). Only the app's tools that read are turned on, with a
+  switch per app to allow the rest; Supabase is added in its read-only mode. A token can be pasted where a
+  service gives one, and an open server needs nothing.
+- **Connect a service without copying a token.** In the console: *Sign in with Railway* (the server registers
+  itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself), *Sign in
+  with Google* for Drive (through an OAuth client of your own Google Cloud project, made once; the server reads
+  your My Drive or the folders you list), *Account with gcloud* (creates the Drive service account and its key
+  without stopping the server while gcloud works), *Use the gh login* for GitHub, and for Slack a link that opens
+  "Create an app" with the read-only permissions filled in. A token can still be pasted for each, and
+  `RAILWAY_TOKEN` wins over a sign-in. A sign-in is kept owner-only in the data directory and goes, together with
+  the permission at the other site, when the service is disconnected.
 - **A console in the browser.** Start the server in a terminal and open the address it prints
   (`npx @chnxthr/knowledge-mcp` in any folder opens it for you). Add folders, connect Drive, Slack, GitHub,
   Railway, a database or an API, write a query and save it as a tool, try any tool and see what a client gets
@@ -104,6 +124,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **The line the generator prints for Claude Code broke in a folder with a space in its path.** Pasted as
+  printed, `claude mcp add` took half the path as the command and the server never started ("ENOENT"). Paths are
+  quoted now, Node is named by its full path, and the entry is added for the user rather than for the folder
+  the command happened to be run in. The setup wizard quotes its line the same way.
 - **The built-in index no longer reads everything to answer small questions.** Asking how many passages have a
   vector loaded every vector into memory, and it was asked on every search and every status read. With 90,000
   passages the server held 1.7 GB after start and 5.6 GB while vectors were being made; it now holds 180 MB after

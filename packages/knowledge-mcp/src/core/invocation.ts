@@ -63,6 +63,9 @@ export function cli(command: string, env: NodeJS.ProcessEnv = process.env): stri
   return `${BINARY} ${command}`;
 }
 
+/** One word of a command line for a POSIX shell, quoted when the shell would split or change it. */
+export const shellQuote = (word: string): string => (/[^A-Za-z0-9_@%+=:,./-]/.test(word) ? `'${word.replace(/'/g, `'\\''`)}'` : word);
+
 /** How an AI client starts this server over stdio from the folder `dir`: the project's own server when there is one. */
 export function stdioCommand(dir: string): string[] {
   const tsx = join(dir, 'node_modules', '.bin', 'tsx');

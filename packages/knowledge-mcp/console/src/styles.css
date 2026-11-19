@@ -68,6 +68,7 @@ p { margin: 0; }
 .section { margin-top: 30px; }
 .section:first-of-type { margin-top: 0; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.section-head > button { flex: none; }
 .section-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
 .section-head p { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
@@ -88,6 +89,17 @@ p { margin: 0; }
 .inline > :nth-child(2):not(button):not(label) { flex: 2; min-width: 0; }
 .actions { display: flex; align-items: center; gap: 8px; }
 .stack { display: flex; flex-direction: column; gap: 14px; }
+.choice { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.choice-main { min-width: 0; }
+.choice-title { font-weight: 500; }
+.choice-help { color: var(--muted); font-size: 12px; }
+.choice > button { flex: none; }
+.or { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.steps a { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.steps a:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 2px; }
+.steps code, .field-help code { font-family: var(--mono); font-size: 12px; color: var(--text); }
 .code-input textarea { font-family: var(--mono); font-size: 12px; line-height: 1.6; }
 .muted { color: var(--muted); }
 .clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }

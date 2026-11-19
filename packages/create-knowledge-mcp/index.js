@@ -132,9 +132,14 @@ async function main() {
       run(pm, ['run', 'setup'], target);
     }
   }
-  const tsx = join(target, 'node_modules', '.bin', 'tsx');
+  // The line a person pastes into a shell: a path with a space in it ("My Projects/my-mcp") must stay one word,
+  // or the client is given half a path to start. Node is named by its full path, so nothing is looked up when a
+  // client starts the server from somewhere else.
+  const addToClaude = ['claude', 'mcp', 'add', '--scope', 'user', name, '--', process.execPath, join(target, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(target, 'src', 'server.ts'), 'serve', '--stdio']
+    .map(shellWord)
+    .join(' ');
   const steps = [
-    `  cd ${dir}`,
+    `  cd ${shellWord(dir)}`,
     ...(installed ? [] : [`  ${pm} install`]),
     `  ${runScript} setup                                ${dim('# asks what to connect, checks it, writes .env. Run it again any time')}`,
     `  ${runScript} dev                                  ${dim('# http://localhost:8080/mcp, restarts when a file or the config changes')}`,
@@ -153,12 +158,19 @@ ${bold('Let an AI agent set it up')}
 ${bold('Write your own tool')}
   Copy src/plugins/notes.ts to src/plugins/<name>.ts and edit it. Every file there is loaded.
 
-${bold('Use it from Claude Code (local, no key needed)')}
-  claude mcp add ${name} -- ${tsx} ${join(target, 'src', 'server.ts')} serve --stdio
+${bold('Use it from an AI client (local, no key needed)')}
+  ${runScript} dev                                  ${dim('# then open the console address it prints: Connect a client adds it for you')}
+  ${addToClaude}
 
 ${bold('Check what is on')}
   ${runScript} doctor
 `);
+}
+
+/** One word of a command line, quoted when a shell would split or change it. */
+export function shellWord(word, platform = process.platform) {
+  if (/^[A-Za-z0-9_@%+=:,./\\-]+$/.test(word) && (platform === 'win32' || !word.includes('\\'))) return word;
+  return platform === 'win32' ? `"${word.replace(/"/g, '\\"')}"` : `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
 // Run only as a command (npx goes through a bin symlink, hence realpath), not when imported by tests.

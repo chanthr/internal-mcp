@@ -144,7 +144,8 @@ export function App() {
         if (result.restartNeeded) setNotice('Saved. Restart the server to use the change.');
         await refresh();
       }
-      if (result.note) setNotice(result.note);
+      // What was done, and what is still to do when nothing restarts the server for us.
+      if (result.note) setNotice(result.restartNeeded && !result.restarting ? `${result.note} Restart the server to use the change.` : result.note);
       check(); // what is connected has changed
       return result;
     },
@@ -153,6 +154,22 @@ export function App() {
   const go = useCallback((id: string) => {
     location.hash = `#/${id}`;
   }, []);
+  // Back from signing in at Railway or Google: the server holds what came back, and this saves it. Said once per
+  // return, so a failure (cancelled, refused) is shown and not asked for again.
+  const waiting = state?.login?.service ?? null;
+  const saving = useRef(false);
+  useEffect(() => {
+    if (!waiting || saving.current) return;
+    saving.current = true;
+    apply(() => call<Changed>('POST', '/logins/finish'))
+      .catch(async (e) => {
+        await refresh();
+        setNotice(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        saving.current = false;
+      });
+  }, [waiting, apply, refresh]);
   const server = useMemo<Server | null>(() => (state ? { state, refresh, apply, go, checks, check } : null), [state, refresh, apply, go, checks, check]);
   // Asked once the console is open, so the answer is there by the time the overview shows it.
   const opened = !!state;
@@ -310,6 +327,19 @@ export function Row({ title, help, children, onClick }: { title: ReactNode; help
  * A quiet button that asks first. For what cannot be brought back from here: a saved secret, a query somebody wrote,
  * a key that was handed out. (Removing a folder does not ask: adding it again restores everything.)
  */
+/** One way of doing something and the button that does it, for a dialog that offers more than one way. */
+export function Choice({ title, help, error, children }: { title: ReactNode; help?: ReactNode; error?: string | null; children: ReactNode }) {
+  return (
+    <div className="choice">
+      <div className="choice-main">
+        <div className="choice-title">{title}</div>
+        {error ? <div className="error" role="alert">{error}</div> : help && <div className="choice-help">{help}</div>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
 export function AskFirst({ label, title, text, confirm, disabled, onConfirm }: { label: string; title: string; text: string; confirm: string; disabled?: boolean; onConfirm: () => Promise<unknown> }) {
   return (
     <AlertDialog

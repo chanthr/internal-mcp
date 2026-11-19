@@ -35,12 +35,34 @@ import { embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../plugins
 import { reembed } from '../plugins/knowledge/reembed.js';
 import { LOCAL_PREFIX, localFolders } from '../plugins/knowledge/folders.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
-import { isTrusted, validTrustEntry } from '../plugins/drive/trust.js';
+import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
 import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList } from '../setup/commands.js';
 import { readEnvKeys, readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { countDocuments } from '../setup/wizard.js';
+import { backgroundExec, createDriveServiceAccount, gcloudAccount } from '../setup/auto.js';
+import { railwayAuth, railwaySignedIn, readRailwayLogin } from '../plugins/railway/login.js';
 import { consoleEnabled, consoleToken, localOnly, tokenRequired } from './auth.js';
+import {
+  completeLogin,
+  driveFolderIds,
+  driveUsesLogin,
+  finishLogin,
+  gcloudState,
+  ghLogin,
+  githubEndpoint,
+  loginWaiting,
+  parseGoogleClient,
+  readGoogleLogin,
+  signOutGoogle,
+  signOutRailway,
+  startGoogleLogin,
+  startMcpLogin,
+  startRailwayLogin,
+} from './logins.js';
+import { mcpTarget, needsSignIn, prefixOf, removeUpstream, signOutMcp, tokenEnvOf, toolsFound, upsertUpstream, upstreamEntries } from './upstreams.js';
+import { probeUpstream } from '../core/upstream.js';
+import { readUpstreamLogin, UPSTREAM_NAME, upstreamSignedIn } from '../core/upstream_login.js';
 import { canReload, requestReload } from './supervisor.js';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -99,6 +121,58 @@ const SERVICE_ENV: Record<string, string[]> = {
 };
 const isSet = (names: string[]) => names.some((n) => !!process.env[n]?.trim());
 
+/** How Drive is connected: a key (service account) or a sign-in, and for a sign-in who it is and which folders are read. */
+function driveVia(dir: string): { via: 'key' | 'login' | null; account: string | null; reads: string[] } {
+  if (!isSet(SERVICE_ENV.drive)) return { via: null, account: null, reads: [] };
+  if (!driveUsesLogin(dir)) return { via: 'key', account: null, reads: [] };
+  const login = readGoogleLogin();
+  const mine = new Set(login?.roots ?? []);
+  let roots: Array<{ id?: string; name?: string }> = [];
+  try {
+    const list: unknown = readConfigFile(dir).drive?.roots;
+    if (Array.isArray(list)) roots = list;
+  } catch {
+    /* a config file that cannot be read is reported elsewhere */
+  }
+  return { via: 'login', account: login?.account ?? null, reads: roots.filter((r) => mine.has(String(r?.id))).map((r) => String(r.name ?? r.id)) };
+}
+
+/** Other services' MCP servers in mcp.config.json, each with what the gateway says about it right now. */
+function upstreamViews(dir: string, registry: Registry) {
+  const live = new Map(registry.upstreams.statuses().map((s) => [s.name, s]));
+  let entries: ReturnType<typeof upstreamEntries> = [];
+  try {
+    entries = upstreamEntries(dir);
+  } catch {
+    /* a config file that cannot be read is reported elsewhere */
+  }
+  return entries.map((e) => {
+    const s = live.get(e.name);
+    return {
+      name: e.name,
+      url: e.url,
+      prefix: prefixOf(e),
+      expose: Array.isArray(e.expose) ? ('list' as const) : e.expose ?? ('read' as const),
+      via: e.signIn ? ('login' as const) : e.tokenEnv ? ('token' as const) : ('open' as const),
+      // A sign-in can be gone while the entry is still there (the data folder was emptied, the address changed).
+      signedIn: e.signIn ? UPSTREAM_NAME.test(e.name) && upstreamSignedIn(e.name, e.url) : null,
+      // Not running: saved, and waiting for the server to start again.
+      running: !!s,
+      connected: s?.connected ?? false,
+      tools: s?.toolCount ?? 0,
+      hidden: s?.hidden ?? 0,
+      error: s?.error ?? null,
+    };
+  });
+}
+
+/** How Railway is connected: a token in the environment wins over a sign-in. */
+function railwayVia(): { set: boolean; via: 'token' | 'login' | null; who: string | null } {
+  if (isSet(SERVICE_ENV.railway)) return { set: true, via: 'token', who: null };
+  if (railwaySignedIn()) return { set: true, via: 'login', who: readRailwayLogin().who ?? null };
+  return { set: false, via: null, who: null };
+}
+
 /** Lines of a setup command, collected instead of printed. */
 async function setup(argv: string[], dir: string): Promise<{ ok: boolean; lines: string[] }> {
   const lines: string[] = [];
@@ -134,7 +208,7 @@ const SERVER_OWN = new Set([
   'OAUTH_GOOGLE_CLIENT_SECRET', 'OAUTH_JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY', 'MCP_API_KEY', 'MCP_CONFIG_JSON',
 ]);
 /** …and the connection string of a database, which the console files under <NAME>_DATABASE_URL. */
-const serverOwn = (name: string) => SERVER_OWN.has(name.toUpperCase()) || /_DATABASE_URL$/i.test(name);
+const serverOwn = (name: string) => SERVER_OWN.has(name.toUpperCase()) || /_DATABASE_URL$/i.test(name) || /_MCP_TOKEN$/i.test(name);
 
 /**
  * Why a `${NAME}` written in the console is refused, or null.
@@ -247,10 +321,10 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           }),
         ),
         services: {
-          drive: { set: isSet(SERVICE_ENV.drive), trusted: trustedList({ dir }) },
+          drive: { set: isSet(SERVICE_ENV.drive), trusted: trustedList({ dir }), ...driveVia(dir) },
           slack: { set: isSet(SERVICE_ENV.slack) },
           github: { set: isSet(SERVICE_ENV.github) },
-          railway: { set: isSet(SERVICE_ENV.railway) },
+          railway: railwayVia(),
           embeddings: {
             set: embeddingsConfigured(),
             model: embeddingsConfigured() ? EMBEDDING_MODEL : null,
@@ -262,6 +336,10 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         connections: Object.entries(cfg.connections).map(([name, c]) => connectionView(name, c, cfg.tools.filter((t) => t.connection === name).length)),
         declaredTools: cfg.tools,
         tools,
+        // Other services' MCP servers in the list, and how each one is doing right now.
+        upstreams: upstreamViews(dir, registry),
+        // A sign-in that came back from another site and waits to be saved: the page saves it when it sees this.
+        login: loginWaiting(),
       });
     }),
   );
@@ -323,15 +401,25 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         return change(res, { found: `${r.team} as ${r.user}` });
       }
       if (id === 'github') {
-        const { token } = z.object({ token: secret }).parse(req.body);
-        const r = await checkGithub(token.trim());
-        updateEnvFile(envPath, { GITHUB_PAT: token.trim() });
+        const body = z.object({ token: secret.optional(), fromGh: z.literal(true).optional() }).parse(req.body);
+        let token = body.token;
+        if (body.fromGh) {
+          // The login the gh CLI already has on this machine. The token goes from gh to .env and is never shown.
+          const gh = await ghLogin();
+          if (!gh.token) return refuse(res, 422, gh.installed ? 'The gh CLI is not signed in. In a terminal: gh auth login' : 'The gh CLI is not installed on this machine.');
+          token = gh.token;
+        }
+        if (!token) return refuse(res, 400, 'token: paste a token, or use the gh login');
+        const r = await checkGithub(token, { apiBase: body.fromGh ? githubEndpoint.api : undefined });
+        updateEnvFile(envPath, { GITHUB_PAT: token });
         return change(res, { found: `signed in as ${r.login}` });
       }
       if (id === 'railway') {
         const { token } = z.object({ token: secret }).parse(req.body);
         const r = await checkRailway(token.trim());
         updateEnvFile(envPath, { RAILWAY_TOKEN: token.trim() });
+        // A token and a sign-in are two ways to the same thing: the token is used, so the sign-in goes.
+        if (railwaySignedIn()) await signOutRailway();
         return change(res, { found: r.who });
       }
       if (id === 'embeddings') {
@@ -352,12 +440,29 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         );
         return change(res, { found: `${r.model} (${r.dim} dimensions)` });
       }
+      if (id === 'drive' && req.body && typeof req.body === 'object' && 'gcloud' in req.body) {
+        // The gcloud CLI is signed in here: it makes the service account and its key, as `setup drive --gcloud` does.
+        const { gcloud } = z.object({ gcloud: z.object({ project: z.string().regex(/^[a-z][a-z0-9.:-]{4,60}$/, 'a Google Cloud project ID') }) }).parse(req.body);
+        const account = await gcloudAccount(backgroundExec);
+        if (!account) return refuse(res, 422, 'gcloud is not signed in. In a terminal: gcloud auth login');
+        const keyPath = join(dir, 'drive-service-account.json');
+        // The key this console wrote makes way for the new one. A key file somebody else put there stays, and stops this.
+        if (existsSync(keyPath) && resolve(dir, readEnvValues(envPath).get('GOOGLE_APPLICATION_CREDENTIALS') ?? '.') === keyPath) rmSync(keyPath, { force: true });
+        const made = await createDriveServiceAccount(backgroundExec, { project: gcloud.project, name: 'knowledge-mcp-drive', keyPath });
+        if (driveUsesLogin(dir)) await signOutGoogle(dir);
+        updateEnvFile(envPath, { GOOGLE_APPLICATION_CREDENTIALS: keyPath });
+        // Whoever made the account is the first owner whose shared documents are shown.
+        const own = trustEntryFor(account);
+        if (own && editable()) addTrusted(dir, [own]);
+        return change(res, { found: made.email, email: made.email, shared: [] });
+      }
       if (id === 'drive') {
         const { key } = z.object({ key: z.string().min(50).max(20_000) }).parse(req.body);
         const r = await checkDriveCredentials(key, 'the pasted key');
         const keyPath = join(dir, 'drive-service-account.json');
         writeFileSync(keyPath, key.trim().endsWith('\n') ? key.trim() : `${key.trim()}\n`, { mode: 0o600 });
         chmodSync(keyPath, 0o600);
+        if (driveUsesLogin(dir)) await signOutGoogle(dir);
         updateEnvFile(envPath, { GOOGLE_APPLICATION_CREDENTIALS: keyPath });
         const trusted = trustedList({ dir });
         return change(res, {
@@ -367,6 +472,106 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         });
       }
       refuse(res, 404, 'There is no such service.');
+    }),
+  );
+  // ── Signing in instead of pasting a token (logins.ts) ──
+  /** How the console page was opened. The other site sends the browser back to this address. */
+  const origin = (req: Request) => `http://${String(req.headers.host)}`;
+  api.get(
+    '/logins/gh',
+    wrap(async (_req, res) => {
+      const gh = await ghLogin();
+      // Which account it is: the person should see whose login they are about to use.
+      const login = gh.token ? await checkGithub(gh.token, { apiBase: githubEndpoint.api }).then((r) => r.login, () => null) : null;
+      res.json({ installed: gh.installed, login });
+    }),
+  );
+  api.get('/logins/gcloud', wrap(async (_req, res) => void res.json(await gcloudState())));
+  api.get(
+    '/logins/google',
+    wrap(async (req, res) => {
+      const saved = readGoogleLogin();
+      res.json({ clientSaved: !!saved, account: saved?.account ?? null, redirectUri: `${origin(req)}/console/login/google` });
+    }),
+  );
+  api.post('/logins/railway', wrap(async (req, res) => void res.json({ url: await startRailwayLogin(origin(req)) })));
+  api.post(
+    '/logins/google',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return; // the folders to read are saved in mcp.config.json
+      const body = z
+        .object({ clientId: z.string().trim().max(5000).optional(), clientSecret: z.string().trim().max(300).optional(), folders: z.array(z.string().max(500)).max(20).nullable().optional() })
+        .parse(req.body);
+      const client = body.clientId ? parseGoogleClient(body.clientId, body.clientSecret ?? '') : undefined;
+      const folders = body.folders?.some((f) => f.trim()) ? driveFolderIds(body.folders) : null;
+      res.json({ url: startGoogleLogin(origin(req), { client, folders }) });
+    }),
+  );
+  api.post(
+    '/logins/finish',
+    wrap(async (_req, res) => {
+      const done = await finishLogin(settingsDir());
+      change(res, { found: done.found, note: `${done.label} is connected: ${done.found}.` });
+    }),
+  );
+
+  // ── Other services' MCP servers (upstreams.ts) ──
+  /** Connect and list the tools, with what went wrong said so that the form can show it. */
+  const lookAt = async (spec: Parameters<typeof probeUpstream>[0]) => {
+    try {
+      return await probeUpstream(spec);
+    } catch (e) {
+      throw new Error(`${new URL(spec.url).host} did not list its tools (${msg(e).slice(0, 200)}).`);
+    }
+  };
+  api.post(
+    '/upstreams',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const body = z.object({ name: z.string().max(40), url: z.string().max(1000), token: secret.optional() }).parse(req.body);
+      // Its name is its permission group and the start of its tool names: it cannot be one that is in use.
+      const taken = new Set([...BUILT_IN, ...Object.keys(getConfig().connections), ...Object.keys(readConfigFile(dir).connections ?? {}), ...registry.status().map((p) => p.id)]);
+      const target = mcpTarget(dir, body, taken);
+      if (body.token) {
+        const seen = await lookAt({ name: target.name, url: target.url, prefix: prefixOf(target), token: body.token });
+        const env = tokenEnvOf(target.name);
+        updateEnvFile(join(dir, '.env'), { [env]: body.token });
+        if (readUpstreamLogin(target.name)) await signOutMcp(target.name);
+        upsertUpstream(dir, { name: target.name, url: target.url, tokenEnv: env });
+        return change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });
+      }
+      // The server wants a sign-in: the page goes there, and the server is added when the sign-in is saved.
+      if (await needsSignIn(target.url)) return void res.json({ signIn: await startMcpLogin(origin(req), target) });
+      const seen = await lookAt({ name: target.name, url: target.url, prefix: prefixOf(target) });
+      upsertUpstream(dir, { name: target.name, url: target.url });
+      change(res, { found: toolsFound(seen), note: `${target.name} is connected: ${toolsFound(seen)}.` });
+    }),
+  );
+  api.patch(
+    '/upstreams/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const { expose } = z.object({ expose: z.enum(['read', 'all']) }).parse(req.body);
+      const dir = settingsDir();
+      const entry = upstreamEntries(dir).find((e) => e.name === String(req.params.name));
+      if (!entry) return refuse(res, 404, 'That server is not in the list.');
+      upsertUpstream(dir, { ...entry, expose });
+      change(res);
+    }),
+  );
+  api.delete(
+    '/upstreams/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const name = String(req.params.name);
+      const gone = removeUpstream(dir, name);
+      if (!gone) return refuse(res, 404, 'That server is not in the list.');
+      // What the console made for it goes with it: the sign-in (here and at the service) and a pasted token.
+      if (UPSTREAM_NAME.test(name)) await signOutMcp(name);
+      if (gone.tokenEnv && gone.tokenEnv === tokenEnvOf(name)) updateEnvFile(join(dir, '.env'), { [gone.tokenEnv]: undefined });
+      change(res);
     }),
   );
   api.post(
@@ -411,6 +616,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       // A key file somebody put elsewhere is theirs and stays.
       const pasted = join(settingsDir(), 'drive-service-account.json');
       if (id === 'drive' && resolve(settingsDir(), readEnvValues(envPath).get('GOOGLE_APPLICATION_CREDENTIALS') ?? '.') === pasted) rmSync(pasted, { force: true });
+      // A sign-in goes with the connection too: its file here, and the permission at the other site.
+      if (id === 'drive' && driveUsesLogin(settingsDir())) await signOutGoogle(settingsDir());
+      if (id === 'railway' && railwaySignedIn()) await signOutRailway();
       updateEnvFile(envPath, Object.fromEntries(names.map((n) => [n, undefined])));
       change(res, outside.length ? { note: `${outside.join(', ')} is set outside .env (in the shell or the platform), so it stays on until it is removed there.` } : {});
     }),
@@ -696,6 +904,14 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   // The browser the server opened: trade the one-time code for the address with the token. Anything else lands on
   // the page, which works if this browser already has the token and asks for it if not.
   router.get('/open', (req, res) => void res.redirect(302, redeemOpenCode(String(req.query.code ?? '')) ? `/console/#token=${consoleToken()}` : '/console/'));
+  // The browser comes back from Railway or Google. It carries no console token (it arrives from another site), so
+  // this accepts only the answer to a sign-in started from the console minutes ago, and saves nothing by itself.
+  router.get('/login/:service', (req, res) => {
+    completeLogin(String(req.params.service), req.query as Record<string, unknown>).then(
+      (page) => res.redirect(302, page),
+      () => res.redirect(302, '/console/'),
+    );
+  });
   if (ui) {
     router.use(express.static(ui, { index: 'index.html', maxAge: 0 }));
     router.get(/.*/, (_req, res) => res.sendFile(join(ui, 'index.html')));
