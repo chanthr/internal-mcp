@@ -59,12 +59,22 @@ export interface GcloudProject {
   name: string;
 }
 
+/**
+ * gcloud wants the person to sign in again. Seen with an organization account: Google asks for the sign-in again
+ * after a while, gcloud would ask for it in the terminal, and run from here it has no terminal to ask in
+ * ("Reauthentication failed. cannot prompt during non-interactive execution"). Every gcloud step can end this way,
+ * so every step says the same thing about it: what to run, not gcloud's sentence.
+ */
+const signInExpired = (stderr: string): boolean => /reauth|gcloud auth login|refreshing your current auth tokens|cannot prompt during non-interactive|invalid_grant/i.test(stderr);
+export const GCLOUD_SIGN_IN = "gcloud's sign-in has expired, and gcloud cannot ask for it again from here. Run this in a terminal, then try again: gcloud auth login";
+const gcloudFailed = (what: string, stderr: string): Error => new Error(signInExpired(stderr) ? GCLOUD_SIGN_IN : `${what}: ${lastLine(stderr)}`);
+
 /** Projects the account can see. Throws when the login has expired, with the command that fixes it. */
 export async function gcloudProjects(exec: Exec): Promise<GcloudProject[]> {
   const r = await exec('gcloud', ['projects', 'list', '--format=json(projectId,name)', '--sort-by=projectId']);
   if (r.status !== 0) {
-    if (/reauth|login|credential/i.test(r.stderr)) throw new Error('gcloud needs a fresh sign-in. Run: gcloud auth login');
-    throw new Error(`gcloud projects list failed: ${lastLine(r.stderr)}`);
+    if (/credential/i.test(r.stderr)) throw new Error(GCLOUD_SIGN_IN);
+    throw gcloudFailed('gcloud projects list failed', r.stderr);
   }
   try {
     return (JSON.parse(r.stdout || '[]') as Array<{ projectId?: string; name?: string }>)
@@ -127,13 +137,13 @@ export async function createDriveServiceAccount(exec: Exec, plan: ServiceAccount
   if (en.status !== 0) {
     if (/billing/i.test(en.stderr)) throw new Error(`Could not enable the Drive API in ${plan.project}: the project has no billing account. Pick another project, or link billing.`);
     if (/PERMISSION_DENIED|does not have permission/i.test(en.stderr)) throw new Error(`Could not enable the Drive API in ${plan.project}: your account lacks permission (needs Service Usage Admin or Owner).`);
-    throw new Error(`Could not enable the Drive API in ${plan.project}: ${lastLine(en.stderr)}`);
+    throw gcloudFailed(`Could not enable the Drive API in ${plan.project}`, en.stderr);
   }
 
   const exists = (await exec('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${plan.project}`, '--format=value(email)'])).status === 0;
   if (!exists) {
     const cr = await exec(create[0], create.slice(1));
-    if (cr.status !== 0) throw new Error(`Could not create the service account: ${lastLine(cr.stderr)}`);
+    if (cr.status !== 0) throw gcloudFailed('Could not create the service account', cr.stderr);
   }
 
   const k = await exec(key[0], key.slice(1));
@@ -144,7 +154,7 @@ export async function createDriveServiceAccount(exec: Exec, plan: ServiceAccount
           `Ask an admin to allow it for project ${plan.project}, or use a project outside the organization. The account ${email} was ${exists ? 'left as it is' : 'created'}.`,
       );
     }
-    throw new Error(`Could not create a key for ${email}: ${lastLine(k.stderr)}`);
+    throw gcloudFailed(`Could not create a key for ${email}`, k.stderr);
   }
   try {
     chmodSync(plan.keyPath, 0o600);

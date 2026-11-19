@@ -139,6 +139,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **When gcloud's sign-in has expired the console says what to run.** With an organization account Google asks
+  for the sign-in again after a while, and gcloud, started by the console, has no terminal to ask in. Pressing
+  *Account with gcloud* then showed gcloud's own sentence ("Reauthentication failed. cannot prompt during
+  non-interactive execution"). Every gcloud step now answers with the command that fixes it: `gcloud auth login`.
 - **The server no longer starts on a port another program already answers on.** It listens on every address,
   and the system allows that beside a program that listens on 127.0.0.1 only. The two then shared the port: a
   browser on `localhost` reached one or the other, and the console asked for its token over and over because the

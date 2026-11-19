@@ -381,12 +381,13 @@ test('gcloud: the console makes the Drive service account, without holding up th
     'gcloud',
     [
       'echo "$*" >> "$here/gcloud.calls"',
+      'expired() { [ -f "$here/gcloud-expired" ] && { echo "ERROR: (gcloud.$1) There was a problem refreshing your current auth tokens: Reauthentication failed. cannot prompt during non-interactive execution." >&2; exit 1; }; }',
       'case "$*" in',
       '  "--version") echo "Google Cloud SDK 500";;',
       '  "auth list"*) [ -f "$here/gcloud-signed-out" ] || echo "ann@example.com";;',
       '  "config get-value project") echo "acme-lab";;',
-      `  "projects list"*) echo '[{"projectId":"acme-lab","name":"Acme Lab"},{"projectId":"acme-prod","name":"acme-prod"}]';;`,
-      '  "services enable"*) sleep 0.3;;',
+      `  "projects list"*) expired projects.list; echo '[{"projectId":"acme-lab","name":"Acme Lab"},{"projectId":"acme-prod","name":"acme-prod"}]';;`,
+      '  "services enable"*) expired services.enable; sleep 0.3;;',
       '  "iam service-accounts describe"*) exit 1;;',
       '  "iam service-accounts create"*) ;;',
       `  "iam service-accounts keys create"*) echo '{"type":"service_account","client_email":"knowledge-mcp-drive@acme-lab.iam.gserviceaccount.com","private_key":"k"}' > "$5";;`,
@@ -426,6 +427,18 @@ test('gcloud: the console makes the Drive service account, without holding up th
   assert.deepEqual([out.status, /gcloud auth login/.test(out.json.error)], [422, true]);
   assert.deepEqual((await api('GET', '/logins/gcloud')).json, { installed: true, account: null, project: null, projects: [], problem: null });
   rmSync(join(bin, 'gcloud-signed-out'));
+
+  // Signed in, and Google wants the sign-in again (an organization account, after a while). gcloud would ask in a
+  // terminal and has none here. The page says what to run, in the list of projects and when the button is pressed,
+  // not gcloud's own sentence about tokens and prompts.
+  writeFileSync(join(bin, 'gcloud-expired'), '');
+  const expected = /^gcloud's sign-in has expired, and gcloud cannot ask for it again from here\. Run this in a terminal, then try again: gcloud auth login$/;
+  const stale = (await api('GET', '/logins/gcloud')).json;
+  assert.deepEqual([stale.account, stale.projects, expected.test(stale.problem)], ['ann@example.com', [], true], JSON.stringify(stale));
+  const pressed = await api('POST', '/services/drive', { gcloud: { project: 'acme-lab' } });
+  assert.deepEqual([pressed.status, expected.test(pressed.json.error)], [422, true], pressed.text);
+  assert.ok(!/non-interactive|refreshing your current auth tokens/.test(pressed.text));
+  rmSync(join(bin, 'gcloud-expired'));
 });
 
 /**
