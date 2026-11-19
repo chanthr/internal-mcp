@@ -3,9 +3,13 @@
  * search with) and for the console's chat (llm_chat.ts). Until one is connected nothing here runs, and the server
  * calls no model at all.
  *
- * Two kinds of connection:
+ * Three kinds of connection:
  *   anthropic   Claude, through Anthropic's own API and its official SDK.
  *   openai      Any endpoint that speaks OpenAI's /chat/completions: OpenRouter, OpenAI, a local Ollama, vLLM, …
+ *   chatgpt     The person's own ChatGPT Plus or Pro plan, through OpenAI's sign-in (chatgpt.ts). No key.
+ *
+ * A Claude Pro or Max plan cannot be used this way: Anthropic does not allow other apps to use a Claude
+ * subscription's sign-in. Claude is used with an API key.
  *
  * Settings (env, written by the console):
  *   LLM_PROVIDER   anthropic | openai
@@ -18,8 +22,9 @@
  * where a model is connected, and nothing is sent by merely connecting one (one short question checks the key).
  */
 import Anthropic from '@anthropic-ai/sdk';
+import { ChatgptError, chatgptModels, chatgptResponses, chatgptSignedIn } from './chatgpt.js';
 
-export type LlmKind = 'anthropic' | 'openai';
+export type LlmKind = 'anthropic' | 'openai' | 'chatgpt';
 
 export interface LlmSettings {
   kind: LlmKind;
@@ -38,7 +43,9 @@ const clean = (v: string | undefined): string | undefined => v?.trim() || undefi
 export function llmSettings(env: NodeJS.ProcessEnv = process.env): LlmSettings | null {
   const model = clean(env.LLM_MODEL);
   const kind = clean(env.LLM_PROVIDER);
-  if (!model || (kind !== 'anthropic' && kind !== 'openai')) return null;
+  if (!model || (kind !== 'anthropic' && kind !== 'openai' && kind !== 'chatgpt')) return null;
+  // The plan is used through the sign-in kept by chatgpt.ts: the setting holds only the model.
+  if (kind === 'chatgpt') return chatgptSignedIn() ? { kind, model } : null;
   if (kind === 'anthropic') return clean(env.LLM_API_KEY) ? { kind, apiKey: clean(env.LLM_API_KEY), model } : null;
   const baseUrl = clean(env.LLM_BASE_URL)?.replace(/\/+$/, '');
   return baseUrl ? { kind, baseUrl, apiKey: clean(env.LLM_API_KEY), model } : null;
@@ -226,10 +233,43 @@ async function openaiModels(s: Pick<LlmSettings, 'baseUrl' | 'apiKey'>): Promise
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
+// ── A ChatGPT plan, through OpenAI's sign-in (chatgpt.ts) ──
+
+/** ChatgptError, as the error everything else here throws. */
+export function asLlmError(e: unknown): LlmError {
+  if (e instanceof LlmError) return e;
+  if (e instanceof ChatgptError) return new LlmError(e.message, e.retry);
+  return new LlmError(e instanceof Error ? e.message : String(e));
+}
+
+async function askChatgpt(s: LlmSettings, req: LlmRequest): Promise<LlmAnswer> {
+  // The plan route takes the instructions as `instructions` (a system message in the input is refused) and no
+  // output limit: the model's own limit applies.
+  const body = { model: s.model, ...(req.system ? { instructions: req.system } : {}), input: [{ role: 'user', content: req.prompt }] };
+  let text = '';
+  let model = s.model;
+  const usage = { input: 0, output: 0, cached: 0 };
+  try {
+    for await (const e of chatgptResponses(body, req.signal ?? new AbortController().signal)) {
+      if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') text += e.delta;
+      if (e.type === 'response.completed') {
+        model = e.response?.model ?? model;
+        usage.input = e.response?.usage?.input_tokens ?? 0;
+        usage.output = e.response?.usage?.output_tokens ?? 0;
+        usage.cached = e.response?.usage?.input_tokens_details?.cached_tokens ?? 0;
+      }
+    }
+  } catch (e) {
+    throw asLlmError(e);
+  }
+  return { text, model, usage, cutOff: false };
+}
+
 // ── What the rest of the server calls ──
 
 /** The models the provider offers this key. */
 export async function listLlmModels(s: Omit<LlmSettings, 'model'>): Promise<LlmModel[]> {
+  if (s.kind === 'chatgpt') return chatgptModels().catch((e) => Promise.reject(asLlmError(e)));
   return s.kind === 'anthropic' ? claudeModels(s) : openaiModels(s);
 }
 
@@ -247,6 +287,7 @@ export async function ask(req: LlmRequest, settings: LlmSettings | null = llmSet
   if (!settings) throw new LlmError('No model is connected. Connect one in the console (Agent).');
   // The SDK retries by itself. The plain endpoint is retried here.
   if (settings.kind === 'anthropic') return askClaude(settings, req);
+  if (settings.kind === 'chatgpt') return askChatgpt(settings, req);
   for (let attempt = 0; ; attempt++) {
     try {
       return await askOpenai(settings, req);

@@ -27,6 +27,7 @@ import { cli, stdioEntry } from '../core/invocation.js';
 import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
+import { CALLBACK_PATH, chatgptView, finishChatgptSignIn, signOutChatgpt, startChatgptSignIn } from '../core/chatgpt.js';
 import { checkOcr, ocrIsLocal, ocrPrompt, ocrSettings, type OcrSettings } from '../plugins/drive/ocr.js';
 import { ocrRun, ocrWaiting, startOcrRun, stopOcrRun } from '../plugins/knowledge/ocr_run.js';
 import { ollamaModels, pullOllamaModel, pullState } from './ollama.js';
@@ -212,7 +213,7 @@ function llmView(): { set: boolean; provider: LlmKind | null; model: string | nu
   const provider = process.env.LLM_PROVIDER?.trim();
   return {
     set: !!s,
-    provider: s?.kind ?? (provider === 'anthropic' || provider === 'openai' ? provider : null),
+    provider: s?.kind ?? (provider === 'anthropic' || provider === 'openai' || provider === 'chatgpt' ? provider : null),
     model: s?.model ?? null,
     baseUrl: s?.baseUrl ?? (process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') || null),
     keySet: !!process.env.LLM_API_KEY?.trim(),
@@ -337,13 +338,15 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   };
 
   // A model for the server's own work (core/llm.ts): what the page sends to list a provider's models and to save.
-  const llmBody = z.object({ provider: z.enum(['anthropic', 'openai']), baseUrl: webUrl(500).optional().or(z.literal('')), apiKey: visible(500).optional() });
+  const llmBody = z.object({ provider: z.enum(['anthropic', 'openai', 'chatgpt']), baseUrl: webUrl(500).optional().or(z.literal('')), apiKey: visible(500).optional() });
   /**
    * The connection the page describes. A key that is already saved is used for the provider and address it was
    * saved for and for no other: a key is never sent to an address it was not given for.
    */
   const llmFrom = (body: z.infer<typeof llmBody>): { kind: LlmKind; baseUrl?: string; apiKey?: string } => {
     const kind = body.provider;
+    // A ChatGPT plan is used through its sign-in (core/chatgpt.ts): no address, no key.
+    if (kind === 'chatgpt') return { kind };
     const baseUrl = kind === 'openai' ? body.baseUrl?.replace(/\/+$/, '') || undefined : undefined;
     if (kind === 'openai' && !baseUrl) throw new Error('The address of the API is needed (it usually ends in /v1).');
     const savedFor = process.env.LLM_PROVIDER?.trim() === kind && (kind === 'anthropic' || process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') === baseUrl);
@@ -735,6 +738,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         updateEnvFile(envPath, {
           LLM_PROVIDER: settings.kind,
           LLM_BASE_URL: settings.kind === 'openai' ? settings.baseUrl : undefined,
+          // The key of another provider is not kept for a ChatGPT plan, which has none.
+          ...(settings.kind === 'chatgpt' ? { LLM_API_KEY: undefined } : {}),
           LLM_MODEL: r.model,
           ...(body.apiKey ? { LLM_API_KEY: body.apiKey } : {}),
         });
@@ -962,6 +967,29 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/llm/models',
     wrap(async (req, res) => {
       res.json({ models: await listLlmModels(llmFrom(llmBody.parse(req.body))) });
+    }),
+  );
+  // ── A ChatGPT plan as the model: "Continue with ChatGPT" (core/chatgpt.ts) ──
+  api.get('/llm/chatgpt', wrap(async (_req, res) => void res.json(chatgptView())));
+  api.post(
+    '/llm/chatgpt/sign-in',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      // OpenAI sends the browser back to this server on 127.0.0.1, on the port this request came in on.
+      res.json({ url: startChatgptSignIn(req.socket.localPort ?? 0) });
+    }),
+  );
+  api.delete(
+    '/llm/chatgpt',
+    wrap(async (_req, res) => {
+      if (!mustEdit(res)) return;
+      await signOutChatgpt();
+      // Signed out of the model in use: the model setting goes too, so nothing tries to use it.
+      if (process.env.LLM_PROVIDER?.trim() === 'chatgpt') {
+        updateEnvFile(join(settingsDir(), '.env'), { LLM_PROVIDER: undefined, LLM_MODEL: undefined });
+        return change(res, { ...chatgptView() });
+      }
+      res.json({ ok: true, restarting: false, restartNeeded: false, ...chatgptView() });
     }),
   );
   api.post(
@@ -1438,6 +1466,19 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   });
   // The browser comes back from Railway or Google. It carries no console token (it arrives from another site), so
   // this accepts only the answer to a sign-in started from the console minutes ago, and saves nothing by itself.
+  router.get(CALLBACK_PATH.replace(/^\/console/, ''), (req, res) => {
+    void finishChatgptSignIn(req.query as Record<string, unknown>).then((r) => {
+      const text = r.text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+      res
+        .status(r.ok ? 200 : 400)
+        .type('html')
+        .set('Cache-Control', 'no-store')
+        .set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'")
+        .send(
+          `<!doctype html><meta charset="utf-8"><title>Knowledge MCP</title><style>body{font:15px/1.5 system-ui,sans-serif;max-width:520px;margin:18vh auto;padding:0 20px;color:#1a1a19}h1{font-size:18px;margin:0 0 8px}</style><h1>${r.ok ? 'Signed in to ChatGPT' : 'Not signed in'}</h1><p>${text}</p>`,
+        );
+    });
+  });
   router.get('/login/:service', (req, res) => {
     completeLogin(String(req.params.service), req.query as Record<string, unknown>).then(
       (page) => res.redirect(302, page),
