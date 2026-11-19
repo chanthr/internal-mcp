@@ -18,6 +18,8 @@ used under the MIT License. They are the "clean" variants of the free components
 | `spinner.tsx` | `components/spinner-clean.tsx` |
 | `segmented-control.tsx` | `components/segmented-control-clean.tsx` |
 | `tool-call-card.tsx` | `components/tool-call-card-clean.tsx` |
+| `thinking-loader.tsx` | `components/thinking-loader-clean.tsx` |
+| `message-actions.tsx` | `components/message-actions-clean.tsx` |
 
 Changes made to the copies:
 
