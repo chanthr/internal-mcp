@@ -51,9 +51,10 @@ export function Connect() {
         </div>
       </Section>
       <Section title="Claude on the web, ChatGPT, other people" text="They reach the server over the internet: give it a public address, then a key to each.">
-        <Tunnel http={data?.http ?? null} local={data?.url ?? null} onAddress={setPublic} />
-        <Connectors address={publicAddress} />
+        {/* The address, sign-in for connectors, then keys: one under the other, with the console's usual room between. */}
         <div className="stack">
+          <Tunnel http={data?.http ?? null} local={data?.url ?? null} onAddress={setPublic} />
+          <Connectors address={publicAddress} />
           <p className="muted">
             Each person needs a key: a client sends it, and a connector asks for it once when it signs in. To run the server somewhere else instead,
             the README has a Docker image and deploy notes.
