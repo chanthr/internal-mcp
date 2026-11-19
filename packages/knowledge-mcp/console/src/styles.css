@@ -209,8 +209,6 @@ p { margin: 0; }
 /* The actions bar measures itself (container query), so it gets its width here: one button */
 .chat-meta > .ui-mac { flex: none; width: 30px; }
 .chat-meta > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
-.md .md-ref { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
 .chat-end { height: 1px; scroll-margin-bottom: 150px; }
 .chat-composer { position: sticky; bottom: 0; margin-top: auto; padding: 24px 0 16px; background: linear-gradient(to bottom, transparent, var(--sheet) 22px); }
 .chat-box { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 4px; border: 1px solid var(--line); border-radius: 18px; background: var(--sheet); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.06); }
@@ -224,16 +222,34 @@ p { margin: 0; }
 .chat-send:not([data-stop]) svg { fill: none; }
 .chat-send:disabled { opacity: 0.3; cursor: default; }
 .chat-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--faint); }
-.md > * + * { margin-top: 10px; }
-.md p, .md ul, .md ol, .md pre { margin: 0; }
+/* An answer as a document. Headings by size and weight, lists and tables with room to breathe */
+.md { line-height: 1.65; }
+.md > * + * { margin-top: 12px; }
+.md p, .md ul, .md ol, .md pre, .md blockquote, .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 0; }
+.md h1, .md h2 { font-size: 17px; line-height: 1.35; font-weight: 600; letter-spacing: -0.01em; }
+.md h3 { font-size: 15px; line-height: 1.4; font-weight: 600; }
+.md h4, .md h5, .md h6 { font-size: 14px; font-weight: 600; }
+.md > :is(h1, h2, h3):not(:first-child) { margin-top: 22px; }
 .md ul, .md ol { padding-left: 22px; }
 .md li + li { margin-top: 4px; }
 .md li > ul, .md li > ol { margin-top: 4px; }
-.md .md-h { font-weight: 600; }
-.md code { font-family: var(--mono); font-size: 0.92em; padding: 1px 4px; border-radius: 4px; background: var(--hover); }
-.md pre { padding: 10px 12px; border-radius: 8px; background: var(--hover); overflow-x: auto; }
-.md pre code { padding: 0; background: none; }
-.md a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.md li > p + p { margin-top: 6px; }
+.md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
+.md li > input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -1px; }
+.md strong { font-weight: 600; }
+/* Code in a sentence. Code blocks draw their own (the code block component) */
+.md :not(pre) > code { font-family: var(--mono); font-size: 0.9em; padding: 1px 5px; border-radius: 5px; background: var(--hover); }
+.md blockquote { padding: 2px 0 2px 14px; border-left: 2px solid var(--line); color: var(--muted); }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+.md a { color: inherit; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+.md .md-ref { text-decoration: underline dotted; text-decoration-color: var(--faint); text-underline-offset: 3px; cursor: help; }
+.md .md-code { margin: 0; }
+.md-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+.md-table table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.5; }
+.md-table th { text-align: left; font-weight: 600; background: var(--hover); white-space: nowrap; }
+.md-table th, .md-table td { padding: 8px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+.md-table tr:first-child th { border-top: 0; }
+.md-table td code { white-space: nowrap; }
 .chat-wait { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .chat-meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .chat-input { position: sticky; bottom: 16px; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--sheet); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06); }
