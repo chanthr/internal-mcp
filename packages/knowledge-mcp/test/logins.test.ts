@@ -37,6 +37,7 @@ const { googleEndpoints, githubEndpoint, parseGoogleClient, driveFolderIds } = a
 const { railwayEndpoints, railwayAuth, railwayConfigured, readRailwayLogin, writeRailwayLogin } = await import('../src/plugins/railway/login.js');
 const { railwayProjects, handleRailwayLogs } = await import('../src/plugins/railway/tools.js');
 const { authStore } = await import('../src/core/context.js');
+const { installCommand } = await import('../src/admin/cli_runs.js');
 const { credentialsFromJson } = await import('../src/plugins/drive/client.js');
 const { UpstreamManager, isExposed } = await import('../src/core/upstream.js');
 const { upstreamToken, readUpstreamLogin, writeUpstreamLogin } = await import('../src/core/upstream_login.js');
@@ -385,6 +386,11 @@ test('gcloud: the console makes the Drive service account, without holding up th
       'case "$*" in',
       '  "--version") echo "Google Cloud SDK 500";;',
       '  "auth list"*) [ -f "$here/gcloud-signed-out" ] || echo "ann@example.com";;',
+      // Its own sign-in, as it goes without a terminal: it says where the browser was sent and waits for the answer.
+      '  "auth login --brief --quiet") echo "Your browser has been opened to visit:" >&2; echo "" >&2; echo "    https://accounts.example.com/o/oauth2/auth?client_id=abc&state=xyz" >&2',
+      '    n=0; while [ ! -f "$here/gcloud-login-finish" ] && [ $n -lt 150 ]; do sleep 0.1; n=$((n+1)); done',
+      '    [ -f "$here/gcloud-login-finish" ] || exit 1',
+      '    rm -f "$here/gcloud-expired" "$here/gcloud-signed-out" "$here/gcloud-login-finish";;',
       '  "config get-value project") echo "acme-lab";;',
       `  "projects list"*) expired projects.list; echo '[{"projectId":"acme-lab","name":"Acme Lab"},{"projectId":"acme-prod","name":"acme-prod"}]';;`,
       '  "services enable"*) expired services.enable; sleep 0.3;;',
@@ -403,6 +409,7 @@ test('gcloud: the console makes the Drive service account, without holding up th
     project: 'acme-lab',
     projects: [{ id: 'acme-lab', name: 'Acme Lab' }, { id: 'acme-prod', name: 'acme-prod' }],
     problem: null,
+    needsSignIn: false,
   });
   // While gcloud works, the server keeps answering.
   const making = api('POST', '/services/drive', { gcloud: { project: 'acme-lab' } });
@@ -425,7 +432,7 @@ test('gcloud: the console makes the Drive service account, without holding up th
   writeFileSync(join(bin, 'gcloud-signed-out'), '');
   const out = await api('POST', '/services/drive', { gcloud: { project: 'acme-lab' } });
   assert.deepEqual([out.status, /gcloud auth login/.test(out.json.error)], [422, true]);
-  assert.deepEqual((await api('GET', '/logins/gcloud')).json, { installed: true, account: null, project: null, projects: [], problem: null });
+  assert.deepEqual((await api('GET', '/logins/gcloud')).json, { installed: true, account: null, project: null, projects: [], problem: null, needsSignIn: true });
   rmSync(join(bin, 'gcloud-signed-out'));
 
   // Signed in, and Google wants the sign-in again (an organization account, after a while). gcloud would ask in a
@@ -434,11 +441,127 @@ test('gcloud: the console makes the Drive service account, without holding up th
   writeFileSync(join(bin, 'gcloud-expired'), '');
   const expected = /^gcloud's sign-in has expired, and gcloud cannot ask for it again from here\. Run this in a terminal, then try again: gcloud auth login$/;
   const stale = (await api('GET', '/logins/gcloud')).json;
-  assert.deepEqual([stale.account, stale.projects, expected.test(stale.problem)], ['ann@example.com', [], true], JSON.stringify(stale));
+  assert.deepEqual([stale.account, stale.projects, expected.test(stale.problem), stale.needsSignIn], ['ann@example.com', [], true, true], JSON.stringify(stale));
   const pressed = await api('POST', '/services/drive', { gcloud: { project: 'acme-lab' } });
   assert.deepEqual([pressed.status, expected.test(pressed.json.error)], [422, true], pressed.text);
   assert.ok(!/non-interactive|refreshing your current auth tokens/.test(pressed.text));
-  rmSync(join(bin, 'gcloud-expired'));
+
+  // The console runs gcloud's sign-in itself. gcloud opens the browser; the page is told where, and waits.
+  assert.deepEqual((await api('GET', '/logins/gcloud/sign-in')).json, { running: false, url: null, code: null, line: null, ok: null, error: null });
+  assert.equal((await api('POST', '/logins/gcloud/sign-in')).json.running, true);
+  const shown = await step('gcloud', 'sign-in', (r) => !!r.url);
+  assert.deepEqual([shown.running, shown.url], [true, 'https://accounts.example.com/o/oauth2/auth?client_id=abc&state=xyz']);
+  await api('POST', '/logins/gcloud/sign-in'); // pressed twice: still the one sign-in
+  assert.equal(readFileSync(join(bin, 'gcloud.calls'), 'utf8').split('\n').filter((l) => l.startsWith('auth login')).length, 1);
+  writeFileSync(join(bin, 'gcloud-login-finish'), '');
+  assert.deepEqual(await step('gcloud', 'sign-in', (r) => !r.running), { running: false, url: null, code: null, line: null, ok: true, error: null });
+  const fresh = (await api('GET', '/logins/gcloud')).json;
+  assert.deepEqual([fresh.needsSignIn, fresh.problem, fresh.projects.length], [false, null, 2]);
+  assert.equal(existsSync(join(bin, 'gcloud-expired')), false);
+});
+
+/** Ask how far a step with a tool is until it is where the test wants it. */
+const step = async (tool: string, action: string, there: (r: any) => boolean): Promise<any> => {
+  for (let i = 0; i < 300; i++) {
+    const r = (await api('GET', `/logins/${tool}/${action}`)).json;
+    if (there(r)) return r;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`${tool} ${action} did not get there`);
+};
+
+test('a tool that is missing or signed out is installed and signed in from the console: gh from nothing to connected', async () => {
+  const github = await fake((req) => (req.url === '/user' && req.headers.authorization === 'Bearer token-from-the-gh-cli-0001' ? { json: { login: 'octo' } } : { status: 401, json: {} }));
+  githubEndpoint.api = github;
+  script(
+    'gh',
+    [
+      '[ -f "$here/gh-missing" ] && exit 127',
+      'if [ "$1" = "--version" ]; then echo "gh version 2"; exit 0; fi',
+      'if [ "$1 $2" = "auth token" ] && [ ! -f "$here/gh-signed-out" ]; then echo "token-from-the-gh-cli-0001"; exit 0; fi',
+      // Its own sign-in, as it goes without a terminal: a code, the address to type it at, and a wait for GitHub.
+      'if [ "$*" = "auth login --hostname github.com --web" ]; then',
+      '  echo "$*" >> "$here/gh.calls"',
+      '  echo "! First copy your one-time code: ABCD-1234" >&2',
+      '  echo "Open this URL to continue in your web browser: https://github.com/login/device" >&2',
+      '  n=0; while [ ! -f "$here/gh-login-finish" ] && [ $n -lt 150 ]; do sleep 0.1; n=$((n+1)); done',
+      '  [ -f "$here/gh-login-finish" ] || exit 1',
+      '  rm -f "$here/gh-signed-out" "$here/gh-login-finish"; exit 0',
+      'fi',
+      'exit 1',
+    ].join('\n'),
+  );
+  script(
+    'brew',
+    [
+      'echo "$*" >> "$here/brew.calls"',
+      'case "$*" in',
+      '  "--version") echo "Homebrew 4";;',
+      '  "install gh") echo "==> Fetching gh"; sleep 0.3; [ -f "$here/brew-fails" ] && { echo "Error: No available formula with the name gh" >&2; exit 1; }; rm -f "$here/gh-missing"; echo "==> Pouring gh";;',
+      '  *) exit 1;;',
+      'esac',
+    ].join('\n'),
+  );
+  writeFileSync(join(bin, 'gh-missing'), '');
+  writeFileSync(join(bin, 'gh-signed-out'), '');
+  assert.deepEqual((await api('GET', '/logins/gh')).json, { installed: false, login: null });
+
+  // Install: the page is told what would run before anybody agrees to it.
+  const plan = (await api('GET', '/logins/gh/install')).json;
+  assert.deepEqual([plan.running, plan.command, plan.page], [false, 'brew install gh', 'https://cli.github.com/']);
+  // It fails: what the package manager said is shown, and nothing is half-done.
+  writeFileSync(join(bin, 'brew-fails'), '');
+  assert.equal((await api('POST', '/logins/gh/install')).status, 200);
+  const failed = await step('gh', 'install', (r) => !r.running);
+  assert.deepEqual([failed.ok, failed.error], [false, 'Error: No available formula with the name gh']);
+  rmSync(join(bin, 'brew-fails'));
+  // It works: while it runs the page sees how far it is.
+  assert.equal((await api('POST', '/logins/gh/install')).json.running, true);
+  assert.match((await step('gh', 'install', (r) => !!r.line || !r.running)).line ?? '==> Fetching gh', /^==> /);
+  assert.equal((await step('gh', 'install', (r) => !r.running)).ok, true);
+  assert.deepEqual((await api('GET', '/logins/gh')).json, { installed: true, login: null });
+
+  // Sign in: gh gives a code, the page shows it with the address to type it at.
+  assert.equal((await api('POST', '/logins/gh/sign-in')).json.running, true);
+  const code = await step('gh', 'sign-in', (r) => !!r.code);
+  assert.deepEqual([code.code, code.url], ['ABCD-1234', 'https://github.com/login/device']);
+  await api('POST', '/logins/gh/sign-in');
+  assert.equal(readFileSync(join(bin, 'gh.calls'), 'utf8').trim().split('\n').length, 1);
+  // Given up: gh is stopped and nothing is remembered.
+  assert.equal((await api('DELETE', '/logins/gh/sign-in')).status, 200);
+  assert.deepEqual((await api('GET', '/logins/gh/sign-in')).json, { running: false, url: null, code: null, line: null, ok: null, error: null });
+  // Again, and this time the code is typed at GitHub.
+  await api('POST', '/logins/gh/sign-in');
+  await step('gh', 'sign-in', (r) => !!r.code);
+  writeFileSync(join(bin, 'gh-login-finish'), '');
+  assert.equal((await step('gh', 'sign-in', (r) => !r.running)).ok, true);
+  assert.deepEqual((await api('GET', '/logins/gh')).json, { installed: true, login: 'octo' });
+  assert.equal((await api('POST', '/services/github', { fromGh: true })).status, 200);
+
+  // Only these two tools and these two steps, and only with the console token.
+  assert.equal((await api('POST', '/logins/bash/install')).status, 400);
+  assert.equal((await api('POST', '/logins/gh/remove')).status, 400);
+  assert.equal((await fetch(`${base}/console/api/logins/gh/install`, { method: 'POST' })).status, 401);
+
+  // A machine without a package manager this knows: nothing is run, and the page is sent to the tool's own instructions.
+  const empty = mkdtempSync(join(tmpdir(), 'kmcp-nobrew-'));
+  process.env.PATH = empty;
+  try {
+    assert.equal((await api('GET', '/logins/gcloud/install')).json.command, null);
+    const none = await api('POST', '/logins/gcloud/install');
+    assert.deepEqual([none.status, /no package manager the console can use.*https:\/\/cloud\.google\.com\/sdk\/docs\/install/.test(none.json.error)], [422, true], none.text);
+  } finally {
+    process.env.PATH = `${bin}:${realPath}`;
+  }
+
+  // What would be run where. Windows has winget; the gcloud cask is for macOS.
+  const has = (...tools: string[]) => async (cmd: string) => ({ status: tools.includes(cmd) ? 0 : 127, stdout: '', stderr: '' });
+  assert.deepEqual(await installCommand('gcloud', has('brew'), 'darwin'), ['brew', 'install', '--cask', 'gcloud-cli']);
+  assert.deepEqual(await installCommand('gcloud', has('brew'), 'linux'), null);
+  assert.deepEqual(await installCommand('gh', has('brew'), 'linux'), ['brew', 'install', 'gh']);
+  assert.deepEqual((await installCommand('gcloud', has('winget'), 'win32'))?.slice(0, 4), ['winget', 'install', '--id', 'Google.CloudSDK']);
+  assert.deepEqual((await installCommand('gh', has('winget'), 'win32'))?.slice(0, 4), ['winget', 'install', '--id', 'GitHub.cli']);
+  assert.deepEqual(await installCommand('gh', has(), 'win32'), null);
 });
 
 /**

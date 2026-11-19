@@ -37,6 +37,7 @@ import { folderLeftOut, folderReading, LOCAL_PREFIX, localFolders, scanFoldersSo
 import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
+import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
@@ -575,6 +576,35 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     }),
   );
   api.get('/logins/gcloud', wrap(async (_req, res) => void res.json(await gcloudState())));
+  // A command-line tool looked after for the person at their click, instead of "go to a terminal and type …":
+  // installing it, and its own sign-in (cli_runs.ts). The tool is one of two, the step one of two, and each
+  // command is fixed: nothing of the request reaches a command line.
+  const cliStep = (req: Request): [CliTool, CliAction] => [
+    z.enum(CLI_TOOLS as [CliTool, ...CliTool[]]).parse(req.params.tool),
+    z.enum(CLI_ACTIONS as [CliAction, ...CliAction[]]).parse(req.params.action),
+  ];
+  api.get(
+    '/logins/:tool/:action',
+    wrap(async (req, res) => {
+      const [tool, action] = cliStep(req);
+      // An install says what it would run, so the person reads it before agreeing.
+      res.json({ ...cliRun(tool, action), ...(action === 'install' ? await installPlan(tool) : {}) });
+    }),
+  );
+  api.post(
+    '/logins/:tool/:action',
+    wrap(async (req, res) => {
+      const [tool, action] = cliStep(req);
+      res.json(await startCliRun(tool, action));
+    }),
+  );
+  api.delete(
+    '/logins/:tool/:action',
+    wrap(async (req, res) => {
+      cancelCliRun(...cliStep(req));
+      res.json({ ok: true });
+    }),
+  );
   api.get(
     '/logins/google',
     wrap(async (req, res) => {

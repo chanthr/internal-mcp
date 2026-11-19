@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { call, signIn, type Changed, type State, type UpstreamView } from '../api';
 import { AskFirst, Choice, Page, Row, Section, useAction, useServer } from '../app';
+import { CliStep } from '../cli-step';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
@@ -244,6 +245,20 @@ function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onCl
   const quick = useAction(); // the way that needs no token
   // GitHub: is the gh CLI signed in on this machine, and as whom?
   const [gh, setGh] = useState<{ installed: boolean; login: string | null } | null>(null);
+  const [ghAsked, setGhAsked] = useState(0); // asked again after a step with gh from here ended
+  // The person pressed the button that installs or signs in gh: what comes after it goes by itself, up to "connected".
+  const [ghGoing, setGhGoing] = useState(false);
+  const [ghInstalled, setGhInstalled] = useState(false); // an install from here ended well
+  const useGh = () =>
+    quick.run(async () => {
+      await apply(() => call<Changed>('POST', '/services/github', { fromGh: true }));
+      onClose();
+    });
+  const ghLogin = gh?.login ?? null;
+  useEffect(() => {
+    if (app.id === 'github' && ghGoing && ghLogin && !quick.busy && !quick.error) void useGh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ghGoing, ghLogin]);
   useEffect(() => {
     if (app.id !== 'github') return;
     let live = true;
@@ -251,7 +266,7 @@ function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onCl
     return () => {
       live = false;
     };
-  }, [app.id]);
+  }, [app.id, ghAsked]);
 
   return (
     <Dialog
@@ -297,18 +312,44 @@ function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onCl
               help="The gh CLI on this machine is signed in. Its token can do what gh can; for a server other people use, a read-only token is safer."
               error={quick.error}
             >
-              <Button
-                variant="secondary"
-                loading={quick.busy}
-                onClick={() =>
-                  void quick.run(async () => {
-                    await apply(() => call<Changed>('POST', '/services/github', { fromGh: true }));
-                    onClose();
-                  })
-                }
-              >
+              <Button variant="secondary" loading={quick.busy} onClick={() => void useGh()}>
                 Use it
               </Button>
+            </Choice>
+            <div className="or">or paste a token</div>
+          </>
+        )}
+        {app.id === 'github' && gh && !gh.login && (
+          // gh is missing or signed out. The server installs it and runs its sign-in, and its login is then used:
+          // one button, and a code typed at GitHub.
+          <>
+            <Choice
+              stacked
+              title="Connect with the gh CLI"
+              help={
+                !gh.installed
+                  ? 'The gh CLI is not on this machine. This installs it, signs it in with a code you type at GitHub, and uses its login.'
+                  : 'The gh CLI is on this machine and not signed in. This signs it in with a code you type at GitHub, and uses its login.'
+              }
+            >
+              {!gh.installed ? (
+                ghInstalled ? (
+                  <p className="field-help">gh is installed, but this server does not find it yet. Start the server again, then come back here.</p>
+                ) : (
+                  <CliStep
+                    tool="gh"
+                    action="install"
+                    label="Install gh and connect"
+                    onStart={() => setGhGoing(true)}
+                    onDone={() => {
+                      setGhInstalled(true);
+                      setGhAsked((n) => n + 1);
+                    }}
+                  />
+                )
+              ) : (
+                <CliStep tool="gh" action="sign-in" label="Sign in and connect" autoStart={ghGoing} onStart={() => setGhGoing(true)} onDone={() => setGhAsked((n) => n + 1)} />
+              )}
             </Choice>
             <div className="or">or paste a token</div>
           </>

@@ -37,7 +37,7 @@ import {
   type RailwayTokens,
 } from '../plugins/railway/login.js';
 import { railwayProjects } from '../plugins/railway/tools.js';
-import { backgroundExec, gcloudAccount, gcloudDefaultProject, gcloudProjects, ghToken, hasTool, type Exec, type GcloudProject } from '../setup/auto.js';
+import { backgroundExec, gcloudAccount, gcloudDefaultProject, gcloudProjects, ghToken, hasTool, type Exec, type GcloudProject, GCLOUD_SIGN_IN } from '../setup/auto.js';
 import { readConfigFile } from '../setup/commands.js';
 import { readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { completeMcpSignIn, prepareMcpSignIn, saveMcpSignIn, unregister, type McpCarry, type McpResult, type McpTarget } from './upstreams.js';
@@ -447,17 +447,19 @@ export interface GcloudState {
   project: string | null;
   projects: GcloudProject[];
   problem: string | null;
+  /** The problem is that gcloud wants the sign-in again. The page offers to run it (cli_signin.ts). */
+  needsSignIn: boolean;
 }
 
 /** The gcloud CLI: who is signed in and which projects they can use. */
 export async function gcloudState(exec: Exec = backgroundExec): Promise<GcloudState> {
-  if (!(await hasTool(exec, 'gcloud'))) return { installed: false, account: null, project: null, projects: [], problem: null };
+  if (!(await hasTool(exec, 'gcloud'))) return { installed: false, account: null, project: null, projects: [], problem: null, needsSignIn: false };
   const account = await gcloudAccount(exec);
-  if (!account) return { installed: true, account: null, project: null, projects: [], problem: null };
+  if (!account) return { installed: true, account: null, project: null, projects: [], problem: null, needsSignIn: true };
   const project = await gcloudDefaultProject(exec);
   try {
-    return { installed: true, account, project, projects: await gcloudProjects(exec), problem: null };
+    return { installed: true, account, project, projects: await gcloudProjects(exec), problem: null, needsSignIn: false };
   } catch (e) {
-    return { installed: true, account, project, projects: [], problem: msg(e) };
+    return { installed: true, account, project, projects: [], problem: msg(e), needsSignIn: msg(e) === GCLOUD_SIGN_IN };
   }
 }
