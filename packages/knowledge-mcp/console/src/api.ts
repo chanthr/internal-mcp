@@ -20,7 +20,8 @@ export async function takeTokenFromAddress(): Promise<boolean> {
   if (m[1] === token()) return false;
   let accepted = false;
   try {
-    accepted = (await fetch('./api/state', { headers: { Authorization: `Bearer ${m[1]}` } })).ok;
+    const res = await fetch('./api/state', { headers: { Authorization: `Bearer ${m[1]}` } });
+    accepted = res.ok && ours(res);
   } catch {
     /* the server is not answering: keep what we have */
   }
@@ -30,6 +31,16 @@ export async function takeTokenFromAddress(): Promise<boolean> {
 
 /** Fired on the window when the server refuses the token, so the page asks for one instead of showing errors. */
 export const REFUSED = 'knowledge-mcp-console-refused';
+
+/**
+ * Did this server's console answer? Every answer of it carries this header. One without it came from something
+ * else on the address: another program that listens on the same port and answers while the server restarts, or a
+ * proxy. Such an answer is treated as no answer. Above all its "not allowed" is not taken for "the token is not
+ * accepted": that sent people to the page that asks for the token, with a token that was fine.
+ */
+const ours = (res: Response): boolean => res.headers.has('x-knowledge-mcp-console');
+/** Thrown for an answer that is not this server's. `status` 0, like no answer at all. */
+const notOurs = () => new ApiError('Something else answered on this address. The server may be starting again.', 0);
 
 let memoryToken: string | null = null;
 export function token(): string | null {
@@ -65,6 +76,7 @@ export async function call<T = unknown>(method: string, path: string, body?: unk
     headers: { Authorization: `Bearer ${token() ?? ''}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  if (!ours(res)) throw notOurs();
   const text = await res.text();
   let json: unknown = null;
   try {
@@ -84,6 +96,7 @@ export async function uploadFile(path: string, file: Blob): Promise<void> {
     headers: { Authorization: `Bearer ${token() ?? ''}`, 'Content-Type': 'application/octet-stream' },
     body: file,
   });
+  if (!ours(res)) throw notOurs();
   if (res.ok) return;
   if (res.status === 401) window.dispatchEvent(new Event(REFUSED));
   const text = await res.text();

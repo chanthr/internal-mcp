@@ -108,6 +108,19 @@ test('the API needs the console token, and the token file is private', async () 
   // A page of another site cannot read the API or send the token header: no CORS permission is given.
   const preflight = await fetch(`${base}/console/api/state`, { method: 'OPTIONS', headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'authorization' } });
   assert.equal(preflight.headers.get('access-control-allow-origin'), null);
+  // Every answer of the console says it is the console's, the refusals too. The page takes "not allowed" for "the
+  // token is not accepted" only then: another program on the same address has no say about the token.
+  for (const res of [
+    await fetch(`${base}/console/api/state`), // 401
+    await fetch(`${base}/console/api/state`, { headers: { Authorization: 'Bearer wrong' } }), // 401
+    await fetch(`${base}/console/api/state`, { headers: { 'Sec-Fetch-Site': 'cross-site' } }), // 403
+    await fetch(`${base}/console/api/state`, { headers: { Authorization: `Bearer ${token}` } }), // 200
+    await fetch(`${base}/console/api/no-such-thing`, { headers: { Authorization: `Bearer ${token}` } }), // 404
+    await fetch(`${base}/console/`),
+  ]) {
+    assert.equal(res.headers.get('x-knowledge-mcp-console'), '1', `${res.url} ${res.status}`);
+  }
+  assert.equal((await fetch(`${base}/health`)).headers.get('x-knowledge-mcp-console'), null); // only the console's
 });
 
 test('the page: served from this server only, with nothing loaded from elsewhere and no way to frame it', async () => {

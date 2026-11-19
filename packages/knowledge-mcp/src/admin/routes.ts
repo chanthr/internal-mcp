@@ -237,6 +237,9 @@ function foreignEnvProblem(dir: string, values: string[]): string | null {
   return null;
 }
 
+/** On every answer of the console (see mountConsole). The page looks for it. */
+export const CONSOLE_HEADER = 'X-Knowledge-MCP-Console';
+
 export function mountConsole(app: Express, registry: Registry): boolean {
   if (!consoleEnabled()) return false;
   const ui = uiDir();
@@ -974,6 +977,13 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   api.use((_req, res) => refuse(res, 404, 'There is no such console endpoint.'));
 
   const router = express.Router();
+  // Every answer from here says whose it is, the refusals too. The page reads "not allowed" as "my token is not
+  // accepted" only when this server said it: another program that answers on the same address for a moment (while
+  // this server restarts) has no say about the token.
+  router.use((_req, res, next) => {
+    res.setHeader(CONSOLE_HEADER, '1');
+    next();
+  });
   router.use(localOnly);
   router.use((_req, res, next) => {
     // The page loads nothing from anywhere else, cannot be framed, and tells no other site where it was.

@@ -111,7 +111,7 @@ export function App() {
       void takeTokenFromAddress().then((taken) => taken && refresh());
       setPage(pageFromHash());
     };
-    // The server no longer accepts the token (another server on this port, or its data folder is new): ask for one.
+    // This server no longer accepts the token (its data folder is new, or the token file was made again): ask for one.
     const onRefused = () => setGate('token');
     window.addEventListener('hashchange', onHash);
     window.addEventListener(REFUSED, onRefused);
@@ -133,6 +133,7 @@ export function App() {
           for (let i = 0; i < 80 && !back; i++) {
             try {
               setState(await call<State>('GET', '/state'));
+              setGate(null);
               back = true;
             } catch {
               await wait(350);
