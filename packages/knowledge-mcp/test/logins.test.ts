@@ -35,6 +35,7 @@ const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
 const { googleEndpoints, githubEndpoint, parseGoogleClient, driveFolderIds } = await import('../src/admin/logins.js');
 const { railwayEndpoints, railwayAuth, railwayConfigured, readRailwayLogin, writeRailwayLogin } = await import('../src/plugins/railway/login.js');
+const { railwayProjects } = await import('../src/plugins/railway/tools.js');
 const { credentialsFromJson } = await import('../src/plugins/drive/client.js');
 const { UpstreamManager, isExposed } = await import('../src/core/upstream.js');
 const { upstreamToken, readUpstreamLogin, writeUpstreamLogin } = await import('../src/core/upstream_login.js');
@@ -98,7 +99,7 @@ const realPath = process.env.PATH ?? '';
 process.env.PATH = `${bin}:${realPath}`;
 
 test('Railway: the server registers itself, the person signs in, and nothing is saved until the console says so', async () => {
-  const rw = { registered: [] as any[], deleted: [] as string[], refreshes: 0, current: 'rt-1', challenge: '', ended: false };
+  const rw = { registered: [] as any[], deleted: [] as string[], refreshes: 0, current: 'rt-1', challenge: '', ended: false, shared: true, refused: false };
   const railway = await fake((req, body) => {
     const url = req.url ?? '';
     if (req.method === 'POST' && url === '/oauth/register') {
@@ -124,9 +125,13 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
       rw.current = `rt-${rw.refreshes + 1}`;
       return { json: { access_token: `at-${rw.refreshes + 1}`, refresh_token: rw.current, expires_in: 3600 } };
     }
+    const signedIn = /^Bearer at-\d$/.test(req.headers.authorization ?? '');
+    if (url === '/oauth/me') return signedIn ? { json: { sub: 'user-1', email: 'ann@example.com', name: 'Ann' } } : { status: 401, json: {} };
     if (url === '/graphql/v2') {
-      if (!/^Bearer at-\d$/.test(req.headers.authorization ?? '')) return { json: { errors: [{ message: 'Not Authorized' }] } };
-      return { json: body.includes('projects') ? { data: { projects: { edges: [{ node: { id: 'p1' } }, { node: { id: 'p2' } }] } } } : { data: { me: { name: 'Ann', email: 'ann@example.com' } } } };
+      // Like Railway: a signed-in app may not ask for "all projects". It asks for its workspaces and what is in them.
+      if (!signedIn || rw.refused || !body.includes('workspaces')) return { json: { errors: [{ message: 'Not Authorized' }] } };
+      const node = (id: string, name: string) => ({ node: { id, name, services: { edges: [{ node: { id: `${id}-s`, name: 'server' } }] }, environments: { edges: [{ node: { id: `${id}-e`, name: 'production' } }] } } });
+      return { json: { data: { me: { workspaces: rw.shared ? [{ id: 'w1', name: 'Acme', projects: { edges: [node('p1', 'api'), node('p2', 'web')] } }] : [] } } } };
     }
     return { status: 404, json: {} };
   });
@@ -144,8 +149,9 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
     [q.get('client_id'), q.get('redirect_uri'), q.get('response_type'), q.get('code_challenge_method'), q.get('prompt')],
     ['rlwy_test_1', `${base}/console/login/railway`, 'code', 'S256', 'consent'],
   );
-  assert.deepEqual(q.get('scope')!.split(' ').sort(), ['email', 'offline_access', 'openid', 'workspace:viewer']); // it only reads
-  assert.deepEqual([rw.registered[0].redirect_uris, rw.registered[0].token_endpoint_auth_method], [[`${base}/console/login/railway`], 'none']);
+  // It only reads. The name is asked for with the email: Railway answers a signed-in app nothing without both.
+  assert.deepEqual(q.get('scope')!.split(' ').sort(), ['email', 'offline_access', 'openid', 'profile', 'workspace:viewer']);
+  assert.deepEqual([rw.registered[0].redirect_uris, rw.registered[0].token_endpoint_auth_method, rw.registered[0].scope], [[`${base}/console/login/railway`], 'none', q.get('scope')]);
   rw.challenge = q.get('code_challenge')!;
   const state = q.get('state')!;
   assert.ok(state.length >= 24);
@@ -164,7 +170,7 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   assert.equal((await fetch(`${base}/console/api/logins/finish`, { method: 'POST' })).status, 401);
   const done = await api('POST', '/logins/finish');
   assert.equal(done.status, 200, done.text);
-  assert.equal(done.json.found, 'ann@example.com, 2 projects visible');
+  assert.equal(done.json.found, 'ann@example.com, 1 workspace, 2 projects visible');
   assert.match(done.json.note, /^Railway is connected: ann@example\.com/);
   assert.ok(!done.text.includes('rt-1') && !done.text.includes('at-1'), 'no token goes to the page');
   assert.equal(mode(file), 0o600);
@@ -177,13 +183,16 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   // The tools: the saved token while it lasts. When the hour is up it is renewed once, however many ask at the
   // same moment, and the refresh token that came with it is the one kept.
   assert.equal(railwayConfigured(), true);
-  assert.deepEqual(await railwayAuth(), { token: 'at-1', api: `${railway}/graphql/v2` });
+  assert.deepEqual(await railwayAuth(), { token: 'at-1', api: `${railway}/graphql/v2`, via: 'login' });
+  // What the tools list: the projects of each workspace that was shared.
+  const listed = await railwayProjects();
+  assert.deepEqual([listed.workspaces, listed.projects.map((p) => `${p.workspace}/${p.name}`), listed.projects[0].services], [['Acme'], ['Acme/api', 'Acme/web'], [{ id: 'p1-s', name: 'server' }]]);
   writeRailwayLogin({ ...readRailwayLogin(), expiresAt: Date.now() - 1000 });
   const both = await Promise.all([railwayAuth(), railwayAuth(), railwayAuth()]);
   assert.deepEqual([both.map((b) => b.token), rw.refreshes, readRailwayLogin().refreshToken], [['at-2', 'at-2', 'at-2'], 1, 'rt-2']);
   // A token in the environment is used as it always was, and the sign-in is left alone.
   process.env.RAILWAY_TOKEN = 'a-pasted-token-000';
-  assert.deepEqual(await railwayAuth(), { token: 'a-pasted-token-000', api: 'https://backboard.railway.app/graphql/v2' });
+  assert.deepEqual(await railwayAuth(), { token: 'a-pasted-token-000', api: 'https://backboard.railway.app/graphql/v2', via: 'token' });
   assert.equal((await api('GET', '/state')).json.services.railway.via, 'token');
   delete process.env.RAILWAY_TOKEN;
 
@@ -195,6 +204,38 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   assert.deepEqual([cancelled.status, /cancelled\. Nothing was changed/.test(cancelled.json.error)], [422, true]);
   assert.deepEqual([readRailwayLogin().refreshToken, rw.deleted], ['rt-2', []]);
 
+  // Signed in, with no workspace ticked on Railway's screen (or Railway will not show one): there is nothing to
+  // read, so nothing is saved, and the page says what to do instead of "connected".
+  for (const [how, why] of [
+    [{ shared: false }, /shares no workspace with this server\. Sign in again and pick a workspace on Railway's screen\./],
+    [{ refused: true }, /does not let this server see a workspace \(Railway said: Not Authorized\)\. Sign in again and pick/],
+  ] as const) {
+    Object.assign(rw, how);
+    const empty = new URL((await api('POST', '/logins/railway', {})).json.url).searchParams;
+    rw.challenge = empty.get('code_challenge')!;
+    assert.deepEqual(await comeBack('railway', { code: 'good-code', state: empty.get('state')! }), { status: 302, to: '/console/#/apps' });
+    const nothing = await api('POST', '/logins/finish');
+    assert.deepEqual([nothing.status, why.test(nothing.json.error)], [422, true], nothing.text);
+    assert.deepEqual([readRailwayLogin().refreshToken, rw.deleted, rw.registered.length], ['rt-2', [], 1]);
+    Object.assign(rw, { shared: true, refused: false });
+  }
+  // A tool that is asked later, after the workspace was taken away, says where to go.
+  rw.shared = false;
+  await assert.rejects(() => railwayProjects(), /shares no workspace with this server\. Open the console \(Apps → Railway\)/);
+  rw.shared = true;
+
+  // A registration made by a version that asked for less is not used again. The server registers anew, and the
+  // old registration is deleted once the new sign-in is saved.
+  const older = readRailwayLogin();
+  writeRailwayLogin({ ...older, client: { ...older.client!, scope: 'openid email offline_access workspace:viewer' } });
+  const renewed = new URL((await api('POST', '/logins/railway', {})).json.url).searchParams;
+  assert.deepEqual([renewed.get('client_id'), rw.registered.length], ['rlwy_test_2', 2]);
+  rw.challenge = renewed.get('code_challenge')!;
+  await comeBack('railway', { code: 'good-code', state: renewed.get('state')! });
+  assert.equal((await api('POST', '/logins/finish')).status, 200);
+  await new Promise((r) => setTimeout(r, 100)); // the old registration is deleted without being waited for
+  assert.deepEqual([readRailwayLogin().client?.id, readRailwayLogin().client?.scope, rw.deleted], ['rlwy_test_2', renewed.get('scope'), ['rlwy_test_1 Bearer reg-1']]);
+
   // Railway withdrew the sign-in: the tools say what to do, instead of an error code.
   rw.ended = true;
   writeRailwayLogin({ ...readRailwayLogin(), expiresAt: Date.now() - 1000 });
@@ -203,7 +244,7 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   // Disconnect: the file goes, and so does the registration at Railway.
   const off = await api('DELETE', '/services/railway');
   assert.equal(off.status, 200, off.text);
-  assert.deepEqual([existsSync(file), rw.deleted, railwayConfigured()], [false, ['rlwy_test_1 Bearer reg-1'], false]);
+  assert.deepEqual([existsSync(file), rw.deleted, railwayConfigured()], [false, ['rlwy_test_1 Bearer reg-1', 'rlwy_test_2 Bearer reg-2'], false]);
   assert.deepEqual((await api('GET', '/state')).json.services.railway, { set: false, via: null, who: null });
 });
 

@@ -140,6 +140,22 @@ export interface ToolView {
   declared: boolean;
   inputSchema: { properties?: Record<string, { type?: string; description?: string; enum?: string[]; default?: unknown }>; required?: string[] };
 }
+/** Some files of a folder, by name: how many there are, and the first few. */
+export interface SomeFiles {
+  count: number;
+  names: string[];
+}
+export interface FolderView {
+  path: string;
+  name: string | null;
+  /** Documents in the index. null: the folder is not there any more. */
+  documents: number | null;
+  /** Set while the server reads the folder: files looked at, of the files in it. The count above is moving. */
+  reading: { done: number; total: number } | null;
+  /** Files with nothing to read in them (scanned pages, empty files), and files that would not open. */
+  noText: SomeFiles;
+  failed: SomeFiles;
+}
 export interface State {
   version: string;
   dir: string;
@@ -158,7 +174,7 @@ export interface State {
     job: { running: boolean; done: number; total: number; error: string | null } | null;
   } | null;
   plugins: PluginStatus[];
-  folders: Array<{ path: string; name: string | null; documents: number | null }>;
+  folders: FolderView[];
   services: {
     /** `via`: a service account key, or a Google sign-in (then `account` is who, and `reads` the folders). */
     drive: { set: boolean; trusted: string[]; via: 'key' | 'login' | null; account: string | null; reads: string[] };

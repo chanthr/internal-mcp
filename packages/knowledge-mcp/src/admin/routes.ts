@@ -33,7 +33,7 @@ import { checkConnection, sqlAdapterFor } from '../connections/index.js';
 import { ConnectionsSchema, DataToolSchema, DataToolsSchema, dataConfigProblems, envRefs, stringsIn, type ConnectionConfig } from '../connections/schema.js';
 import { embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } from '../plugins/drive/embeddings.js';
 import { reembed } from '../plugins/knowledge/reembed.js';
-import { LOCAL_PREFIX, localFolders, scanFolders } from '../plugins/knowledge/folders.js';
+import { folderLeftOut, folderReading, LOCAL_PREFIX, localFolders, scanFoldersSoon } from '../plugins/knowledge/folders.js';
 import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
@@ -325,7 +325,11 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           configuredFolders(dir).map(async (f) => {
             const known = localFolders().find((k) => k.path === f.path);
             const documents = !existsSync(f.path) ? null : local && known ? await local.countDocuments(DRIVE_COLLECTION, `${LOCAL_PREFIX}${known.name}/`) : countDocuments(f.path);
-            return { path: f.path, name: f.name ?? null, documents };
+            // While the folder is being read the count is of what was read so far: the page says so, and which
+            // files it could not read when it is done. A few names are enough to find the rest.
+            const left = known ? folderLeftOut(known.name) : { noText: [], failed: [] };
+            const some = (names: string[]) => ({ count: names.length, names: names.slice(0, 3) });
+            return { path: f.path, name: f.name ?? null, documents, reading: known ? folderReading(known.name) : null, noText: some(left.noText), failed: some(left.failed) };
           }),
         ),
         services: {
@@ -418,17 +422,17 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (!configuredFolders(dir).some((f) => f.path === full)) {
         const r = await setup(['folder', full, '--name', UPLOADS], dir);
         if (!r.ok) return refuse(res, 422, firstLine(r.lines));
-        return change(res, { note: 'The files are in. They are searchable as soon as the server is back.' });
+        return change(res, { note: 'The files are in. The server is reading them now.' });
       }
-      // The running server knows the folder: read the new files now rather than at the next timed scan.
+      // The running server knows the folder: read the new files now rather than at the next timed scan. The answer
+      // does not wait for it: a folder of PDFs takes a while, and the page shows how far the reading is.
       if (localFolders().some((f) => f.path === full)) {
-        const scan = await scanFolders();
-        return void res.json({ ok: true, restarting: false, restartNeeded: false, note: scan ? `The files are in: ${scan.indexed} read, ${scan.skipped} without text.` : 'The files are in. A scan is already running and will pick them up.' });
+        void scanFoldersSoon().catch(() => undefined); // the timed pass reads them if this one fails
+        return void res.json({ ok: true, restarting: false, restartNeeded: false, note: 'The files are in. The server is reading them now.' });
       }
       change(res);
     }),
   );
-
   // ── How the documents link to each other (plugins/knowledge/graph.ts) ──
   api.get(
     '/graph',

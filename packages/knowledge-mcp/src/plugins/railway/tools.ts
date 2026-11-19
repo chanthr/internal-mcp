@@ -7,7 +7,8 @@
  * What it calls with (login.ts): RAILWAY_TOKEN when set, else the sign-in made from the console.
  *   RAILWAY_TOKEN: listing every project needs a team/account token. A project token is blocked from
  *   me/projects, so it can only read one project (project(id)).
- *   A sign-in sees the workspaces the person picked on Railway's consent screen, as a viewer.
+ *   A sign-in sees the workspaces the person picked on Railway's consent screen, as a viewer. It is not allowed
+ *   to ask for "all projects": it asks for its workspaces, and the projects in each.
  *
  * 3 tools: railway_services (list) -> railway_deployments (deploy status) -> railway_logs (logs)
  */
@@ -15,12 +16,12 @@ import { z } from 'zod';
 import { defineTool } from '../../plugin/define.js';
 import { getAuth } from '../../core/context.js';
 import { maskString } from '../../core/log_mask.js';
-import { railwayAuth } from './login.js';
+import { railwayAuth, type RailwayAuth } from './login.js';
 
 const RAILWAY_TIMEOUT_MS = 20_000;
 
-async function gql<T = any>(query: string, variables?: Record<string, unknown>): Promise<T> {
-  const { token, api } = await railwayAuth();
+async function gql<T = any>(query: string, variables?: Record<string, unknown>, auth?: RailwayAuth): Promise<T> {
+  const { token, api } = auth ?? (await railwayAuth());
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), RAILWAY_TIMEOUT_MS);
   let r: Response;
@@ -59,26 +60,62 @@ export const railwayServicesTool = defineTool({
   run: () => handleRailwayServices(),
 });
 
-export async function handleRailwayServices() {
-  getAuth();
-  try {
-    const d = await gql(`{
-      projects(first: 50) {
-        edges { node {
+export interface RailwayProject {
+  id: string;
+  name: string;
+  /** The workspace it was found in (a sign-in). */
+  workspace?: string;
+  services: Array<{ id: string; name: string }>;
+  environments: Array<{ id: string; name: string }>;
+}
+
+const PROJECTS = `edges { node {
           id name
           services { edges { node { id name } } }
           environments { edges { node { id name } } }
-        } }
-      }
-    }`);
-    const projects = (d.projects?.edges ?? []).map((e: any) => ({
-      id: e.node.id,
-      name: e.node.name,
-      services: (e.node.services?.edges ?? []).map((s: any) => ({ id: s.node.id, name: s.node.name })),
-      environments: (e.node.environments?.edges ?? []).map((v: any) => ({ id: v.node.id, name: v.node.name })),
-    }));
+        } }`;
+const asProject = (node: any, workspace?: string): RailwayProject => ({
+  id: node.id,
+  name: node.name,
+  ...(workspace ? { workspace } : {}),
+  services: (node.services?.edges ?? []).map((s: any) => ({ id: s.node.id, name: s.node.name })),
+  environments: (node.environments?.edges ?? []).map((v: any) => ({ id: v.node.id, name: v.node.name })),
+});
+
+/** What to do when a sign-in is good and still sees nothing. `where` is who reads it: the console page, or a tool's answer. */
+const pickAgain = (where: 'page' | 'tool') => (where === 'page' ? "Sign in again and pick a workspace on Railway's screen." : "Open the console (Apps → Railway), sign in again and pick a workspace on Railway's screen.");
+
+/**
+ * Every project the token can see, and for a sign-in the workspaces they are in.
+ * `auth` is given for a token that is not saved yet (the console, straight after a sign-in).
+ */
+export async function railwayProjects(auth?: RailwayAuth, where: 'page' | 'tool' = 'tool'): Promise<{ projects: RailwayProject[]; workspaces: string[] | null }> {
+  const a = auth ?? (await railwayAuth());
+  if (a.via === 'token') {
+    const d = await gql(`{ projects(first: 50) { ${PROJECTS} } }`, undefined, a);
+    return { projects: (d.projects?.edges ?? []).map((e: any) => asProject(e.node)), workspaces: null };
+  }
+  let found: any[];
+  try {
+    found = (await gql(`{ me { workspaces { id name projects(first: 50) { ${PROJECTS} } } } }`, undefined, a)).me?.workspaces ?? [];
+  } catch (e) {
+    const said = e instanceof Error ? e.message.replace(/^Railway GraphQL: /, '') : String(e);
+    if (!/not authori[sz]ed/i.test(said)) throw e;
+    throw new Error(`Railway: the sign-in does not let this server see a workspace (Railway said: ${said.slice(0, 80)}). ${pickAgain(where)}`);
+  }
+  if (found.length === 0) throw new Error(`Railway: the sign-in shares no workspace with this server. ${pickAgain(where)}`);
+  return {
+    projects: found.flatMap((w) => (w.projects?.edges ?? []).map((e: any) => asProject(e.node, w.name))),
+    workspaces: found.map((w) => String(w.name)),
+  };
+}
+
+export async function handleRailwayServices() {
+  getAuth();
+  try {
+    const { projects, workspaces } = await railwayProjects();
     return {
-      content: [{ type: 'text' as const, text: JSON.stringify({ count: projects.length, projects }, null, 2) }],
+      content: [{ type: 'text' as const, text: JSON.stringify({ count: projects.length, ...(workspaces ? { workspaces } : {}), projects }, null, 2) }],
     };
   } catch (e) {
     return errOut(e);

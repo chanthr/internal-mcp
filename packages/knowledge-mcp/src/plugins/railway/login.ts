@@ -24,13 +24,18 @@ const TOKEN_API = 'https://backboard.railway.app/graphql/v2';
 /**
  * What the sign-in asks for: who signed in, a refresh token, and viewer access to the workspaces the person picks
  * on Railway's consent screen. The server only reads.
+ *
+ * `email` and `profile` are both there for more than a name. Without the two, Railway's API cannot tell whose
+ * workspaces these are, and answers every question, even "who am I", with "Not Authorized".
  */
-export const RAILWAY_SCOPE = 'openid email offline_access workspace:viewer';
+export const RAILWAY_SCOPE = 'openid email profile offline_access workspace:viewer';
 
 export interface RailwayClient {
   id: string;
   /** The address Railway sends the browser back to. It is part of the registration and must match exactly. */
   redirectUri: string;
+  /** What the registration asks for. One made for something else is replaced at the next sign-in. */
+  scope?: string;
   /** Where the registration can be changed or deleted, and the token that allows it. */
   registrationUri?: string;
   registrationToken?: string;
@@ -85,6 +90,7 @@ export async function registerRailwayClient(redirectUri: string): Promise<Railwa
         response_types: ['code'],
         token_endpoint_auth_method: 'none',
         application_type: 'native',
+        scope: RAILWAY_SCOPE,
       }),
     },
     'the registration',
@@ -95,6 +101,7 @@ export async function registerRailwayClient(redirectUri: string): Promise<Railwa
   return {
     id: json.client_id,
     redirectUri,
+    scope: RAILWAY_SCOPE,
     registrationUri: typeof json.registration_client_uri === 'string' ? json.registration_client_uri : undefined,
     registrationToken: typeof json.registration_access_token === 'string' ? json.registration_access_token : undefined,
   };
@@ -136,10 +143,17 @@ export async function railwayTokenRequest(form: Record<string, string>): Promise
 
 const SIGN_IN_AGAIN = 'Railway: the sign-in is no longer valid. Open the console (Apps → Railway) and sign in again, or set RAILWAY_TOKEN.';
 
-/** The token to call Railway with, and the API address it belongs to. */
-export async function railwayAuth(): Promise<{ token: string; api: string }> {
+/** What Railway is called with: the token, the API address it belongs to, and where the token came from. */
+export interface RailwayAuth {
+  token: string;
+  api: string;
+  /** A sign-in sees the workspaces the person shared. A pasted token sees what the token was made for. */
+  via: 'login' | 'token';
+}
+
+export async function railwayAuth(): Promise<RailwayAuth> {
   const fixed = (process.env.RAILWAY_TOKEN || process.env.RAILWAY_MCP_TOKEN)?.trim();
-  if (fixed) return { token: fixed, api: TOKEN_API };
+  if (fixed) return { token: fixed, api: TOKEN_API, via: 'token' };
   const token = await freshToken<RailwayLogin>({
     file,
     lock: 'railway-login',
@@ -151,7 +165,7 @@ export async function railwayAuth(): Promise<{ token: string; api: string }> {
     },
     gone: SIGN_IN_AGAIN,
   });
-  return { token, api: railwayEndpoints.api };
+  return { token, api: railwayEndpoints.api, via: 'login' };
 }
 
 /** Is there anything to call Railway with? */

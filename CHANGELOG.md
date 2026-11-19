@@ -56,8 +56,10 @@ Changes that affect people who run or extend the server. Dates are release dates
   that is not there, documents nothing links to). On a 500-file wiki the links are read in 0.14 s and the graph
   is built in 6 ms; only a document that changed is read again.
 - **Drop files on the console.** *Documents* takes files and whole folders by drag and drop (or a file picker).
-  They are copied into `uploads/` beside the settings, which becomes a folder like any other: searchable at
-  once and part of the graph. Only the file types that can be searched are taken.
+  They are copied into `uploads/` beside the settings, which becomes a folder like any other: searchable and
+  part of the graph. Only the file types that can be searched are taken. Reading a folder of PDFs takes a
+  while, so the page shows how far it is ("Reading the files: 70 of 213") and, when it is done, how many
+  documents there are and which files had nothing to read in them (scanned pages) or would not open.
 - **Add an app that has an MCP server of its own.** In the console, *Apps → Add an app*: pick Notion,
   Supabase, Linear, Atlassian, Sentry, Vercel, Stripe, Airtable, Figma and others from a list, or give the
   address of any MCP server. Where the server follows MCP's sign-in rules, this server registers itself there
@@ -66,7 +68,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   switch per app to allow the rest; Supabase is added in its read-only mode. A token can be pasted where a
   service gives one, and an open server needs nothing.
 - **Connect a service without copying a token.** In the console: *Sign in with Railway* (the server registers
-  itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself), *Sign in
+  itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself; a sign-in
+  that shares no workspace is not kept, and the page says to pick one), *Sign in
   with Google* for Drive (through an OAuth client of your own Google Cloud project, made once; the server reads
   your My Drive or the folders you list), *Account with gcloud* (creates the Drive service account and its key
   without stopping the server while gcloud works), *Use the gh login* for GitHub, and for Slack a link that opens
