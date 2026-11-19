@@ -38,6 +38,7 @@ import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
 import { checkLlm, listLlmModels, llmConfigured, llmSettings, type LlmKind } from '../core/llm.js';
+import { converse, type ChatEvent, type ChatTool } from '../core/llm_chat.js';
 import { createWiki, startWikiRun, stopWikiRun, WIKI, wikiDir, wikiExists, wikiStatus } from '../plugins/knowledge/wiki.js';
 import { openInBrowser } from './launch.js';
 import { startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
@@ -1026,20 +1027,91 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     }),
   );
 
-  // Try a tool: the same call an AI client makes, as an admin.
+  /**
+   * Run a tool from the console: the same call an AI client makes, on the same footing as a client on this machine
+   * (stdio), the admin, with the caller set for the whole call so tools that ask who is calling get an answer. A
+   * call from here is a call: it reaches the same databases and services, so it is in the same record.
+   */
+  const runAsConsole = async (name: string, args: Record<string, unknown>): Promise<{ ok: boolean; text: string; ms: number }> => {
+    const started = Date.now();
+    const auth: AuthContext = { ok: true, org_id: getConfig().orgId, role: 'admin', email: 'console@localhost' };
+    const r = await authStore.run(auth, () => registry.call(name, args, auth));
+    logToolCall({ tool: name, auth, ok: r.isError !== true, error: r.isError === true ? (r.content.find((c) => c.type === 'text') as { text?: string } | undefined)?.text ?? null : null, durationMs: Date.now() - started });
+    const text = r.content.map((c) => (c.type === 'text' ? String((c as { text?: unknown }).text ?? '') : `[${c.type}]`)).join('\n');
+    return { ok: r.isError !== true, text: text.length > 60_000 ? `${text.slice(0, 60_000)}\n… [${text.length - 60_000} more characters]` : text, ms: Date.now() - started };
+  };
+
+  // Try a tool by hand.
   api.post(
     '/run',
     wrap(async (req, res) => {
       const { name, args } = z.object({ name: z.string().min(1).max(100), args: z.record(z.string(), z.unknown()).default({}) }).parse(req.body);
-      const started = Date.now();
-      // The same footing as a client on this machine (stdio): the admin, with the caller set for the whole call so
-      // tools that ask who is calling (search, documents) get an answer.
-      const auth: AuthContext = { ok: true, org_id: getConfig().orgId, role: 'admin', email: 'console@localhost' };
-      const r = await authStore.run(auth, () => registry.call(name, args, auth));
-      // A call from here is a call: it reaches the same databases and services, so it is in the same record.
-      logToolCall({ tool: name, auth, ok: r.isError !== true, error: r.isError === true ? (r.content.find((c) => c.type === 'text') as { text?: string } | undefined)?.text ?? null : null, durationMs: Date.now() - started });
-      const text = r.content.map((c) => (c.type === 'text' ? String((c as { text?: unknown }).text ?? '') : `[${c.type}]`)).join('\n');
-      res.json({ ok: r.isError !== true, text: text.length > 60_000 ? `${text.slice(0, 60_000)}\n… [${text.length - 60_000} more characters]` : text, ms: Date.now() - started });
+      res.json(await runAsConsole(name, args));
+    }),
+  );
+
+  /**
+   * The tools the chat offers the model: the ones that only read, by their own word (readOnlyHint). A tool that
+   * says nothing about it, or that changes things, is left out: the model decides what to call, and nothing it
+   * decides here should change data. Those are tried by hand above.
+   */
+  const chatTools = (): ChatTool[] =>
+    registry
+      .listTools(pingTool)
+      .filter((t) => t.name !== pingTool.name && t.annotations?.readOnlyHint === true && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
+      .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> }));
+  const CHAT_RULES = [
+    'You are answering in the console of this MCP server, where its owner tries how its tools work for an AI assistant.',
+    'Use the tools to find the answer, as an assistant connected to this server would. Say which documents or sources the answer comes from.',
+    'If the tools find nothing that answers the question, say so plainly instead of answering from memory.',
+    'Answer in the language of the question.',
+  ].join('\n');
+  api.get('/chat', wrap(async (_req, res) => void res.json({ tools: chatTools().map((t) => t.name), left: registry.listTools(pingTool).filter((t) => t.name !== pingTool.name).length - chatTools().length })));
+  api.post(
+    '/chat',
+    wrap(async (req, res) => {
+      const body = z
+        .object({
+          message: z.string().trim().min(1).max(20_000),
+          history: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(100_000) }).strict()).max(200).default([]),
+        })
+        .strict()
+        .parse(req.body);
+      const settings = llmSettings();
+      if (!settings) return refuse(res, 409, 'No model is connected. Connect one on the Agent page.');
+      // One event per line, as they happen. The page reads them while the answer is written.
+      res.status(200);
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+      const stop = new AbortController();
+      // The page closed the request (Stop, or it went away): the model is stopped too.
+      res.on('close', () => {
+        if (!res.writableEnded) stop.abort();
+      });
+      const emit = (e: ChatEvent) => {
+        if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(e)}\n`);
+      };
+      const instructions = registry.instructions();
+      try {
+        const end = await converse(
+          {
+            system: `${CHAT_RULES}\n\nWhat this server tells the assistants that connect to it:\n${instructions}`,
+            history: body.history.filter((h) => h.text.trim()),
+            message: body.message,
+            tools: chatTools(),
+            run: async (name, input) => runAsConsole(name, input),
+            emit,
+            signal: stop.signal,
+          },
+          settings,
+        );
+        emit({ type: 'done', ...end });
+      } catch (e) {
+        if (!stop.signal.aborted) emit({ type: 'error', message: msg(e) });
+      }
+      res.end();
     }),
   );
 

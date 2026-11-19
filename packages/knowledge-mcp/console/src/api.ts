@@ -91,6 +91,51 @@ export async function call<T = unknown>(method: string, path: string, body?: unk
   return json as T;
 }
 
+/** What the chat sends back while it answers (server: core/llm_chat.ts), one per line. */
+export type ChatEvent =
+  | { type: 'text'; text: string }
+  | { type: 'thinking' }
+  | { type: 'tool'; id: string; name: string; input: unknown }
+  | { type: 'result'; id: string; ok: boolean; text: string; ms: number }
+  | { type: 'done'; model: string; usage: { input: number; output: number; cached: number; steps: number }; note: string | null }
+  | { type: 'error'; message: string };
+
+/** Ask the chat, and hand each event to `on` as it arrives. Aborting the signal stops the model too. */
+export async function chatStream(body: { message: string; history: Array<{ role: 'user' | 'assistant'; text: string }> }, on: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
+  const res = await fetch('./api/chat', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token() ?? ''}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!ours(res)) throw notOurs();
+  if (res.status === 401) window.dispatchEvent(new Event(REFUSED));
+  if (!res.ok || !res.body) {
+    const text = await res.text();
+    let error = text || `The server answered ${res.status}.`;
+    try {
+      error = (JSON.parse(text) as { error?: string }).error ?? error;
+    } catch {
+      /* not JSON */
+    }
+    throw new ApiError(error, res.status);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    let end: number;
+    while ((end = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, end).trim();
+      buffer = buffer.slice(end + 1);
+      if (line) on(JSON.parse(line) as ChatEvent);
+    }
+    if (done) return;
+  }
+}
+
 /** Send one file to the uploads folder. `path` is its place inside it ("notes/plan.md"). */
 export async function uploadFile(path: string, file: Blob): Promise<void> {
   const res = await fetch(`./api/uploads?path=${encodeURIComponent(path)}`, {

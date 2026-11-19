@@ -109,6 +109,7 @@ npm run dev                    # in a generated project: the address is in the f
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
 | Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |
 | Agent | Connect a language model for work the server does by itself: Claude (Anthropic), OpenRouter, OpenAI, a model on this machine through Ollama, or any endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list and checked with one question before it is saved. Until a model is connected the server calls none |
+| Chat | Ask the model connected on the Agent page, and watch it answer with this server's tools: each call and what it returned, as it happens. It gets the tools that only read and the instructions every client gets. Nothing is saved |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
 | Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
 | People and keys | Create and revoke keys, and limit a person to some tools |
