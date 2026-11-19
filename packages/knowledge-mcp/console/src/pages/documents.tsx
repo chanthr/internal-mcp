@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { call, signIn, uploadFile, type Changed, type FolderView, type SomeFiles } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
+import { CliStep } from '../cli-step';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { AlertDialog, Dialog } from '../ui/dialog';
@@ -297,6 +298,7 @@ interface Gcloud {
   project: string | null;
   projects: Array<{ id: string; name: string }>;
   problem: string | null;
+  needsSignIn: boolean;
 }
 const WAY_TEXT: Record<Way, string> = {
   google: 'Sign in once. The server then reads your Drive as you. It only reads.',
@@ -317,6 +319,9 @@ function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (tex
   const [folders, setFolders] = useState('');
   // A service account made by gcloud
   const [gcloud, setGcloud] = useState<Gcloud | null>(null);
+  // The person started a step with gcloud from here: the step after it starts by itself.
+  const [gcloudGoing, setGcloudGoing] = useState(false);
+  const [gcloudInstalled, setGcloudInstalled] = useState(false); // an install from here ended well
   const [project, setProject] = useState('');
   // A pasted key
   const [key, setKey] = useState('');
@@ -331,7 +336,7 @@ function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (tex
         setGcloud(g);
         setProject((p) => p || g.project || g.projects[0]?.id || '');
       },
-      (e) => setGcloud({ installed: false, account: null, project: null, projects: [], problem: e instanceof Error ? e.message : String(e) }),
+      (e) => setGcloud({ installed: false, account: null, project: null, projects: [], problem: e instanceof Error ? e.message : String(e), needsSignIn: false }),
     );
   };
   useEffect(() => {
@@ -344,7 +349,7 @@ function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (tex
     way === 'google'
       ? (useSaved || (clientId.trim().length > 20 && (clientSecret.trim().length >= 10 || clientId.trim().startsWith('{')))) && (scope === 'all' || folders.trim().length >= 10)
       : way === 'gcloud'
-        ? !!gcloud?.account && project.trim().length >= 6
+        ? !!gcloud?.account && !gcloud.needsSignIn && project.trim().length >= 6
         : key.trim().length >= 50;
   const run = () =>
     void go.run(async () => {
@@ -352,7 +357,15 @@ function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (tex
         await signIn('/logins/google', { ...(useSaved ? {} : { clientId, clientSecret }), folders: scope === 'folders' ? folders.split('\n') : null });
         return;
       }
-      const r = await apply(() => call<Changed & { email?: string }>('POST', '/services/drive', way === 'gcloud' ? { gcloud: { project: project.trim() } } : { key }));
+      let r: Changed & { email?: string };
+      try {
+        r = await apply(() => call<Changed & { email?: string }>('POST', '/services/drive', way === 'gcloud' ? { gcloud: { project: project.trim() } } : { key }));
+      } catch (e) {
+        // gcloud wants the sign-in again, found out only now: show the button that does it, not gcloud's sentence
+        // about a terminal.
+        if (way === 'gcloud' && e instanceof Error && e.message.includes('gcloud auth login')) return lookForGcloud();
+        throw e;
+      }
       onFound(r.email ? `Connected as ${r.email}. Share a folder or a document with this address.` : null);
       onClose();
     });
@@ -437,12 +450,43 @@ function ConnectDrive({ onClose, onFound }: { onClose: () => void; onFound: (tex
           (!gcloud ? (
             <Spinner label="Looking for gcloud" />
           ) : !gcloud.installed ? (
-            <p className="field-help">{gcloud.problem ?? 'The gcloud CLI is not on this machine. Install the Google Cloud SDK, or connect another way.'}</p>
-          ) : !gcloud.account ? (
-            <p className="field-help">
-              gcloud is not signed in. In a terminal: <code>gcloud auth login</code>.{' '}
-              <button type="button" className="link" onClick={lookForGcloud}>Look again</button>
-            </p>
+            gcloud.problem ? (
+              <p className="field-help">{gcloud.problem}</p>
+            ) : gcloudInstalled ? (
+              // Installed a moment ago and still not found: the server looks in the places it knew when it started.
+              <p className="field-help">gcloud is installed, but this server does not find it yet. Start the server again, then come back here.</p>
+            ) : (
+              // The server installs it: nobody has to go to a terminal for it.
+              <>
+                <p className="field-help">The gcloud CLI is not on this machine. It can be installed from here; you then sign in to Google once.</p>
+                <CliStep
+                  tool="gcloud"
+                  action="install"
+                  label="Install gcloud"
+                  onStart={() => setGcloudGoing(true)}
+                  onDone={() => {
+                    setGcloudInstalled(true);
+                    lookForGcloud();
+                  }}
+                />
+              </>
+            )
+          ) : gcloud.needsSignIn ? (
+            // Signed out, or Google wants the sign-in again (an organization account, after a while). The server
+            // runs gcloud's own sign-in.
+            <>
+              <p className="field-help">
+                {gcloud.account ? `gcloud's sign-in as ${gcloud.account} has expired. Sign in again to go on.` : 'gcloud is on this machine and not signed in.'}
+              </p>
+              <CliStep
+                tool="gcloud"
+                action="sign-in"
+                label={gcloud.account ? 'Sign in to gcloud again' : 'Sign in to gcloud'}
+                autoStart={gcloudGoing}
+                onStart={() => setGcloudGoing(true)}
+                onDone={lookForGcloud}
+              />
+            </>
           ) : (
             <>
               {gcloud.projects.length ? (

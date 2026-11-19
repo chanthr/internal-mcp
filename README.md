@@ -128,10 +128,15 @@ offers something better, the console uses it:
 | --- | --- | --- |
 | Railway | **Sign in with Railway** | Nothing to prepare. The server registers itself with Railway, you sign in and pick the workspaces it may read, as a viewer. The sign-in renews itself |
 | Google Drive | **Sign in with Google** | An OAuth client of your own Google Cloud project, made once: client ID and secret go into the form. The server then reads your My Drive, or the folders you list, as you. Google reviews every shared app that reads Drive, which is why there is no ready-made one to offer |
-| Google Drive | **Account with gcloud** | The gcloud CLI, signed in. It creates a service account and its key; you then share folders with that account |
+| Google Drive | **Account with gcloud** | Nothing to prepare on a machine with Homebrew or winget: the console installs the gcloud CLI and runs its sign-in (a browser window opens). gcloud then creates a service account and its key; you share folders with that account. When Google asks an organization account to sign in again, the console runs the sign-in again |
 | Notion, Supabase, Linear and other apps with an MCP server | **Add an app** | Nothing to prepare where the app's server follows MCP's sign-in rules: this server registers itself there and you sign in at the app. Only its tools that read are turned on, and Supabase is added in its read-only mode |
-| GitHub | **Use the gh login** | The gh CLI, signed in |
+| GitHub | **Connect with the gh CLI** | Nothing to prepare on a machine with Homebrew or winget: one button installs the gh CLI, signs it in with a code you type at github.com, and uses its login. With gh already signed in it is **Use the gh login** |
 | Slack | A link that opens Slack's "Create an app" with the read-only permissions filled in | The bot token is still copied once. Slack's sign-in needs a secret and a public https address, which a server on your machine has not |
+
+The console does not send you to a terminal for these tools. It runs the command itself and waits: `brew install gh`
+or `brew install --cask gcloud-cli` (winget on Windows), `gcloud auth login`, `gh auth login --web`. The page shows
+the command before an install and how far it is. Each command is fixed, and nothing typed into the page reaches a
+command line. Where there is no package manager it knows, it links to the tool's own instructions.
 
 A token can still be pasted for each, and `RAILWAY_TOKEN` in the environment wins over a sign-in. With a personal
 Google account, publish the OAuth consent screen (it stays unverified, which is fine for your own use): left in

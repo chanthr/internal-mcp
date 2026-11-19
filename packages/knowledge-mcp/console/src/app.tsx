@@ -331,9 +331,10 @@ export function Row({ title, help, children, onClick }: { title: ReactNode; help
  * a key that was handed out. (Removing a folder does not ask: adding it again restores everything.)
  */
 /** One way of doing something and the button that does it, for a dialog that offers more than one way. */
-export function Choice({ title, help, error, children }: { title: ReactNode; help?: ReactNode; error?: string | null; children: ReactNode }) {
+/** `stacked`: what is chosen goes under the words, across the whole width (a step that shows a code or how far it is). */
+export function Choice({ title, help, error, stacked, children }: { title: ReactNode; help?: ReactNode; error?: string | null; stacked?: boolean; children: ReactNode }) {
   return (
-    <div className="choice">
+    <div className="choice" data-stacked={stacked || undefined}>
       <div className="choice-main">
         <div className="choice-title">{title}</div>
         {error ? <div className="error" role="alert">{error}</div> : help && <div className="choice-help">{help}</div>}

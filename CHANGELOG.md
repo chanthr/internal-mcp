@@ -47,6 +47,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **The console installs and signs in the command-line tools it leans on.** *Account with gcloud* and the gh
+  login used to need a tool that was already installed and signed in, and said "in a terminal: …" otherwise. The
+  console now runs those commands itself: the package manager's install (`brew install gh`,
+  `brew install --cask gcloud-cli`, winget on Windows), `gcloud auth login` (a browser window opens) and
+  `gh auth login --web` (the page shows the code to type at github.com). For GitHub one button goes from "gh is
+  not on this machine" to connected. The commands are fixed, an install is shown before it runs, and nothing typed
+  into the page reaches a command line. When Google asks an organization account to sign in again, the page
+  offers the sign-in instead of gcloud's error.
 - **A knowledge graph, read from the links people wrote.** Documents in the local folders are connected by
   their wiki links (`[[Note]]`, as Obsidian writes them), their Markdown links to documents and the header fields
   that name documents (`related`, `parent`, any field). No model is involved, and an Obsidian vault added as a

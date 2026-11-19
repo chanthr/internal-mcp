@@ -126,10 +126,12 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 | --- | --- | --- |
 | Railway | **Sign in with Railway** | 준비할 것이 없습니다. 서버가 Railway에 스스로 등록하고, 사용자는 로그인해서 읽게 할 워크스페이스를 고릅니다. 권한은 보기 전용입니다. 로그인은 저절로 갱신됩니다 |
 | Google Drive | **Sign in with Google** | 본인 Google Cloud 프로젝트의 OAuth 클라이언트가 필요합니다. 한 번 만들어 클라이언트 ID와 비밀값을 넣습니다. 그 뒤 서버는 로그인한 사람의 내 드라이브나 고른 폴더를 읽습니다. 구글은 Drive를 읽는 공용 앱을 모두 심사하기 때문에 미리 만들어 둔 앱을 제공할 수 없습니다 |
-| Google Drive | **Account with gcloud** | 로그인된 gcloud CLI가 필요합니다. 서비스 계정과 키를 만들어 줍니다. 그 계정에 폴더를 공유하면 됩니다 |
+| Google Drive | **Account with gcloud** | Homebrew나 winget이 있는 컴퓨터라면 준비할 것이 없습니다. 콘솔이 gcloud CLI를 설치하고 로그인 명령을 실행합니다(브라우저 창이 열립니다). 그다음 gcloud가 서비스 계정과 키를 만듭니다. 그 계정에 폴더를 공유하면 됩니다. 조직 계정에 Google이 다시 로그인을 요구하면 콘솔이 로그인을 다시 실행합니다 |
 | Notion, Supabase, Linear 등 MCP 서버가 있는 앱 | **Add an app** | 앱의 서버가 MCP 로그인 규칙을 따르면 준비할 것이 없습니다. 서버가 그 앱에 스스로 등록하고, 사용자는 그 앱에서 로그인합니다. 읽는 도구만 켜지고, Supabase는 읽기 전용 모드로 추가됩니다 |
-| GitHub | **Use the gh login** | 로그인된 gh CLI가 필요합니다 |
+| GitHub | **Connect with the gh CLI** | Homebrew나 winget이 있는 컴퓨터라면 준비할 것이 없습니다. 버튼 하나로 gh CLI를 설치하고, github.com에 입력할 코드로 로그인한 뒤, 그 로그인을 씁니다. gh가 이미 로그인돼 있으면 **Use the gh login**으로 나옵니다 |
 | Slack | 읽기 권한이 채워진 채로 Slack의 앱 만들기 화면을 여는 링크 | 봇 토큰은 한 번 복사해야 합니다. Slack 로그인은 비밀값과 공개 https 주소를 요구하는데, 내 컴퓨터의 서버에는 둘 다 없습니다 |
+
+이 도구들 때문에 터미널로 가지 않아도 됩니다. 콘솔이 명령을 직접 실행하고 기다립니다. `brew install gh`, `brew install --cask gcloud-cli`(Windows는 winget), `gcloud auth login`, `gh auth login --web`입니다. 설치는 실행할 명령을 먼저 보여 주고, 진행 상황을 보여 줍니다. 명령은 정해져 있고, 화면에 입력한 값은 명령줄에 들어가지 않습니다. 아는 패키지 관리자가 없으면 도구의 설치 안내로 연결합니다.
 
 서비스마다 토큰을 붙여 넣는 방법도 그대로 있습니다. 환경변수 `RAILWAY_TOKEN`이 있으면 로그인보다 먼저 씁니다.
 개인 구글 계정이면 OAuth 동의 화면을 게시하십시오(심사를 받지 않은 상태로 두어도 본인 용도에는 문제없습니다).
