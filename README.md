@@ -760,7 +760,10 @@ starts it. Before anything is made in your account it checks the address: its do
 DNS says so), and the sign-in must be for that domain (Cloudflare's API, asked with the sign-in's own token, says
 which one it is; a sign-in is for one domain). After the record is made, what cloudflared says it made is compared
 with what was asked for, and the address counts as working only once `https://<address>/health` answers from
-outside. A DNS record that already exists under that name is not written over.
+outside. A DNS record that already exists under that name is not written over. A tunnel made before for the same
+address (by another copy of this server, or an earlier version) is used again: its key is fetched from Cloudflare
+(`cloudflared tunnel token`). If that tunnel is running somewhere right now, the console says so instead of joining it,
+since two computers on one tunnel would split its requests.
 
 What does not change: `/mcp` asks for a key or a sign-in as before, and the console answers on your machine only
 (through the tunnel it answers 403). Your own cloudflared setup is not read, used or changed: not
