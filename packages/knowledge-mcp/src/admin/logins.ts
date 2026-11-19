@@ -200,13 +200,13 @@ export async function signOutRailway(): Promise<void> {
 // ── Another service's MCP server ──
 
 /** The address that signs a person in to the service behind an MCP server (what is specific to it: upstreams.ts). */
-export async function startMcpLogin(origin: string, target: McpTarget): Promise<string> {
+export async function startMcpLogin(origin: string, target: McpTarget): Promise<{ url: string; at: string }> {
   prune();
   const state = randomBytes(24).toString('base64url');
   const redirectUri = `${origin}/console/login/mcp`;
-  const { url, verifier, carry } = await prepareMcpSignIn(redirectUri, target, state);
+  const { url, verifier, carry, at } = await prepareMcpSignIn(redirectUri, target, state);
   pending.set(state, { service: 'mcp', verifier, redirectUri, until: Date.now() + LIFETIME_MS, mcp: carry });
-  return url;
+  return { url, at };
 }
 
 // ── Google ──

@@ -75,14 +75,68 @@ function cleanTarget(raw: string): string {
   return t.length > 300 ? '' : t;
 }
 
-/** The text of a Markdown document without the places where a link is not a link: code blocks and inline code. */
+/**
+ * A document is not read for links past this. Every step below takes time in proportion to what it is given, and
+ * this bounds what it is given: a file somebody dropped in a folder must not be able to stop the server.
+ */
+const MAX_LINK_TEXT = 4_000_000;
+/** A line longer than this is not prose with links in it (a minified file, a data dump). */
+const MAX_LINK_LINE = 20_000;
+
+/**
+ * The text of a Markdown document without the places where a link is not a link: fenced code blocks and inline
+ * code. Read line by line, once. (A pattern with a back-reference did this before, and one line of backticks made
+ * it try every length against the rest of the file.)
+ */
 function withoutCode(body: string): string {
-  return body.replace(/^([`~]{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$/gm, '').replace(/`[^`\n]*`/g, '');
+  const out: string[] = [];
+  let fence: { char: string; length: number } | null = null;
+  for (const line of body.split('\n')) {
+    const lead = line.length - line.trimStart().length;
+    const char = line[lead];
+    let run = 0;
+    if (lead <= 3 && (char === '`' || char === '~')) while (line[lead + run] === char) run++;
+    if (fence) {
+      // Closed by a line of the same character, at least as long, with nothing after it.
+      if (run >= fence.length && char === fence.char && line.slice(lead + run).trim() === '') fence = null;
+      continue;
+    }
+    if (run >= 3) {
+      fence = { char, length: run };
+      continue;
+    }
+    if (line.length > MAX_LINK_LINE) continue;
+    out.push(line.includes('`') ? withoutInlineCode(line) : line);
+  }
+  return out.join('\n');
+}
+
+/** A line without its `inline code`: from a backtick to the next one. A backtick with no partner stays. */
+function withoutInlineCode(line: string): string {
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const open = line.indexOf('`', at);
+    const close = open < 0 ? -1 : line.indexOf('`', open + 1);
+    if (close < 0) return out + line.slice(at);
+    out += line.slice(at, open);
+    at = close + 1;
+  }
+}
+
+/** The first top-level heading: "# Title", with the closing #s some people write taken off. */
+function firstHeading(body: string): string | undefined {
+  const line = /^#[ \t]+([^\n]*)$/m.exec(body)?.[1];
+  if (line === undefined) return undefined;
+  let end = line.trimEnd().length;
+  while (end > 0 && line[end - 1] === '#') end--;
+  const title = line.slice(0, end).trim();
+  return title && title.length <= 300 ? title : undefined;
 }
 
 /** What a Markdown document links to, its title and the other names it goes by. */
 export function extractLinks(markdown: string): { title?: string; aliases?: string[]; links: LinkRef[] } {
-  const { frontmatter, body } = parseFrontmatter(markdown);
+  const { frontmatter, body } = parseFrontmatter(markdown.length > MAX_LINK_TEXT ? markdown.slice(0, MAX_LINK_TEXT) : markdown);
   const found = new Map<string, { meta: boolean; soft: boolean }>(); // target → how sure it is a link of the text
   const add = (raw: string, meta: boolean, path: boolean) => {
     const t = cleanTarget(raw);
@@ -97,8 +151,8 @@ export function extractLinks(markdown: string): { title?: string; aliases?: stri
   for (const m of text.matchAll(/\[\[([^[\]\n]{1,300})\]\]/g)) add(m[1].split('|')[0], false, false);
   // [text](target) and [text](target "title"), not ![image](…); a target with a scheme (https:, mailto:) is the web.
   const web = /^([a-z][a-z0-9+.-]*:|\/\/|#)/i;
-  for (const m of text.matchAll(/(?<!!)\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\s]+)(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)/g)) if (!web.test(m[1].replace(/^</, ''))) add(m[1], false, true);
-  for (const m of text.matchAll(/^ {0,3}\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)/gm)) if (!web.test(m[1].replace(/^</, ''))) add(m[1], false, true);
+  for (const m of text.matchAll(/(?<!!)\[[^\]\n]{0,300}\]\([ \t]*(<[^>\n]{1,1000}>|[^)\s]{1,1000})(?:[ \t]+(?:"[^"\n]{0,300}"|'[^'\n]{0,300}'))?[ \t]*\)/g)) if (!web.test(m[1].replace(/^</, ''))) add(m[1], false, true);
+  for (const m of text.matchAll(/^ {0,3}\[[^\]\n]{1,300}\]:[ \t]*(<[^>\n]{1,1000}>|\S{1,1000})/gm)) if (!web.test(m[1].replace(/^</, ''))) add(m[1], false, true);
 
   const fromField = (v: unknown): void => {
     if (Array.isArray(v)) return v.forEach(fromField);
@@ -110,7 +164,7 @@ export function extractLinks(markdown: string): { title?: string; aliases?: stri
   for (const [key, value] of Object.entries(frontmatter)) if (!OWN_FIELDS.has(key.toLowerCase())) fromField(value);
 
   const names = (v: unknown): string[] => (Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => nfc(x.trim()));
-  const heading = /^#\s+(.+?)\s*#*\s*$/m.exec(body)?.[1];
+  const heading = firstHeading(body);
   const title = names(frontmatter.title)[0] ?? (heading ? nfc(heading) : undefined);
   const aliases = [...names(frontmatter.aliases), ...names(frontmatter.alias)];
   const links = [...found].map(([to, how]): LinkRef => ({ to, ...(how.meta ? { meta: true as const } : {}), ...(how.soft && !how.meta ? { soft: true as const } : {}) }));
@@ -145,6 +199,10 @@ export interface GraphEdge {
   to: string;
   /** Named in a header field (related, parent, …) rather than in the text. */
   meta: boolean;
+  /** The target as it was written. */
+  written: string;
+  /** Written in the text, plainly as a document: were the target not there, this would be a broken link. */
+  plain: boolean;
 }
 export interface Graph {
   nodes: Map<string, GraphNode>;
@@ -269,8 +327,11 @@ export function buildGraph(map: LinkMap): Graph {
         const id = idOf(home, to);
         if (id === from) continue;
         const had = seen.get(id);
-        if (had) had.meta = had.meta && !!link.meta; // said in the text as well: a link of the text
-        else seen.set(id, { from, to: id, meta: !!link.meta });
+        const plain = !link.meta && !link.soft;
+        if (had) {
+          had.meta = had.meta && !!link.meta; // said in the text as well: a link of the text
+          had.plain = had.plain || plain;
+        } else seen.set(id, { from, to: id, meta: !!link.meta, written: link.to, plain });
       }
       if (seen.size) g.out.set(from, [...seen.values()]);
       for (const e of seen.values()) void (g.in.get(e.to)?.push(e) ?? g.in.set(e.to, [e]));

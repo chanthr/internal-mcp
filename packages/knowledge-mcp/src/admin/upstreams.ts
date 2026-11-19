@@ -12,6 +12,7 @@
  * The sign-in itself (leaving the page, the return, saving) is the three-step flow in logins.ts; this file is
  * what is specific to MCP servers.
  */
+import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { discoverOAuthServerInfo, exchangeAuthorization, startAuthorization } from '@modelcontextprotocol/sdk/client/auth.js';
@@ -100,6 +101,52 @@ export function mcpTarget(dir: string, input: { name: string; url: string }, tak
   return { name, url };
 }
 
+/** A name or number that is this machine or a private network: nothing a server on the internet should send us to. */
+function privateHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (h.includes(':')) return h === '::1' || h === '::' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('::ffff:');
+  return false;
+}
+
+/**
+ * An address the sign-in of an MCP server sends this server to (where to register, where to trade the code for a
+ * token). The MCP server says these, so a hostile one could name this machine or the network behind it. Unless the
+ * MCP server is itself on this machine, they must be https addresses out on the internet.
+ */
+export function signInAddress(raw: unknown, what: string, mcpIsLocal: boolean): void {
+  if (raw === undefined || raw === null || raw === '') return;
+  let u: URL;
+  try {
+    u = new URL(String(raw));
+  } catch {
+    throw new Error(`The server's sign-in gives ${what} that is not an address.`);
+  }
+  if (mcpIsLocal) return;
+  if (u.protocol !== 'https:' || privateHost(u.hostname)) throw new Error(`The server's sign-in sends this server to ${u.protocol}//${u.host} for ${what}: an address on this machine or a private network, or one without https. Not added.`);
+}
+
+/**
+ * Do two hosts belong to the same owner, as far as a name can tell? The same registered name: mcp.example.com and
+ * auth.example.com, example.co.uk and login.example.co.uk. Used to decide whether to ask before a sign-in that
+ * happens somewhere else than the server being added.
+ */
+export function sameOwner(a: string, b: string): boolean {
+  const registered = (host: string): string => {
+    const labels = host.toLowerCase().split(':')[0].split('.');
+    if (labels.length <= 2) return labels.join('.');
+    const second = labels[labels.length - 2];
+    const shared = labels[labels.length - 1].length === 2 && ['co', 'com', 'net', 'org', 'ac', 'go', 'gov', 'edu', 'or', 'ne'].includes(second);
+    return labels.slice(shared ? -3 : -2).join('.');
+  };
+  return registered(a) === registered(b);
+}
+
 /** Does the server want a sign-in? Asked the way a client would start: an MCP request without a token. */
 export async function needsSignIn(url: string): Promise<boolean> {
   let res: Response;
@@ -149,8 +196,9 @@ export interface McpResult {
  * Find out where the server signs people in, register this installation there if it is not yet, and make the
  * address to open. `state` comes back with the browser; the verifier stays here.
  */
-export async function prepareMcpSignIn(redirectUri: string, target: McpTarget, state: string): Promise<{ url: string; verifier: string; carry: McpCarry }> {
+export async function prepareMcpSignIn(redirectUri: string, target: McpTarget, state: string): Promise<{ url: string; verifier: string; carry: McpCarry; at: string }> {
   const host = new URL(target.url).host;
+  const mcpIsLocal = ['localhost', '127.0.0.1', '[::1]'].includes(new URL(target.url).hostname);
   const manual = `${host} asks for a sign-in this server cannot start by itself. If the service gives tokens, paste one instead.`;
   let info;
   try {
@@ -161,10 +209,22 @@ export async function prepareMcpSignIn(redirectUri: string, target: McpTarget, s
   const metadata = info.authorizationServerMetadata;
   if (!metadata?.authorization_endpoint || !metadata.token_endpoint) throw new Error(manual);
   const issuer = info.authorizationServerUrl;
+  // Where this server would be sent: nowhere on this machine or the network behind it.
+  signInAddress(issuer, 'its sign-in', mcpIsLocal);
+  signInAddress(metadata.authorization_endpoint, 'the sign-in page', mcpIsLocal);
+  signInAddress(metadata.token_endpoint, 'the token', mcpIsLocal);
+  signInAddress(metadata.registration_endpoint, 'the registration', mcpIsLocal);
+  signInAddress((metadata as { revocation_endpoint?: unknown }).revocation_endpoint, 'signing out', mcpIsLocal);
   // What the server says a client should ask for. A refresh token is asked for where it has to be asked for.
   let scope = info.resourceMetadata?.scopes_supported?.join(' ') || undefined;
   if (scope && metadata.scopes_supported?.includes('offline_access') && !scope.split(' ').includes('offline_access')) scope += ' offline_access';
-  const resource = info.resourceMetadata?.resource;
+  // Whose access is being asked for. The server names it (RFC 9728), and it has to be this server's own address:
+  // otherwise a server could send people to sign in to another service and be handed what they allowed there.
+  const claimed = info.resourceMetadata?.resource;
+  if (claimed && !checkResourceAllowed({ requestedResource: resourceUrlFromServerUrl(target.url), configuredResource: claimed })) {
+    throw new Error(`${host} says its sign-in is for another address (${String(claimed).slice(0, 120)}). Signing in would hand that address's access to ${host}. Not added.`);
+  }
+  const resource = claimed;
 
   const saved = readUpstreamLogin(target.name);
   let client = saved && saved.url === target.url && saved.issuer === issuer && saved.redirectUri === redirectUri ? saved.client : null;
@@ -178,7 +238,7 @@ export async function prepareMcpSignIn(redirectUri: string, target: McpTarget, s
     }
   }
   const { authorizationUrl, codeVerifier } = await startAuthorization(issuer, { metadata, clientInformation: client, redirectUrl: redirectUri, scope, state, resource });
-  return { url: authorizationUrl.href, verifier: codeVerifier, carry: { target, issuer, metadata, resource, client, redirectUri, fresh } };
+  return { url: authorizationUrl.href, verifier: codeVerifier, carry: { target, issuer, metadata, resource, client, redirectUri, fresh }, at: new URL(metadata.authorization_endpoint).host };
 }
 
 /**

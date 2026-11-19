@@ -59,7 +59,10 @@ export async function handleLinkedDocuments(args: z.infer<typeof inputSchema>) {
     const edges = nodes.reduce((sum, n) => sum + (g.out.get(n.id) ?? []).filter((e) => seen.has(e.to)).length, 0);
     // Counted in what the caller sees: a document whose every link leads outside their folders is alone to them.
     const alone = nodes.filter((n) => !linkCounts(g, n.id, visible));
-    const broken = g.broken.filter((b) => seen.has(b.from));
+    // A link to a document the caller may not see counts like a link to one that is not there: the two must not
+    // be told apart, or the answer says which names exist in folders the caller has no business with.
+    const hidden = nodes.flatMap((n) => (g.out.get(n.id) ?? []).filter((e) => e.plain && !seen.has(e.to)));
+    const broken = [...g.broken.filter((b) => seen.has(b.from)), ...hidden];
     const hubs = nodes.map((n) => ({ n, into: linksIn(n) })).filter((x) => x.into > 0).sort((a, b) => b.into - a.into || a.n.title.localeCompare(b.n.title)).slice(0, limit);
     const lines = ['# How the documents connect', `${plural(nodes.length, 'document')} · ${plural(edges, 'link')} · ${plural(alone.length, 'document')} with no links · ${plural(broken.length, 'link')} to a document that does not exist`];
     if (hubs.length) {
@@ -79,7 +82,9 @@ export async function handleLinkedDocuments(args: z.infer<typeof inputSchema>) {
       .sort((a, b) => a.n.title.localeCompare(b.n.title));
   const out = ends(g.out.get(documentId), 'to');
   const into = ends(g.in.get(documentId), 'from');
-  const broken = g.broken.filter((b) => b.from === documentId).map((b) => b.target);
+  // What this document links to and the caller may not see is listed with what is not there, as it was written.
+  const unseen = (g.out.get(documentId) ?? []).filter((e) => e.plain && !visible(g.nodes.get(e.to)!)).map((e) => e.written);
+  const broken = [...new Set([...g.broken.filter((b) => b.from === documentId).map((b) => b.target), ...unseen])];
   const lines = [`# Links of ${node.title}`, `ID: \`${node.id}\``];
   const section = (title: string, list: typeof out) => {
     if (list.length === 0) return;
