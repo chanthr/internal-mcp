@@ -6,6 +6,7 @@ import { Spinner } from './ui/spinner';
 import { TextField } from './ui/text-field';
 import { Overview } from './pages/overview';
 import { Documents } from './pages/documents';
+import { Graph } from './pages/graph';
 import { Data } from './pages/data';
 import { Apps } from './pages/apps';
 import { Tools } from './pages/tools';
@@ -51,6 +52,7 @@ const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: str
     group: 'Knowledge',
     items: [
       { id: 'documents', label: 'Documents', render: () => <Documents /> },
+      { id: 'graph', label: 'Graph', render: () => <Graph /> },
       { id: 'data', label: 'Databases and APIs', render: () => <Data /> },
       { id: 'apps', label: 'Apps', render: () => <Apps /> },
     ],

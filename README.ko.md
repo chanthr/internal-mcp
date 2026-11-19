@@ -103,7 +103,8 @@ npm run dev                    # 생성한 프로젝트에서: 첫 몇 줄에 �
 
 | 화면 | 하는 일 |
 | --- | --- |
-| Documents | 폴더를 추가하고, Google Drive를 연결하고(구글 로그인, gcloud로 서비스 계정 만들기, 키 붙여넣기), 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
+| Documents | 파일이나 폴더를 화면에 끌어다 놓고, 경로로 폴더를 추가하고, Google Drive를 연결하고(구글 로그인, gcloud로 서비스 계정 만들기, 키 붙여넣기), 의미 검색을 켭니다. 임베딩 모델은 엔드포인트가 가진 목록에서 고릅니다(로컬 Ollama, OpenAI, 호환 엔드포인트). 나중에 바꿀 수 있습니다. 새 벡터는 저장된 글에서 만들고 진행 상황이 화면에 나옵니다 |
+| Graph | 문서가 서로 어떻게 가리키는지 보여 줍니다. 사람이 적은 링크로 만듭니다. 가장 많이 가리켜지는 문서, 한 문서의 주변, 정리할 것(없는 문서를 가리키는 링크, 아무 연결이 없는 문서)이 나옵니다 |
 | Databases and APIs | Postgres, SQLite, HTTP API를 연결합니다. 질의를 한 번 써서 도구로 저장합니다. 화면이 테이블 목록을 보여 주고, 저장하기 전에 실제 데이터베이스에서 질의를 점검합니다 |
 | Apps | Slack, GitHub, Railway를 연결합니다. 로그인이 되는 곳은 로그인으로, 아니면 토큰으로 연결합니다. 자체 MCP 서버가 있는 앱(Notion, Supabase, Linear, Sentry 등)도 추가합니다. 그 앱에서 로그인하면 읽기 도구가 앱 이름을 달고 들어옵니다 |
 | Tools | AI 클라이언트가 부를 수 있는 도구 전부입니다. 값을 넣고 실행하면 클라이언트가 받는 결과가 그대로 보입니다 |
@@ -413,7 +414,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
-| `knowledge` | `search_knowledge`, `read_document` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다 |
+| `knowledge` | `search_knowledge`, `read_document`, `linked_documents` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다 |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | 콘솔에서 한 구글 로그인(본인 Drive를 읽습니다)이나 Google 서비스 계정. 서비스 계정은 폴더나 문서를 그 계정에 공유하면 검색됩니다. 환경변수의 OAuth refresh token도 됩니다 |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
@@ -441,7 +442,15 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | --- | --- |
 | `search_knowledge` | 조각을 `topK`개까지(기본 5, 문서마다 최대 2) 돌려줍니다. 조각마다 문서, 날짜, ID, 제목 경로, 질문의 낱말 가운데 몇 개가 들어 있는지를 붙입니다. 한 문서에서 이웃한 두 조각은 한 덩어리로 보여 줍니다. 질문 낱말의 절반도 든 조각이 없으면 일치가 약하다고 알립니다. 필터에 맞는 것이 없으면 그 항목이 가진 값을 알려 줍니다 |
 | `read_document` | `part`(검색 결과에 나온 번호)를 주면 그 조각과 앞뒤 조각을 돌려줍니다(`around`, 기본 1). 수천 자 정도입니다. 주지 않으면 문서를 처음부터 `maxChars`(기본 20,000)까지 돌려주고, 이어 읽을 `offset`을 알려 줍니다. JSON이 아니라 일반 글입니다 |
+| `linked_documents` | 문서 ID를 주면 그 문서가 가리키는 문서와 그 문서를 가리키는 문서를 제목과 ID로 돌려줍니다. 주지 않으면 문서 수와 링크 수, 가장 많이 가리켜지는 문서를 돌려줍니다. 연결이 있는 검색 결과에는 `Links: to 2 · from 3`이 붙습니다 |
 | 데이터베이스 도구 | 행을 압축한 표로 돌려줍니다. `{"rowCount":2,"columns":["id","total"],"rows":[[1,10.5],[2,20]]}` 모양이고 한 줄에 한 행입니다. 열 이름은 한 번만 씁니다 |
+
+**지식 그래프.** 로컬 폴더의 문서는 작성자가 적은 링크 그대로 연결됩니다. 모델을 거치지 않습니다. 옵시디언이
+쓰는 `[[노트]]`, `[[노트|보이는 글]]`, `[[폴더/노트#제목]]`, 문서를 가리키는 Markdown 링크
+(`[가이드](../guides/setup.md)`), 문서를 적은 머리말 항목(`related: [a.md, "[[노트]]"]`)을 읽습니다. 그래서
+옵시디언 볼트를 폴더로 추가하면 그래프도 함께 들어옵니다. 링크는 경로, 폴더 안의 파일 이름, 제목과 별칭으로
+문서를 찾습니다. 나중에 쓴 노트가 어제의 끊긴 링크를 잇습니다. 문서를 가리킨 것이 분명한데 맞는 문서가 없을
+때만 깨진 링크로 알립니다.
 
 | 작업 | 방법 |
 | --- | --- |

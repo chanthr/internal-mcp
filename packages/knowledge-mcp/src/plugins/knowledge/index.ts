@@ -18,6 +18,7 @@ import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 import { foldersConfigured, scanFolders, startFolderScans } from './folders.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
 import { readDocumentTool } from './tools/read_document.js';
+import { linkedDocumentsTool } from './tools/linked_documents.js';
 import { cli } from '../../core/invocation.js';
 
 /** Is there anything that feeds the index? */
@@ -55,10 +56,11 @@ export const knowledgePlugin = definePlugin({
     if (!indexAvailable()) return 'with QDRANT_URL set, an embedding model is required: set OPENAI_API_KEY or EMBEDDING_BASE_URL (or remove QDRANT_URL to use the built-in index)';
     return true;
   },
-  tools: [searchKnowledgeTool, readDocumentTool],
+  tools: [searchKnowledgeTool, readDocumentTool, linkedDocumentsTool],
   instructions:
     'Knowledge base: for any question about what the team\'s documents say, call search_knowledge first. ' +
     'Results are passages; call read_document with a Document ID when you need the whole document. ' +
+    'Documents link to each other: linked_documents follows those links from a result to the pages around it. ' +
     'Each result shows the document date: say how old a figure is rather than presenting it as current.',
   async start({ state, log }) {
     // HTTP server: scan the folders now and then on a timer. KNOWLEDGE_SCAN_ENABLED=false turns it off.

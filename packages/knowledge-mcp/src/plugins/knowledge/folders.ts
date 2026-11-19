@@ -28,6 +28,7 @@ import { backfillVectors, deleteFileVectors, indexText } from '../drive/indexer.
 import { DRIVE_COLLECTION, ensureCollection, getLocalIndex, getQdrantClient, vectorProblem } from '../drive/qdrant.js';
 import { embeddingsConfigured } from '../drive/embeddings.js';
 import { MAX_FILE_BYTES } from '../drive/settings.js';
+import { linksOfFile, readLinkMap, writeLinkMap, type DocEntry, type LinkMap } from './graph.js';
 
 export const LOCAL_PREFIX = 'local:';
 /** A scan stops listing after this many files, so pointing at a huge tree cannot exhaust memory. */
@@ -215,17 +216,27 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
     const r: FolderScanResult = { folders: folders.length, files: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0, errored: 0, unreadable: [] };
     const seen = new Set<string>();
     const keepPrefixes: string[] = [];
+    // What each document links to (graph.ts), written down beside the index: a document that has not changed
+    // keeps what was read from it last time.
+    const linksBefore = readLinkMap();
+    const linksNow: LinkMap = { version: 1, folders: {} };
 
     for (const folder of folders) {
+      const known: Record<string, DocEntry> = linksBefore.folders[folder.name] ?? {};
       let listing: Awaited<ReturnType<typeof listLocalFiles>>;
       try {
         listing = await listLocalFiles(folder);
       } catch (e) {
         r.unreadable.push(folder.path);
         keepPrefixes.push(`${LOCAL_PREFIX}${folder.name}/`);
+        linksNow.folders[folder.name] = known;
         log(`folder ${folder.path} cannot be read (${e instanceof Error ? e.message : e}); its documents are kept`);
         continue;
       }
+      // Not every file was listed: what is not seen is not gone, so what was known stays.
+      const links: Record<string, DocEntry> = listing.truncated ? { ...known } : {};
+      linksNow.folders[folder.name] = links;
+      const inFolder = (path: string) => path.slice(folder.name.length + 1);
       if (listing.truncated) {
         // Not every file was listed, so "not seen" does not mean "gone".
         keepPrefixes.push(`${LOCAL_PREFIX}${folder.name}/`);
@@ -234,8 +245,10 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
       for (const file of listing.files) {
         r.files++;
         seen.add(file.id);
+        const rel = inFolder(file.path);
         if (indexed.get(file.id) === file.modifiedTime) {
           r.unchanged++;
+          links[rel] = await linksOfFile(file, known[rel]);
           continue;
         }
         if (noText.get(file.id) === file.modifiedTime) {
@@ -252,12 +265,15 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
           }
           await indexText({ id: file.id, name: file.name, path: file.path, modifiedTime: file.modifiedTime, source: folder.source, mimeType: file.mimeType, size: file.size }, text, undefined, { vectors: false });
           r.indexed++;
+          links[rel] = await linksOfFile(file, known[rel]);
         } catch (e) {
           r.errored++;
+          if (known[rel]) links[rel] = known[rel];
           log(`could not index ${file.path}: ${e instanceof Error ? e.message : e}`);
         }
       }
     }
+    if (JSON.stringify(linksNow) !== JSON.stringify(linksBefore)) writeLinkMap(linksNow);
 
     for (const id of indexed.keys()) {
       if (seen.has(id) || keepPrefixes.some((p) => id.startsWith(p))) continue;

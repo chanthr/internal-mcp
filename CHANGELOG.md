@@ -47,6 +47,17 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A knowledge graph, read from the links people wrote.** Documents in the local folders are connected by
+  their wiki links (`[[Note]]`, as Obsidian writes them), their Markdown links to documents and the header fields
+  that name documents (`related`, `parent`, any field). No model is involved, and an Obsidian vault added as a
+  folder brings its graph with it. The new tool `linked_documents` follows the links from a document in both
+  directions, or lists the documents most others link to; `search_knowledge` says which results are linked. The
+  console has a *Graph* page: the numbers, a view around any document, and the loose ends (links to a document
+  that is not there, documents nothing links to). On a 500-file wiki the links are read in 0.14 s and the graph
+  is built in 6 ms; only a document that changed is read again.
+- **Drop files on the console.** *Documents* takes files and whole folders by drag and drop (or a file picker).
+  They are copied into `uploads/` beside the settings, which becomes a folder like any other: searchable at
+  once and part of the graph. Only the file types that can be searched are taken.
 - **Add an app that has an MCP server of its own.** In the console, *Apps → Add an app*: pick Notion,
   Supabase, Linear, Atlassian, Sentry, Vercel, Stripe, Airtable, Figma and others from a list, or give the
   address of any MCP server. Where the server follows MCP's sign-in rules, this server registers itself there

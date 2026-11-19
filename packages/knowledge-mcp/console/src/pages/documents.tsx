@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { call, signIn, type Changed } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import { call, signIn, uploadFile, type Changed } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -35,6 +35,7 @@ function Folders() {
             </Button>
           </Row>
         ))}
+        <Upload />
         <form
           className="row-form"
           onSubmit={(e) => {
@@ -133,6 +134,118 @@ function Drive() {
       </div>
       {open && <ConnectDrive onClose={() => setOpen(false)} onFound={setFound} />}
     </Section>
+  );
+}
+
+/** The file types that can be searched, and the largest file the server takes. */
+const CAN_SEARCH = /\.(md|markdown|mdx|txt|pdf|docx|pptx|xlsx)$/i;
+const MAX_BYTES = 50_000_000;
+interface Picked {
+  file: File;
+  /** Where it goes inside uploads/: its name, or its path inside a dropped folder. */
+  path: string;
+}
+
+/** Everything under what was dropped: files as they are, folders walked to the bottom. */
+async function dropped(items: DataTransferItemList): Promise<Picked[]> {
+  type Entry = { isFile: boolean; isDirectory: boolean; fullPath: string; file?: (ok: (f: File) => void, no: (e: unknown) => void) => void; createReader?: () => { readEntries: (ok: (e: Entry[]) => void, no: (e: unknown) => void) => void } };
+  const out: Picked[] = [];
+  const walk = async (entry: Entry): Promise<void> => {
+    if (entry.isFile && entry.file) {
+      const file = await new Promise<File>((ok, no) => entry.file!(ok, no));
+      out.push({ file, path: entry.fullPath.replace(/^\/+/, '') });
+    } else if (entry.isDirectory && entry.createReader) {
+      const reader = entry.createReader();
+      // A folder is read a batch at a time until a batch comes back empty.
+      for (;;) {
+        const batch = await new Promise<Entry[]>((ok, no) => reader.readEntries(ok, no));
+        if (batch.length === 0) break;
+        for (const e of batch) await walk(e);
+      }
+    }
+  };
+  const entries = [...items].map((i) => (i.kind === 'file' ? ((i as unknown as { webkitGetAsEntry?: () => Entry | null }).webkitGetAsEntry?.() ?? null) : null)).filter((e): e is Entry => !!e);
+  for (const e of entries) await walk(e);
+  return out;
+}
+
+function Upload() {
+  const { state, apply } = useServer();
+  const [over, setOver] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [result, setResult] = useState<string | null>(null);
+  const up = useAction();
+  const files = useRef<HTMLInputElement>(null);
+  const folder = useRef<HTMLInputElement>(null);
+  // "Choose a folder" is a non-standard attribute of file inputs that every desktop browser has.
+  useEffect(() => folder.current?.setAttribute('webkitdirectory', ''), []);
+
+  const send = (picked: Picked[]) =>
+    void up.run(async () => {
+      setResult(null);
+      const hidden = (path: string) => path.split('/').some((part) => part.startsWith('.'));
+      const fit = picked.filter((p) => CAN_SEARCH.test(p.path) && p.file.size <= MAX_BYTES && !hidden(p.path));
+      if (fit.length === 0) throw new Error('None of these can be searched. Markdown, text, PDF, Word, PowerPoint and Excel files can.');
+      setProgress({ done: 0, total: fit.length });
+      let done = 0;
+      let refused = picked.length - fit.length;
+      let why = '';
+      const queue = [...fit];
+      // A few at a time: fast enough, and a folder of thousands does not open thousands of requests.
+      await Promise.all(
+        [0, 1, 2].map(async () => {
+          for (let p = queue.shift(); p; p = queue.shift()) {
+            try {
+              await uploadFile(p.path, p.file);
+            } catch (e) {
+              refused++;
+              why = e instanceof Error ? e.message : String(e);
+            }
+            setProgress({ done: ++done, total: fit.length });
+          }
+        }),
+      );
+      setProgress(null);
+      const added = picked.length - refused;
+      if (added === 0) throw new Error(why || 'The files could not be saved.');
+      await apply(() => call<Changed>('POST', '/uploads/done'));
+      setResult(`${added.toLocaleString()} file${added === 1 ? '' : 's'} added.${refused ? ` ${refused.toLocaleString()} left out (another type, hidden, or over 50 MB).` : ''}`);
+    });
+  const fromInput = (list: FileList | null) => {
+    if (list?.length) send([...list].map((file) => ({ file, path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name })));
+  };
+  const busy = up.busy || !state.editable;
+  return (
+    <div className="row-form">
+      <div
+        className="drop"
+        data-over={over || undefined}
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!busy) setOver(true);
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setOver(false);
+          if (busy) return;
+          const items = e.dataTransfer.items;
+          void dropped(items).then(send, () => fromInput(e.dataTransfer.files));
+        }}
+      >
+        <div>
+          <div className="drop-title">{progress ? `Uploading ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : up.busy ? 'Reading the files' : 'Drop files or folders here'}</div>
+          <div className="drop-help">Copied into uploads/ beside your settings, and searchable right away.</div>
+        </div>
+        <div className="actions">
+          <Button size="sm" variant="secondary" disabled={busy} onClick={() => files.current?.click()}>Choose files</Button>
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => folder.current?.click()}>Choose a folder</Button>
+        </div>
+        <input ref={files} type="file" multiple hidden accept=".md,.markdown,.mdx,.txt,.pdf,.docx,.pptx,.xlsx" onChange={(e) => { fromInput(e.target.files); e.target.value = ''; }} />
+        <input ref={folder} type="file" multiple hidden onChange={(e) => { fromInput(e.target.files); e.target.value = ''; }} />
+      </div>
+      {up.error ? <p className="error" role="alert">{up.error}</p> : result && <p className="field-help">{result}</p>}
+    </div>
   );
 }
 
