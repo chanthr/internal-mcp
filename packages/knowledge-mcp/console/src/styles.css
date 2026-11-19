@@ -88,6 +88,8 @@ p { margin: 0; }
 .inline { display: flex; align-items: flex-end; gap: 8px; }
 .field-help { color: var(--muted); font-size: 12px; margin-top: -4px; }
 .inline > :first-child { flex: 1; min-width: 0; }
+/* A button that reads as a link inside a sentence */
+.link-button { appearance: none; border: 0; padding: 0; background: none; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 /* A choice in a list row: the radio and its label on one line */
 .radio-line { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .radio-line input { margin: 0; accent-color: var(--text); }

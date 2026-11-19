@@ -108,7 +108,7 @@ npm run dev                    # in a generated project: the address is in the f
 | Graph | How your documents point at each other: the links people wrote, with the most linked documents, a view around any one document, and the loose ends (links to nowhere, documents nothing links to) |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
 | Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |
-| Agent | Connect a language model for work the server does by itself: Claude (Anthropic), OpenRouter, OpenAI, a model on this machine through Ollama, or any endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list and checked with one question before it is saved. Until a model is connected the server calls none |
+| Agent | Connect a language model for work the server does by itself: your ChatGPT Plus or Pro plan (Continue with ChatGPT, no key), Claude (Anthropic), OpenRouter, OpenAI, a model on this machine through Ollama, or any endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list and checked with one question before it is saved. Until a model is connected the server calls none |
 | Chat | Ask the model connected on the Agent page, and watch it answer with this server's tools: each call and what it returned, as it happens. It gets the tools that only read and the instructions every client gets. Nothing is saved |
 | Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
 | Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
@@ -150,6 +150,22 @@ this machine that asks for `localhost`, and its API needs a token the server cre
 (`<data dir>/console-token`) and prints as part of the address. The page never shows a secret: it says that a
 token is set, not what it is. Whoever holds the console token is the admin of this server, so keep it like a
 password. `KNOWLEDGE_CONSOLE=off` turns the console off.
+
+### Your ChatGPT plan as the model
+
+On the Agent page, choose **ChatGPT account (Plus or Pro)** and press **Continue with ChatGPT**. OpenAI opens in a new
+tab: sign in and allow Knowledge MCP. The models your plan includes are listed; pick one and save. No API key is
+needed, and nothing is billed apart from the plan.
+
+| | |
+| --- | --- |
+| How | OpenAI's sign-in for open-source apps on your own machine ([guide](https://developers.openai.com/siwc/token-sharing-open-source)): OAuth with PKCE, the browser comes back to `http://127.0.0.1:<port>/console/login/chatgpt`, the ID token is checked against OpenAI's keys |
+| Usage | Counts against your plan. See it, and limit it for this app, in [ChatGPT settings, Usage](https://chatgpt.com/settings/usage) |
+| Kept | `chatgpt-account.json` in the data directory, readable only by you. The access token is renewed before it runs out; `.env` holds only `LLM_PROVIDER=chatgpt` and `LLM_MODEL` |
+| Sign out | In the same dialog. The session is ended at OpenAI and the tokens are deleted here |
+
+A Claude Pro or Max plan cannot be used the same way: Anthropic does not allow other apps to use a Claude
+subscription's sign-in. Use Claude with an API key, or connect this server to Claude instead (Connect a client).
 
 ### A wiki written from your documents
 
@@ -792,7 +808,7 @@ Node by its full path and the server starts there too.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
-   A language model connected on the Agent page is sent the text of your documents while a job on that page runs, and at no other time. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page.
+   A language model connected on the Agent page is sent the text of your documents while a job on that page runs, and at no other time. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.

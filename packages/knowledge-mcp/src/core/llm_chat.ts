@@ -10,7 +10,8 @@
  * Nothing is kept here: the caller sends the conversation so far (the text of each turn) with every message.
  */
 import Anthropic from '@anthropic-ai/sdk';
-import { CALL_TIMEOUT_MS, claude, claudeError, HAS_FALLBACK, host, LlmError, openaiError, type LlmSettings } from './llm.js';
+import { asLlmError, CALL_TIMEOUT_MS, claude, claudeError, HAS_FALLBACK, host, LlmError, openaiError, type LlmSettings } from './llm.js';
+import { chatgptResponses } from './chatgpt.js';
 
 export interface ChatTool {
   name: string;
@@ -299,7 +300,66 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
   }
 }
 
+// ── A ChatGPT plan: the Responses API, through OpenAI's sign-in ──
+
+/** The namespace the server's tools are grouped in: the plan route takes function tools only inside one. */
+const NAMESPACE = 'knowledge_mcp';
+
+async function chatChatgpt(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
+  const tools = req.tools.length
+    ? [{ type: 'namespace', name: NAMESPACE, description: "This server's tools: documents, connected apps and data.", tools: req.tools.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: schemaOf(t.inputSchema), strict: false })) }]
+    : [];
+  // Nothing is kept at OpenAI (store: false): every request carries the conversation so far.
+  const input: Array<Record<string, unknown>> = [...req.history.map((h) => ({ role: h.role, content: h.text })), { role: 'user', content: req.message }];
+  const usage: ChatUsage = { input: 0, output: 0, cached: 0, steps: 0 };
+  let model = s.model;
+  for (;;) {
+    if (usage.steps >= (req.maxSteps ?? STEPS)) return { model, usage, note: `Stopped after ${usage.steps} rounds of tool calls.` };
+    let text = '';
+    const calls: Array<Record<string, unknown>> = [];
+    try {
+      for await (const e of chatgptResponses({ model: s.model, instructions: req.system, input, ...(tools.length ? { tools } : {}) }, req.signal)) {
+        if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') {
+          text += e.delta;
+          req.emit({ type: 'text', text: e.delta });
+        } else if (e.type === 'response.reasoning_summary_text.delta' || e.type === 'response.reasoning_text.delta') {
+          req.emit({ type: 'thinking' });
+        } else if (e.type === 'response.output_item.done' && e.item?.type === 'function_call') {
+          calls.push(e.item);
+        } else if (e.type === 'response.completed') {
+          model = e.response?.model ?? model;
+          usage.input += e.response?.usage?.input_tokens ?? 0;
+          usage.output += e.response?.usage?.output_tokens ?? 0;
+          usage.cached += e.response?.usage?.input_tokens_details?.cached_tokens ?? 0;
+        }
+      }
+    } catch (e) {
+      if (req.signal.aborted) throw e;
+      throw asLlmError(e);
+    }
+    if (calls.length === 0) return { model, usage, note: null };
+    usage.steps++;
+    if (text) input.push({ role: 'assistant', content: text });
+    for (const c of calls) {
+      // The call goes back as it came, without its item ID: without stored reasoning, an ID would ask for it.
+      const { id: _id, status: _status, ...call } = c;
+      input.push(call);
+      const name = String(c.name ?? '').replace(new RegExp(`^${NAMESPACE}[.:/_]{1,2}`), '');
+      const callId = String(c.call_id ?? '');
+      let args: Record<string, unknown> | null = null;
+      try {
+        args = objectOf(JSON.parse(String(c.arguments ?? '{}')));
+      } catch {
+        /* answered below */
+      }
+      const r = args ? await callTool(req, callId, name, args) : { ok: false, text: 'The arguments were not valid JSON. Call the tool again with a JSON object.' };
+      input.push({ type: 'function_call_output', call_id: callId, output: r.ok ? r.text : `Error: ${r.text}` });
+    }
+  }
+}
+
 /** One message of the conversation, answered with the tools, streamed through `emit`. */
 export async function converse(req: ChatRequest, settings: LlmSettings): Promise<ChatEnd> {
+  if (settings.kind === 'chatgpt') return chatChatgpt(settings, req);
   return settings.kind === 'anthropic' ? chatClaude(settings, req) : chatOpenai(settings, req);
 }
