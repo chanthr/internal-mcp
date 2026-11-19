@@ -15,13 +15,17 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { backgroundExec, hasTool, type Exec } from '../setup/auto.js';
 
-export type CliTool = 'gcloud' | 'gh';
+export type CliTool = 'gcloud' | 'gh' | 'cloudflared';
 export type CliAction = 'install' | 'sign-in';
-export const CLI_TOOLS: readonly CliTool[] = ['gcloud', 'gh'];
+export const CLI_TOOLS: readonly CliTool[] = ['gcloud', 'gh', 'cloudflared'];
 export const CLI_ACTIONS: readonly CliAction[] = ['install', 'sign-in'];
 
 /** The tool's own instructions, for a machine this cannot install on. */
-const PAGE: Record<CliTool, string> = { gcloud: 'https://cloud.google.com/sdk/docs/install', gh: 'https://cli.github.com/' };
+const PAGE: Record<CliTool, string> = {
+  gcloud: 'https://cloud.google.com/sdk/docs/install',
+  gh: 'https://cli.github.com/',
+  cloudflared: 'https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/',
+};
 
 const SIGN_IN: Record<CliTool, string[]> = {
   // gcloud opens the browser by itself and listens for the answer. --quiet: it never waits for a reply on a
@@ -29,7 +33,10 @@ const SIGN_IN: Record<CliTool, string[]> = {
   gcloud: ['gcloud', 'auth', 'login', '--brief', '--quiet'],
   // Without a terminal gh prints a one-time code and the address to type it at, and waits for GitHub.
   gh: ['gh', 'auth', 'login', '--hostname', 'github.com', '--web'],
+  // cloudflared opens the browser, the person picks the domain, and it keeps the certificate it is given.
+  cloudflared: ['cloudflared', 'tunnel', 'login'],
 };
+const WINGET: Record<CliTool, string> = { gcloud: 'Google.CloudSDK', gh: 'GitHub.cli', cloudflared: 'Cloudflare.cloudflared' };
 
 /**
  * The command that installs the tool on this machine, or null when it has no package manager this knows.
@@ -38,10 +45,10 @@ const SIGN_IN: Record<CliTool, string[]> = {
 export async function installCommand(tool: CliTool, exec: Exec = backgroundExec, platform: NodeJS.Platform = process.platform): Promise<string[] | null> {
   if (platform === 'win32') {
     if (!(await hasTool(exec, 'winget'))) return null;
-    return ['winget', 'install', '--id', tool === 'gh' ? 'GitHub.cli' : 'Google.CloudSDK', '-e', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements'];
+    return ['winget', 'install', '--id', WINGET[tool], '-e', '--source', 'winget', '--accept-source-agreements', '--accept-package-agreements'];
   }
   if (!(await hasTool(exec, 'brew'))) return null;
-  if (tool === 'gh') return ['brew', 'install', 'gh'];
+  if (tool === 'gh' || tool === 'cloudflared') return ['brew', 'install', tool];
   return platform === 'darwin' ? ['brew', 'install', '--cask', 'gcloud-cli'] : null;
 }
 

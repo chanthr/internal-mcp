@@ -80,7 +80,10 @@ const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 /** Why this request may not reach the console, or null when it may. */
 export function refusal(req: Pick<Request, 'socket' | 'headers'>): string | null {
   if (!LOOPBACK.has(req.socket.remoteAddress ?? '')) return 'The console only answers on the machine the server runs on.';
-  if (req.headers['x-forwarded-for'] || req.headers.forwarded || req.headers['x-real-ip']) return 'The console is not served through a proxy.';
+  // What a proxy or a tunnel adds. Cloudflare's own headers are among them: a tunnel set up to say "localhost" as
+  // the host still marks what it carries.
+  const h = req.headers;
+  if (h['x-forwarded-for'] || h.forwarded || h['x-real-ip'] || h['x-forwarded-host'] || h['x-forwarded-proto'] || h['cf-connecting-ip'] || h['cf-ray']) return 'The console is not served through a proxy.';
   if (!LOCAL_HOST.test(String(req.headers.host ?? ''))) return 'Open the console as http://localhost.';
   return null;
 }
