@@ -781,7 +781,7 @@ Node by its full path and the server starts there too.
 | Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
 | Claude Desktop, Cursor, VS Code, local | The same command and `MCP_HOME` in the client's config file, under `command`, `args` and `env` |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
-| Claude web and desktop | Turn on OAuth, then add a custom connector with `https://<host>/mcp` |
+| Claude and ChatGPT connectors | Console → Connect: your own address, then **Sign-in for connectors → Turn on**. Add a custom connector with `https://<host>/mcp`; it asks for a key once ([OAUTH_SETUP.md](OAUTH_SETUP.md)) |
 | Any MCP client | URL `https://<host>/mcp` with header `Authorization: Bearer <key>` |
 
 ## Upgrading from 0.3

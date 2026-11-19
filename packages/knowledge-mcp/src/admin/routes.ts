@@ -27,6 +27,7 @@ import { cli, stdioEntry } from '../core/invocation.js';
 import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
+import { isOAuthConfigured, OAUTH_ISSUER_URL, oauthGoogleProblems, oauthSignIns } from '../core/oauth.js';
 import { CALLBACK_PATH, chatgptView, finishChatgptSignIn, signOutChatgpt, startChatgptSignIn } from '../core/chatgpt.js';
 import { checkOcr, ocrIsLocal, ocrPrompt, ocrSettings, type OcrSettings } from '../plugins/drive/ocr.js';
 import { ocrRun, ocrWaiting, startOcrRun, stopOcrRun } from '../plugins/knowledge/ocr_run.js';
@@ -208,6 +209,12 @@ function nodeView(g: Graph, n: GraphNode) {
 
 /** How Railway is connected: a token in the environment wins over a sign-in. */
 /** The model the server uses for its own work: which one and where, never the key. */
+/** Sign-in for connectors, as the console shows it. Names only, never values. */
+function connectorsView(): { on: boolean; address: string | null; google: boolean; googleMissing: string[] } {
+  const on = isOAuthConfigured();
+  return { on, address: on ? OAUTH_ISSUER_URL : process.env.MCP_OAUTH_ISSUER?.trim() || null, google: on && oauthSignIns().google, googleMissing: oauthGoogleProblems() };
+}
+
 function llmView(): { set: boolean; provider: LlmKind | null; model: string | null; baseUrl: string | null; keySet: boolean } {
   const s = llmSettings();
   const provider = process.env.LLM_PROVIDER?.trim();
@@ -449,6 +456,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         upstreams: upstreamViews(dir, registry),
         // A sign-in that came back from another site and waits to be saved: the page saves it when it sees this.
         login: loginWaiting(),
+        // Sign-in for connectors (Claude, ChatGPT): on with a public address and a signing secret (core/oauth.ts).
+        connectors: connectorsView(),
       });
     }),
   );
@@ -967,6 +976,34 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/llm/models',
     wrap(async (req, res) => {
       res.json({ models: await listLlmModels(llmFrom(llmBody.parse(req.body))) });
+    }),
+  );
+  // ── Sign-in for connectors: Claude and ChatGPT add the server by its address and sign in with a key ──
+  // On: the public address becomes the OAuth issuer, and a signing secret is made the first time. The address must
+  // be https (a connector refuses anything else), or this machine for trying it.
+  const connectorsBody = z.object({ address: webUrl(300) });
+  api.post(
+    '/connectors',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const u = new URL(connectorsBody.parse(req.body).address);
+      const local = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+      if (u.protocol !== 'https:' && !local) return refuse(res, 400, 'Connectors need an https address.');
+      const secret = (process.env.OAUTH_JWT_SECRET ?? '').trim();
+      updateEnvFile(join(settingsDir(), '.env'), {
+        MCP_OAUTH_ISSUER: u.origin,
+        ...(secret.length >= 32 ? {} : { OAUTH_JWT_SECRET: randomBytes(32).toString('base64url') }),
+      });
+      change(res, { note: `Connectors can sign in at ${u.origin}/mcp with a key.` });
+    }),
+  );
+  api.delete(
+    '/connectors',
+    wrap(async (_req, res) => {
+      if (!mustEdit(res)) return;
+      // The secret stays: turned on again, tokens already given out work again too. The address goes.
+      updateEnvFile(join(settingsDir(), '.env'), { MCP_OAUTH_ISSUER: undefined });
+      change(res);
     }),
   );
   // ── A ChatGPT plan as the model: "Continue with ChatGPT" (core/chatgpt.ts) ──

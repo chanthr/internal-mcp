@@ -9,20 +9,26 @@
  *           Anyone can register a client through DCR, so without consent one link would send the token to an
  *           attacker's redirect_uri (the confused deputy problem in the MCP security best practices). The approve
  *           button is bound to a cookie so that another site cannot press it on the user's behalf.
- *   - Sign-in: bridged to Google Workspace (OIDC). The account must match an allowed domain (hd) or an allowed email.
+ *   - Sign-in, two ways:
+ *       key     The person types a key from the console's People and keys. Always on: a key is what lets anyone
+ *               in over HTTP already, so a connector needs nothing more to set up. Tokens issued this way name the
+ *               key, and stop working when the key is revoked or expires.
+ *       Google  Bridged to Google Workspace (OIDC), when a Google client and an allowlist are set. The account must
+ *               match an allowed domain (hd) or an allowed email.
  *   - Tokens: access and refresh tokens are self-issued HS256 JWTs (AS = RS, so no JWKS to publish; verified
  *           in-process with a symmetric key).
  *           The access token aud is the canonical resource (our /mcp). RFC 8707.
  *   - PKCE (S256): the SDK token handler gets the challenge from challengeForAuthorizationCode() and verifies it itself.
  *
- * Graceful: if a required value is missing, isOAuthConfigured() is false and server/http.ts does not mount the router
- *   (existing Bearer auth is unaffected).
- *   The allowlist (domains, emails) is also required. If both are empty, any Google account could sign in, so OAuth
- *   stays off.
+ * Graceful: without the public address (MCP_OAUTH_ISSUER) and the signing secret, isOAuthConfigured() is false and
+ *   server/http.ts does not mount the router (existing Bearer auth is unaffected).
+ *   Google sign-in also needs its allowlist (domains, emails): with both empty any Google account could sign in, so
+ *   the Google way stays off (the key way does not depend on it).
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
 import { getStore } from '../store/index.js';
+import type { KeyInfo } from '../store/types.js';
 import { getConfig } from './config.js';
 import { timingSafeEqualStr } from './auth.js';
 import type { Response } from 'express';
@@ -85,13 +91,26 @@ const GOOGLE_JWKS = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth
 export function oauthConfigProblems(): string[] {
   const out: string[] = [];
   if (!ISSUER) out.push('MCP_OAUTH_ISSUER');
+  if (JWT_SECRET.length < 32) out.push('OAUTH_JWT_SECRET (>= 32 chars)');
+  return out;
+}
+
+/** Google sign-in: a client and an allowlist. Without them the consent page offers the key only. */
+const GOOGLE_READY = Boolean(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && (ALLOWED_DOMAINS.length || ALLOWED_EMAILS.length));
+
+/** What a half-set Google sign-in still lacks (names only). Reported, not fatal: the key way works without it. */
+export function oauthGoogleProblems(): string[] {
+  if (GOOGLE_READY || !(GOOGLE_CLIENT_ID || GOOGLE_CLIENT_SECRET)) return [];
+  const out: string[] = [];
   if (!GOOGLE_CLIENT_ID) out.push('OAUTH_GOOGLE_CLIENT_ID');
   if (!GOOGLE_CLIENT_SECRET) out.push('OAUTH_GOOGLE_CLIENT_SECRET');
-  if (JWT_SECRET.length < 32) out.push('OAUTH_JWT_SECRET (>= 32 chars)');
-  if (ALLOWED_DOMAINS.length === 0 && ALLOWED_EMAILS.length === 0) {
-    out.push('OAUTH_ALLOWED_HD or OAUTH_ALLOWED_EMAILS (config oauth.allowedDomains / allowedEmails)');
-  }
+  if (ALLOWED_DOMAINS.length === 0 && ALLOWED_EMAILS.length === 0) out.push('OAUTH_ALLOWED_HD or OAUTH_ALLOWED_EMAILS (config oauth.allowedDomains / allowedEmails)');
   return out;
+}
+
+/** The ways the consent page offers. */
+export function oauthSignIns(): { key: boolean; google: boolean } {
+  return { key: true, google: GOOGLE_READY };
 }
 
 /** Whether anyone tried to configure OAuth at all. Used to report a half-configured state loudly in the boot log. */
@@ -115,7 +134,10 @@ interface AuthCodeEntry {
   codeChallenge: string;
   clientId: string;
   redirectUri: string;
+  /** Who: the Google account, or the email of the key's person (empty when the key names nobody). */
   email: string;
+  /** Approved with this key (People and keys). */
+  keyId?: string;
   scopes: string[];
   resource?: string;
   exp: number;
@@ -134,7 +156,12 @@ interface GooglePending extends LoginRequest {
 }
 interface ConsentPending extends LoginRequest {
   csrf: string; // cookie set by the consent page; the POST form value and the cookie must both match it to approve
+  /** Wrong keys typed for this request. At KEY_TRIES the request is ended. */
+  tries: number;
+  appName: string;
 }
+/** Wrong keys one consent page takes before the request is ended. */
+const KEY_TRIES = 5;
 
 const _authCodes = new Map<string, AuthCodeEntry>();
 const _googlePending = new Map<string, GooglePending>();
@@ -144,8 +171,11 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 }
 
-/** Consent page HTML. Shows the app name and the address the token will be sent to, as they are. */
-function consentPage(opts: { appName: string; clientId: string; redirectUri: string; id: string; csrf: string }): string {
+/**
+ * Consent page HTML. Shows the app name and the address the token will be sent to, as they are, and the ways to sign
+ * in: a key from People and keys, and Google when it is set up.
+ */
+function consentPage(opts: { appName: string; clientId: string; redirectUri: string; id: string; csrf: string; error?: string }): string {
   const server = escapeHtml(getConfig().branding.name);
   const app = escapeHtml(opts.appName);
   let target = opts.redirectUri;
@@ -155,26 +185,36 @@ function consentPage(opts: { appName: string; clientId: string; redirectUri: str
   } catch {
     /* The URL was validated at registration. If parsing still fails, show the original string. */
   }
+  const action = escapeHtml(ISSUER + CONSENT_PATH);
+  const hidden = `<input type="hidden" name="id" value="${escapeHtml(opts.id)}"><input type="hidden" name="csrf" value="${escapeHtml(opts.csrf)}">`;
+  const google = GOOGLE_READY
+    ? `<div class="or">or</div><form method="post" action="${action}">${hidden}<button type="submit" name="action" value="approve">Continue with Google</button></form>`
+    : '';
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>${server} sign-in</title>
 <style>
 body{margin:0;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f6f4;color:#111}
-main{max-width:440px;margin:12vh auto;padding:32px;background:#fff;border:1px solid #e3e3df;border-radius:14px}
+main{max-width:440px;margin:10vh auto;padding:32px;background:#fff;border:1px solid #e3e3df;border-radius:14px}
 h1{font-size:20px;margin:0 0 16px}p{margin:0 0 12px;color:#444}code{word-break:break-all;background:#f1f1ee;padding:2px 6px;border-radius:6px}
-.row{display:flex;gap:12px;margin-top:24px}button{flex:1;font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #c8cbd0;background:#fff;cursor:pointer}
-button[value=approve]{background:#111;color:#fff;border-color:#111}
+label{display:block;font-size:14px;font-weight:600;margin:20px 0 6px}
+input[type=password]{box-sizing:border-box;width:100%;font:inherit;padding:10px 12px;border:1px solid #c8cbd0;border-radius:10px}
+.hint{font-size:13px;color:#666;margin:6px 0 0}.error{color:#b42318;font-size:14px;margin:8px 0 0}
+.row{display:flex;gap:12px;margin-top:16px}button{flex:1;width:100%;font:inherit;padding:10px 14px;border-radius:10px;border:1px solid #c8cbd0;background:#fff;cursor:pointer}
+button[value=key]{background:#111;color:#fff;border-color:#111}.or{text-align:center;color:#888;font-size:13px;margin:16px 0}
 </style></head><body><main>
 <h1>${app} wants to use ${server}</h1>
-<p>If you continue, you sign in with Google and this app receives a token that can read what your account can read.</p>
+<p>If you continue, this app receives a token that can read what you can read on this server.</p>
 <p>The token is sent to:<br><code>${escapeHtml(target)}</code></p>
 <p>Client ID: <code>${escapeHtml(opts.clientId)}</code></p>
 <p>Continue only if you started this connection yourself.</p>
-<form method="post" action="${escapeHtml(ISSUER + CONSENT_PATH)}">
-<input type="hidden" name="id" value="${escapeHtml(opts.id)}">
-<input type="hidden" name="csrf" value="${escapeHtml(opts.csrf)}">
-<div class="row"><button type="submit" name="action" value="deny">Cancel</button>
-<button type="submit" name="action" value="approve">Continue with Google</button></div>
-</form></main></body></html>`;
+<form method="post" action="${action}">${hidden}
+<label for="key">Key</label>
+<input id="key" type="password" name="key" autocomplete="current-password" required autofocus>
+<p class="hint">A key from the server's console, People and keys. The app never sees it.</p>
+${opts.error ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>` : ''}
+<div class="row"><button type="submit" name="action" value="deny" formnovalidate>Cancel</button>
+<button type="submit" name="action" value="key">Continue</button></div>
+</form>${google}</main></body></html>`;
 }
 
 /** URL that returns an OAuth error to the client redirect_uri. */
@@ -184,6 +224,51 @@ function clientError(p: LoginRequest, error: string, description: string): strin
   u.searchParams.set('error_description', description);
   if (p.clientState) u.searchParams.set('state', p.clientState);
   return u.toString();
+}
+
+/**
+ * Headers of the consent page: never cached, never framed, nothing loaded. No form-action: Chromium applies it to the
+ * redirect that follows the form too, so it would stop the way back to the connector and to Google.
+ */
+function setConsentHeaders(res: Response): void {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Frame-Options', 'DENY'); // blocks clickjacking (the approve button pressed through a transparent iframe)
+  res.setHeader('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'");
+}
+export { setConsentHeaders };
+
+/**
+ * Whether a key (People and keys) is still active and unexpired: what a key-approved token rests on. The list is
+ * read at most once a minute, like the key check of the Bearer path (core/auth.ts), so a revoke takes effect within
+ * a minute. A store outage fails closed.
+ */
+const KEYS_TTL_MS = 60_000;
+let _keys: { at: number; list: Map<string, { role: KeyInfo['role']; email: string | null; active: boolean; expiresAt: string | null }> } | null = null;
+async function keyStanding(id: string): Promise<{ role: KeyInfo['role']; email: string | null } | null> {
+  const read = async (): Promise<boolean> => {
+    try {
+      const list = await (await getStore()).listKeys();
+      _keys = { at: Date.now(), list: new Map(list.map((k) => [k.id, { role: k.role, email: k.email, active: k.active, expiresAt: k.expiresAt }])) };
+      return true;
+    } catch (e) {
+      console.error('[oauth] could not read the keys (store unavailable):', e instanceof Error ? e.message : e);
+      return false;
+    }
+  };
+  if ((!_keys || Date.now() - _keys.at > KEYS_TTL_MS) && !(await read())) return null;
+  // A key made after the list was read: read it again once (at most once a second), so a new key works at once.
+  if (!_keys!.list.has(id) && Date.now() - _keys!.at > 1000 && !(await read())) return null;
+  const k = _keys!.list.get(id);
+  if (!k || !k.active) return null;
+  if (k.expiresAt) {
+    const until = Date.parse(k.expiresAt);
+    if (!Number.isFinite(until) || until <= Date.now()) return null;
+  }
+  return { role: k.role, email: k.email };
+}
+/** For tests: read the keys again on the next check. */
+export function forgetKeyStanding(): void {
+  _keys = null;
 }
 
 function sweep<T extends { exp: number }>(m: Map<string, T>): void {
@@ -341,6 +426,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     sweep(_consentPending);
     const id = randomBytes(18).toString('base64url');
     const csrf = randomBytes(24).toString('base64url');
+    const appName = typeof client.client_name === 'string' && client.client_name ? client.client_name : 'An app';
     _consentPending.set(id, {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
@@ -350,6 +436,8 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       resource: params.resource?.href,
       exp: Date.now() / 1000 + CONSENT_TTL,
       csrf,
+      tries: 0,
+      appName,
     });
     const secure = ISSUER.startsWith('https://') ? '; Secure' : '';
     // SameSite=Lax: the cookie is not sent on a POST auto-submitted by another site, so that site cannot approve for
@@ -358,38 +446,32 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       'Set-Cookie',
       `${CONSENT_COOKIE}=${csrf}; Path=${CONSENT_PATH}; Max-Age=${CONSENT_TTL}; HttpOnly; SameSite=Lax${secure}`,
     );
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('X-Frame-Options', 'DENY'); // blocks clickjacking (the approve button pressed through a transparent iframe)
-    res.setHeader(
-      'Content-Security-Policy',
-      "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
-    );
-    res
-      .status(200)
-      .type('html')
-      .send(
-        consentPage({
-          appName: typeof client.client_name === 'string' && client.client_name ? client.client_name : 'An app',
-          clientId: client.client_id,
-          redirectUri: params.redirectUri,
-          id,
-          csrf,
-        }),
-      );
+    setConsentHeaders(res);
+    res.status(200).type('html').send(consentPage({ appName, clientId: client.client_id, redirectUri: params.redirectUri, id, csrf }));
   }
 
   /**
-   * Handles the POST from the consent page (called by POST /oauth/consent in server/http.ts).
-   * Approve: continues to Google sign-in only when the form csrf, the cookie csrf and the stored csrf all match.
-   * Deny: returns access_denied to the client.
-   * A failed check throws, and the caller ends with a 400 (nothing is sent to an attacker's redirect_uri).
+   * Handles the POST from the consent page (called by POST /oauth/consent in server/http.ts). Nothing proceeds unless
+   * the form csrf, the cookie csrf and the stored csrf all match; a failed check throws, and the caller ends with a
+   * 400 (nothing is sent to an attacker's redirect_uri).
+   *   deny     access_denied goes back to the client.
+   *   key      the key is checked against People and keys. Right: our code goes back to the client at once. Wrong:
+   *            the page is shown again with a sentence, and after KEY_TRIES wrong keys the request is ended.
+   *   approve  Google sign-in (only when it is set up).
    *
-   * On approval it returns loginBinding. The caller sets this value as a cookie scoped to the Google callback path.
-   * The callback issues a code only when the same cookie comes back. Without this, an attacker could approve in their
-   * own browser and send only the Google sign-in URL to the victim. The victim would never see the consent page, would
-   * only pick a Google account, and the code would go to the attacker's redirect_uri.
+   * On a Google approval it returns loginBinding. The caller sets this value as a cookie scoped to the Google callback
+   * path. The callback issues a code only when the same cookie comes back. Without this, an attacker could approve in
+   * their own browser and send only the Google sign-in URL to the victim. The victim would never see the consent page,
+   * would only pick a Google account, and the code would go to the attacker's redirect_uri. (A key is typed on this
+   * page itself, so it needs no such binding.)
    */
-  consumeConsent(id: string, formCsrf: string, cookieCsrf: string, approve: boolean): { redirect: string; loginBinding?: string } {
+  async consumeConsent(
+    id: string,
+    formCsrf: string,
+    cookieCsrf: string,
+    action: 'approve' | 'deny' | 'key',
+    key = '',
+  ): Promise<{ redirect: string; loginBinding?: string } | { page: string }> {
     sweep(_consentPending);
     const pending = _consentPending.get(id);
     if (!pending) throw new Error('Unknown or expired request. Start the connection again.');
@@ -401,11 +483,57 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     ) {
       throw new Error('Could not verify this request. Start the connection again.');
     }
+    if (action === 'deny') {
+      _consentPending.delete(id);
+      return { redirect: clientError(pending, 'access_denied', 'user cancelled') };
+    }
+    if (action === 'key') {
+      const again = (error: string) => ({ page: consentPage({ appName: pending.appName, clientId: pending.clientId, redirectUri: pending.redirectUri, id, csrf: pending.csrf, error }) });
+      let check: Awaited<ReturnType<Awaited<ReturnType<typeof getStore>>['validateKey']>>;
+      try {
+        check = await (await getStore()).validateKey(key.trim());
+      } catch (e) {
+        console.error('[oauth] key check failed (store unavailable):', e instanceof Error ? e.message : e);
+        return again('The key could not be checked just now. Try again in a moment.');
+      }
+      if (!check.ok) {
+        pending.tries++;
+        if (pending.tries >= KEY_TRIES) {
+          _consentPending.delete(id);
+          return { redirect: clientError(pending, 'access_denied', 'too many wrong keys') };
+        }
+        return again(`That key was not accepted. ${KEY_TRIES - pending.tries} more ${KEY_TRIES - pending.tries === 1 ? 'try' : 'tries'}.`);
+      }
+      _consentPending.delete(id);
+      // Known from here on: the token works at once even when the key was made after the list was last read.
+      _keys?.list.set(check.keyId, { role: check.role, email: check.email, active: true, expiresAt: null });
+      return { redirect: this.issueCode(pending, (check.email ?? '').toLowerCase(), check.keyId) };
+    }
+    if (!GOOGLE_READY) throw new Error('Google sign-in is not set up on this server. Use a key.');
     _consentPending.delete(id);
-    if (!approve) return { redirect: clientError(pending, 'access_denied', 'user cancelled') };
-    const { csrf: _csrf, ...request } = pending;
+    const { csrf: _csrf, tries: _tries, appName: _app, ...request } = pending;
     const loginBinding = randomBytes(24).toString('base64url');
     return { redirect: this.googleRedirect({ ...request, binding: loginBinding }), loginBinding };
+  }
+
+  /** Our own authorization code (one-time, short TTL), sent back to the client's redirect_uri. */
+  private issueCode(pending: LoginRequest, email: string, keyId?: string): string {
+    sweep(_authCodes);
+    const code = randomBytes(24).toString('base64url');
+    _authCodes.set(code, {
+      codeChallenge: pending.codeChallenge,
+      clientId: pending.clientId,
+      redirectUri: pending.redirectUri,
+      email,
+      keyId,
+      scopes: pending.scopes,
+      resource: pending.resource,
+      exp: Date.now() / 1000 + CODE_TTL,
+    });
+    const u = new URL(pending.redirectUri);
+    u.searchParams.set('code', code);
+    if (pending.clientState) u.searchParams.set('state', pending.clientState);
+    return u.toString();
   }
 
   /** Builds the Google sign-in URL and records the state. */
@@ -471,22 +599,7 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       return redirectErr('access_denied', e instanceof Error ? e.message : 'sign-in failed');
     }
 
-    // Issue our own authorization code (one-time, short TTL)
-    sweep(_authCodes);
-    const code = randomBytes(24).toString('base64url');
-    _authCodes.set(code, {
-      codeChallenge: pending.codeChallenge,
-      clientId: pending.clientId,
-      redirectUri: pending.redirectUri,
-      email,
-      scopes: pending.scopes,
-      resource: pending.resource,
-      exp: Date.now() / 1000 + CODE_TTL,
-    });
-    const u = new URL(pending.redirectUri);
-    u.searchParams.set('code', code);
-    if (pending.clientState) u.searchParams.set('state', pending.clientState);
-    return u.toString();
+    return this.issueCode(pending, email);
   }
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
@@ -509,12 +622,14 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     if (redirectUri && redirectUri !== entry.redirectUri) throw new InvalidGrantError('redirect_uri does not match');
 
     const scope = entry.scopes.join(' ') || SCOPE;
-    const claims = { sub: entry.email, email: entry.email, scope, client_id: client.client_id };
+    // A key that names no person is the token's subject itself.
+    const sub = entry.email || `key:${entry.keyId}`;
+    const claims = { sub, email: entry.email || undefined, scope, client_id: client.client_id, ...(entry.keyId ? { key_id: entry.keyId } : {}) };
     const access_token = await signJwt(claims, ACCESS_TTL, 'access');
     // The refresh token gets a jti that is recorded in the DB, so it can be revoked at once on rotation
     const jti = randomUUID();
     const refresh_token = await signJwt({ ...claims, jti }, REFRESH_TTL, 'refresh');
-    await recordRefreshToken(jti, entry.email, client.client_id);
+    await recordRefreshToken(jti, sub, client.client_id);
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL, scope, refresh_token };
   }
 
@@ -525,6 +640,8 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     _resource?: URL,
   ): Promise<OAuthTokens> {
     let email = '';
+    let subject = '';
+    let keyId = '';
     let jti = '';
     let tokenClientId = '';
     let grantedScopes: string[] = [];
@@ -535,7 +652,9 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
         algorithms: ['HS256'],
       });
       if (payload.typ !== 'refresh') throw new Error('not a refresh token');
-      email = String(payload.email || payload.sub || '');
+      subject = String(payload.sub || payload.email || '');
+      email = typeof payload.email === 'string' ? payload.email : '';
+      keyId = typeof payload.key_id === 'string' ? payload.key_id : '';
       jti = typeof payload.jti === 'string' ? payload.jti : '';
       tokenClientId = typeof payload.client_id === 'string' ? payload.client_id : '';
       grantedScopes = String(payload.scope || SCOPE).split(' ').filter(Boolean);
@@ -547,22 +666,23 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
     if (!tokenClientId || tokenClientId !== client.client_id) throw new InvalidGrantError('refresh token was issued to another client');
     // The scope cannot be widened beyond the original grant.
     if (scopes && scopes.some((s) => !grantedScopes.includes(s))) throw new InvalidScopeError('requested scope exceeds the original grant');
-    // Recheck the allowlist on refresh: a removed account is blocked at once even with a 30-day refresh token left.
-    if (!emailAllowed(email)) throw new InvalidGrantError('this account is no longer allowed');
+    // Recheck on refresh: a revoked key, or an account removed from the allowlist, is blocked at once even with a
+    // 30-day refresh token left.
+    if (keyId ? !(await keyStanding(keyId)) : !GOOGLE_READY || !emailAllowed(email)) throw new InvalidGrantError(keyId ? 'the key was revoked or has expired' : 'this account is no longer allowed');
     // An old-format refresh token without a jti is rejected (this forces one new sign-in). The jti is consumed in the
     // DB (rotation):
     // the old token is revoked at once, and reuse of a revoked token (a sign of theft) revokes every refresh token
     // of the account.
     if (!jti) throw new InvalidGrantError('outdated refresh token; sign in again');
     const newJti = randomUUID();
-    const state = await consumeRefreshToken(jti, email, newJti);
+    const state = await consumeRefreshToken(jti, subject, newJti);
     if (state !== 'ok') throw new InvalidGrantError('refresh token was revoked; sign in again');
 
     const scope = (scopes && scopes.length ? scopes : grantedScopes).join(' ') || SCOPE;
-    const claims = { sub: email, email, scope, client_id: client.client_id };
+    const claims = { sub: subject, email: email || undefined, scope, client_id: client.client_id, ...(keyId ? { key_id: keyId } : {}) };
     const access_token = await signJwt(claims, ACCESS_TTL, 'access');
     const refresh_token = await signJwt({ ...claims, jti: newJti }, REFRESH_TTL, 'refresh'); // rotation
-    await recordRefreshToken(newJti, email, client.client_id);
+    await recordRefreshToken(newJti, subject, client.client_id);
     return { access_token, token_type: 'Bearer', expires_in: ACCESS_TTL, scope, refresh_token };
   }
 
@@ -574,18 +694,20 @@ export class KnowledgeOAuthProvider implements OAuthServerProvider {
       algorithms: ['HS256'], // pin alg (blocks none/RS256 confusion)
     });
     if (payload.typ === 'refresh') throw new Error('a refresh token cannot be used as an access token');
+    const keyId = typeof payload.key_id === 'string' ? payload.key_id : '';
+    const scopes = String(payload.scope || '').split(' ').filter(Boolean);
+    const base = { token, clientId: String(payload.client_id || ''), scopes, expiresAt: typeof payload.exp === 'number' ? payload.exp : undefined, resource: new URL(RESOURCE) };
+    if (keyId) {
+      // Approved with a key: it works while the key does. Revoked or expired, the token stops within a minute.
+      const key = await keyStanding(keyId);
+      if (!key) throw new Error('the key was revoked or has expired');
+      return { ...base, extra: { via: 'key', keyId, role: key.role, email: key.email ?? undefined } };
+    }
     const email = typeof payload.sub === 'string' ? payload.sub : '';
     // Recheck the allowlist on every request: once an account is removed, even an unexpired token is rejected at once.
-    if (!emailAllowed(email)) throw new Error('this account is no longer allowed');
-    const scopes = String(payload.scope || '').split(' ').filter(Boolean);
-    return {
-      token,
-      clientId: String(payload.client_id || ''),
-      scopes,
-      expiresAt: typeof payload.exp === 'number' ? payload.exp : undefined,
-      resource: new URL(RESOURCE),
-      extra: { email },
-    };
+    // Google sign-in taken off (its client removed): its tokens stop too, as when that turned OAuth off.
+    if (!GOOGLE_READY || !emailAllowed(email)) throw new Error('this account is no longer allowed');
+    return { ...base, extra: { via: 'google', email } };
   }
 }
 

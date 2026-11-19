@@ -17,7 +17,7 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import { authenticateApiKey, type AuthContext, type Role, type ResourceScopes } from '../core/auth.js';
 import { authStore } from '../core/context.js';
 import {
-  oauthProvider, isOAuthConfigured, oauthConfigProblems, oauthAttempted,
+  oauthProvider, isOAuthConfigured, oauthConfigProblems, oauthAttempted, oauthGoogleProblems, oauthSignIns, setConsentHeaders,
   OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES, CONSENT_COOKIE, CONSENT_PATH, LOGIN_COOKIE, GOOGLE_CALLBACK_PATH,
 } from '../core/oauth.js';
 import { maskedSecretCount } from '../core/log_mask.js';
@@ -158,6 +158,8 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
 
   // ── OAuth 2.1 (for Claude app custom connectors), only when the env is complete (otherwise Bearer only) ──
   const oauthEnabled = isOAuthConfigured();
+  // Keys typed on the consent page: a few a minute from one address is a person; more is guessing.
+  const consentLimiter = rateLimit({ windowMs: 60_000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false, message: 'Too many tries. Wait a minute and start the connection again.' });
   let resourceMetadataUrl: string | undefined;
   if (oauthEnabled) {
     resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(new URL(OAUTH_RESOURCE));
@@ -196,33 +198,44 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
       }),
     );
     // Approve/cancel from the consent page: consumeConsent in oauth.ts. Proceeds only when both the cookie
-    // (SameSite=Lax) and the form csrf match.
-    app.post(CONSENT_PATH, express.urlencoded({ extended: false, limit: '4kb' }), (req, res) => {
+    // (SameSite=Lax) and the form csrf match. A wrong key shows the page again (the consent cookie stays for the
+    // next try); everything else ends the request and clears it.
+    app.post(CONSENT_PATH, consentLimiter, express.urlencoded({ extended: false, limit: '4kb' }), async (req, res) => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const cookies = [`${CONSENT_COOKIE}=; Path=${CONSENT_PATH}; Max-Age=0; HttpOnly; SameSite=Lax${secureCookie}`];
       res.setHeader('Cache-Control', 'no-store');
+      const action = body.action === 'approve' || body.action === 'key' ? body.action : 'deny';
       try {
-        const { redirect, loginBinding } = oauthProvider.consumeConsent(
+        const r = await oauthProvider.consumeConsent(
           String(body.id ?? ''),
           String(body.csrf ?? ''),
           readCookie(req, CONSENT_COOKIE),
-          body.action === 'approve',
+          action,
+          typeof body.key === 'string' ? body.key : '',
         );
+        if ('page' in r) {
+          setConsentHeaders(res);
+          res.status(200).type('html').send(r.page);
+          return;
+        }
         // Cookie that proves it is this browser across the trip to Google. With SameSite=Lax it is sent on the
         // top-level navigation coming back from Google.
-        if (loginBinding) {
-          cookies.push(`${LOGIN_COOKIE}=${loginBinding}; Path=${GOOGLE_CALLBACK_PATH}; Max-Age=600; HttpOnly; SameSite=Lax${secureCookie}`);
+        if (r.loginBinding) {
+          cookies.push(`${LOGIN_COOKIE}=${r.loginBinding}; Path=${GOOGLE_CALLBACK_PATH}; Max-Age=600; HttpOnly; SameSite=Lax${secureCookie}`);
         }
         res.setHeader('Set-Cookie', cookies);
-        res.redirect(redirect);
+        res.redirect(r.redirect);
       } catch (e) {
         res.setHeader('Set-Cookie', cookies);
         res.status(400).type('text').send(e instanceof Error ? e.message : String(e));
       }
     });
+    const ways = oauthSignIns();
     console.error(
-      `[knowledge-mcp] OAuth enabled · issuer=${OAUTH_ISSUER_URL} · resource=${OAUTH_RESOURCE}`,
+      `[knowledge-mcp] OAuth enabled · issuer=${OAUTH_ISSUER_URL} · resource=${OAUTH_RESOURCE} · sign-in with a key${ways.google ? ' or Google' : ''}`,
     );
+    const half = oauthGoogleProblems();
+    if (half.length) console.error(`[knowledge-mcp] ⚠️ Google sign-in off — missing: ${half.join(', ')}`);
   } else if (oauthAttempted()) {
     // A half-configured state is not turned off silently: the missing values are reported by name (values not shown).
     console.error(`[knowledge-mcp] ⚠️ OAuth off — missing: ${oauthConfigProblems().join(', ')}`);
@@ -295,7 +308,10 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
         // OAuth users also get their app_users role (consistent with act-as). The email was verified by Google
         // sign-in plus the allowlist, so it is trusted. Missing, unregistered or failed lookup means viewer (PII tools
         // are not opened to unregistered accounts).
-        let oauthRole: Role = 'viewer';
+        // Approved with a key: the key's own role, recomputed from app_users by the key's email like a key sent
+        // directly (below), so a token never reaches further than its key.
+        const viaKey = info.extra?.via === 'key';
+        let oauthRole: Role = viaKey && (info.extra?.role === 'admin' || info.extra?.role === 'member' || info.extra?.role === 'viewer') ? info.extra.role : 'viewer';
         let oauthScopes: ResourceScopes | undefined;
         if (oauthEmail) {
           const r = await resolveUser(info.clientId ?? 'oauth', oauthEmail);
@@ -304,7 +320,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
         }
         auth = {
           ok: true, org_id: getConfig().orgId, role: oauthRole,
-          email: oauthEmail, key_id: info.clientId, scopes: oauthScopes,
+          email: oauthEmail, key_id: viaKey && typeof info.extra?.keyId === 'string' ? info.extra.keyId : info.clientId, scopes: oauthScopes,
         };
       } catch {
         auth = { ok: false, reason: 'invalid oauth token' };

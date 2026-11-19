@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { call } from '../api';
-import { LinkButton, Page, Row, Section, useAction, useServer } from '../app';
+import { call, type Changed } from '../api';
+import { AskFirst, LinkButton, Page, Row, Section, useAction, useServer } from '../app';
 import { CliStep } from '../cli-step';
 import { TextField } from '../ui/text-field';
 import { Badge } from '../ui/badge';
@@ -28,6 +28,8 @@ interface Clients {
 
 export function Connect() {
   const { go } = useServer();
+  // The public address the tunnel answers at, as Tunnel reads it: what connectors are told to add.
+  const [publicAddress, setPublic] = useState<string | null>(null);
   const [data, setData] = useState<Clients | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const load = useCallback(
@@ -49,11 +51,12 @@ export function Connect() {
         </div>
       </Section>
       <Section title="Claude on the web, ChatGPT, other people" text="They reach the server over the internet: give it a public address, then a key to each.">
-        <Tunnel http={data?.http ?? null} local={data?.url ?? null} />
+        <Tunnel http={data?.http ?? null} local={data?.url ?? null} onAddress={setPublic} />
+        <Connectors address={publicAddress} />
         <div className="stack">
           <p className="muted">
-            Each person needs a key. Sign-in with Google replaces keys for Claude on the web. To run the server somewhere else instead, the README
-            has a Docker image and deploy notes.
+            Each person needs a key: a client sends it, and a connector asks for it once when it signs in. To run the server somewhere else instead,
+            the README has a Docker image and deploy notes.
           </p>
           <div><Button size="sm" variant="secondary" onClick={() => go('people')}>Create a key</Button></div>
         </div>
@@ -89,7 +92,7 @@ interface AddressCheck {
  * the address is checked first (is its domain on Cloudflare, is this server signed in for it), and it counts as
  * working only once it answers from outside.
  */
-function Tunnel({ http, local }: { http: string | null; local: string | null }) {
+function Tunnel({ http, local, onAddress }: { http: string | null; local: string | null; onAddress: (url: string | null) => void }) {
   const [t, setT] = useState<TunnelView | null>(null);
   const [own, setOwn] = useState(false);
   const [hostname, setHostname] = useState('');
@@ -98,6 +101,9 @@ function Tunnel({ http, local }: { http: string | null; local: string | null }) 
   const checking = useAction();
   const load = useCallback(() => call<TunnelView>('GET', '/tunnel').then((v) => (setT(v), setHostname((h) => h || v.hostname || '')), () => undefined), []);
   useEffect(() => void load(), [load]);
+  // Your own address once it answers from outside; a temporary one changes each start, so connectors are not given it.
+  const usable = t?.running && t.url && t.mode === 'named' && t.verified ? t.url : null;
+  useEffect(() => onAddress(usable), [usable, onAddress]);
   if (!t) return null;
   const start = (body: object) => void act.run(async () => setT(await call<TunnelView>('POST', '/tunnel', body)));
   const look = (name = hostname) => void checking.run(async () => setCheck(await call<AddressCheck>('POST', '/tunnel/check', { hostname: name })));
@@ -248,5 +254,65 @@ function ClientRow({ client: c, onChanged }: { client: Client; onChanged: () => 
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Sign-in for connectors. Claude (Settings, Connectors) and ChatGPT (Settings, Connectors) add a server by its address;
+ * they then open its sign-in page, where the person types a key from People and keys. On needs your own address: a
+ * temporary one changes each start, and a connector keeps the address it was given.
+ */
+function Connectors({ address }: { address: string | null }) {
+  const { state, apply } = useServer();
+  const s = state.connectors;
+  const act = useAction();
+  const mcp = s.address ? `${s.address}/mcp` : null;
+  const stale = s.on && address && s.address !== address;
+  return (
+    <div className="rows">
+      <Row
+        title={
+          <>
+            Sign-in for connectors {s.on && <Badge tone="success">On</Badge>}
+          </>
+        }
+        help={
+          act.error ? (
+            <span className="error">{act.error}</span>
+          ) : s.on ? (
+            <>
+              In Claude or ChatGPT, add a custom connector with the address below. It opens a page here that asks for a key once.
+              {s.google ? ' Google sign-in is offered too.' : ''}
+              {stale && <span className="row-note">The tunnel now answers at {address}. Turn this on again to use it.</span>}
+            </>
+          ) : address ? (
+            'Claude and ChatGPT add this server by its address and sign in with a key. No Google setup needed.'
+          ) : (
+            'Needs your own address above. A temporary one changes each time, and a connector keeps the address it was given.'
+          )
+        }
+      >
+        {s.on && (
+          <AskFirst
+            label="Turn off"
+            title="Turn off sign-in for connectors?"
+            text="Connectors added with this address stop working until it is on again. Keys sent directly keep working."
+            confirm="Turn off"
+            disabled={act.busy || !state.editable}
+            onConfirm={() => act.run(() => apply(() => call<Changed>('DELETE', '/connectors')))}
+          />
+        )}
+        {(!s.on || stale) && (
+          <Button size="sm" variant="secondary" loading={act.busy} disabled={!address || !state.editable} onClick={() => void act.run(() => apply(() => call<Changed>('POST', '/connectors', { address })))}>
+            Turn on
+          </Button>
+        )}
+      </Row>
+      {s.on && mcp && (
+        <div className="row-form">
+          <TextField label="Connector address" value={mcp} readOnly copyable onFocus={(e) => e.target.select()} />
+        </div>
+      )}
+    </div>
   );
 }
