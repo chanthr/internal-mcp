@@ -61,7 +61,8 @@ export const knowledgePlugin = definePlugin({
     'Knowledge base: for any question about what the team\'s documents say, call search_knowledge first. ' +
     'Results are passages; call read_document with a Document ID when you need the whole document. ' +
     'Documents link to each other: linked_documents follows those links from a result to the pages around it. ' +
-    'Each result shows the document date: say how old a figure is rather than presenting it as current.',
+    'Each result shows the document date: say how old a figure is rather than presenting it as current. ' +
+    'Where results come from a folder named wiki, those pages were written by a model from the documents: a topic page gathers what several documents say and names them. Use it for an overview, and the documents it names for the exact wording.',
   async start({ state, log }) {
     // HTTP server: scan the folders now and then on a timer. KNOWLEDGE_SCAN_ENABLED=false turns it off.
     if (!(await shouldScan(state, log))) return;

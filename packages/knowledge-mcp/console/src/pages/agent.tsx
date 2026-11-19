@@ -2,7 +2,7 @@
  * Agent: work the server does by itself, with a language model the person connects. Until one is connected the
  * server calls no model. The model is picked from the provider's own list.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { call, type Changed } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
 import { Button } from '../ui/button';
@@ -62,8 +62,123 @@ export function Agent() {
           </Row>
         </div>
       </Section>
+      <Wiki />
       {open && <ConnectModel onClose={() => setOpen(false)} />}
     </Page>
+  );
+}
+
+interface WikiRun {
+  running: boolean;
+  done: number;
+  total: number;
+  phase: 'reading' | 'writing';
+  current: string | null;
+  written: number;
+  failed: Array<{ document: string; why: string }>;
+  usage: { input: number; output: number; calls: number };
+  stopped: string | null;
+  finishedAt: string | null;
+}
+interface WikiStatus {
+  exists: boolean;
+  path: string;
+  documents: number;
+  topics: number;
+  waiting: number;
+  gone: number;
+  run: WikiRun | null;
+  model: boolean;
+}
+/** How many documents one press reads. Reading costs: a person sees what it came to before reading on. */
+const BATCH = 25;
+const n = (count: number, word: string) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
+
+/** The wiki the model writes from the documents: make it, read documents into it, and see how far a run is. */
+function Wiki() {
+  const { state, apply } = useServer();
+  const [wiki, setWiki] = useState<WikiStatus | null>(null);
+  const act = useAction();
+  const load = () => call<WikiStatus>('GET', '/wiki').then(setWiki, () => undefined);
+  // Asked again when the settings change (a model was connected, the folder was made).
+  useEffect(() => {
+    void load();
+  }, [state.services.llm.set, state.folders.length]);
+  const running = !!wiki?.run?.running;
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => void load(), 1500);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  const run = wiki?.run ?? null;
+  const next = Math.min(wiki?.waiting ?? 0, BATCH);
+  const last = run && !run.running ? run : null;
+  return (
+    <Section title="Wiki" text="Pages the model writes from your documents: one per document, and one per topic that gathers what all of them say.">
+      <div className="rows">
+        {!wiki ? null : !wiki.exists ? (
+          <Row
+            title="No wiki yet"
+            help="A folder of Markdown pages with links between them, beside your settings. It is searched like your other folders, and opens in Obsidian as it is. Your documents are not changed."
+          >
+            <Button size="sm" variant="secondary" loading={act.busy} disabled={!state.editable} onClick={() => void act.run(async () => { await apply(() => call<Changed>('POST', '/wiki')); await load(); })}>
+              Create the wiki
+            </Button>
+          </Row>
+        ) : (
+          <Row
+            title={wiki.path}
+            help={
+              running && run ? (
+                run.phase === 'writing' ? (
+                  <>All {n(run.total, 'document')} read. Writing the topic pages{run.current ? `: ${run.current}` : ''}</>
+                ) : (
+                  <>
+                    Reading {Math.min(run.done + 1, run.total).toLocaleString()} of {run.total.toLocaleString()}
+                    {run.current ? `: ${run.current}` : ''}
+                  </>
+                )
+              ) : (
+                <>
+                  {n(wiki.documents, 'document')} read, {n(wiki.topics, 'topic')}.{' '}
+                  {wiki.waiting > 0 ? `${n(wiki.waiting, 'document')} new or changed since.` : wiki.documents > 0 ? 'Nothing new to read.' : 'Nothing is read yet.'}
+                  {!wiki.model && <span className="row-note">Connect a model above to read documents into it.</span>}
+                  {last && (
+                    <span className="row-note">
+                      Last run: {n(last.done - last.failed.filter((f) => !f.document.startsWith('topic: ')).length, 'document')} read with {n(last.usage.calls, 'question')} to the model (
+                      {last.usage.input.toLocaleString()} tokens in, {last.usage.output.toLocaleString()} out).
+                      {last.stopped ? ` ${last.stopped}` : ''}
+                    </span>
+                  )}
+                  {last && last.failed.length > 0 && (
+                    <span className="row-note">
+                      Not read: {last.failed.slice(0, 3).map((f) => `${f.document} (${f.why})`).join('; ')}
+                      {last.failed.length > 3 ? ` and ${last.failed.length - 3} more` : ''}
+                    </span>
+                  )}
+                </>
+              )
+            }
+          >
+            {running ? (
+              <Button size="sm" variant="ghost" onClick={() => void call('POST', '/wiki/stop').then(load, load)}>Stop</Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={act.busy}
+                disabled={!wiki.model || next === 0}
+                onClick={() => void act.run(async () => { await call('POST', '/wiki/run', { limit: BATCH }); await load(); })}
+              >
+                {next > 0 ? `Read ${n(next, 'document')}` : 'Read documents'}
+              </Button>
+            )}
+          </Row>
+        )}
+      </div>
+      {act.error && <p className="error" role="alert">{act.error}</p>}
+    </Section>
   );
 }
 

@@ -47,6 +47,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A wiki written from your documents.** With a model connected, *Agent → Create the wiki* makes `wiki/`
+  beside the settings, and *Read documents* fills it: one page per document (what it says, the topics it feeds)
+  and one page per topic that gathers what all the documents say, each fact with the document it comes from,
+  plus an index and a log. Plain Markdown with `[[links]]`, so it is searched and linked like any folder here
+  and opens in Obsidian as it is. `AGENTS.md` in the folder holds the rules and is yours to change. Only new and
+  changed documents are read, a press reads up to 25 and reports the questions and tokens it came to, and notes
+  under `## Notes` are kept. The model is asked for labelled lines instead of JSON: with a local
+  8-billion-parameter model, JSON lost three documents of five and labelled lines lost none.
 - **Connect a language model (the Agent page).** For work the server does by itself, a model can be connected
   in the console: Claude through Anthropic's API, OpenRouter, OpenAI, a local model through Ollama, or any
   endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list, checked with

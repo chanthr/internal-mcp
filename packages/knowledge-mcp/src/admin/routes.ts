@@ -37,7 +37,8 @@ import { folderLeftOut, folderReading, LOCAL_PREFIX, localFolders, scanFoldersSo
 import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
-import { checkLlm, listLlmModels, llmSettings, type LlmKind } from '../core/llm.js';
+import { checkLlm, listLlmModels, llmConfigured, llmSettings, type LlmKind } from '../core/llm.js';
+import { createWiki, startWikiRun, stopWikiRun, WIKI, wikiDir, wikiExists, wikiStatus } from '../plugins/knowledge/wiki.js';
 import { openInBrowser } from './launch.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
@@ -475,6 +476,41 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       change(res);
     }),
   );
+  // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
+  api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured() })));
+  api.post(
+    '/wiki',
+    wrap(async (_req, res) => {
+      if (!mustEdit(res)) return;
+      const dir = settingsDir();
+      const root = createWiki(dir);
+      // The wiki is a folder of this server like any other: searched, read and linked.
+      if (configuredFolders(dir).some((f) => f.path === root)) return void res.json({ ok: true, restarting: false, restartNeeded: false });
+      const r = await setup(['folder', root, '--name', WIKI], dir);
+      if (!r.ok) return refuse(res, 422, firstLine(r.lines));
+      change(res, { note: 'The wiki folder is made. Read your documents into it from the Agent page.' });
+    }),
+  );
+  api.post(
+    '/wiki/run',
+    wrap(async (req, res) => {
+      const dir = settingsDir();
+      const { limit } = z.object({ limit: z.number().int().min(1).max(500).default(25) }).parse(req.body ?? {});
+      if (!wikiExists(dir)) return refuse(res, 409, 'There is no wiki yet. Create it first.');
+      if (!llmConfigured()) return refuse(res, 409, 'No model is connected. Connect one on this page first.');
+      // The pages that were written are read into the index when the run has written them.
+      res.json(startWikiRun(dir, { limit, afterWrite: () => void scanFoldersSoon().catch(() => undefined) }));
+    }),
+  );
+  api.post(
+    '/wiki/stop',
+    wrap(async (_req, res) => {
+      stopWikiRun();
+      res.json({ ok: true });
+    }),
+  );
+  void wikiDir;
+
   // ── How the documents link to each other (plugins/knowledge/graph.ts) ──
   api.get(
     '/graph',
