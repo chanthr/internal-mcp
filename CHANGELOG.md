@@ -147,6 +147,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **The console address is printed after every start**, not only the first, so it is the last thing in the
   terminal after a restart. The page that asks for the token says which line to look for and which address the
   token is remembered for.
+- **The console no longer asks for the token because something else said "not allowed".** Every answer of the
+  console now says it is the console's, and the page takes a refusal for "the token is not accepted" only then.
+  An answer from another program on the address (while the server restarts) is treated as no answer: the page
+  waits, and says the server is not answering if it does not come back.
 - **The line the generator prints for Claude Code broke in a folder with a space in its path.** Pasted as
   printed, `claude mcp add` took half the path as the command and the server never started ("ENOENT"). Paths are
   quoted now, Node is named by its full path, and the entry is added for the user rather than for the folder
