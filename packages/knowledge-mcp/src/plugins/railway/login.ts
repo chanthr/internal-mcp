@@ -29,6 +29,13 @@ const TOKEN_API = 'https://backboard.railway.app/graphql/v2';
  * workspaces these are, and answers every question, even "who am I", with "Not Authorized".
  */
 export const RAILWAY_SCOPE = 'openid email profile offline_access workspace:viewer';
+/**
+ * The same with member access. Railway shows logs to the members of a workspace and not to a viewer (seen with a
+ * real sign-in), so a person who wants `railway_logs` asks for this instead, knowingly: a member can also change
+ * things. This server's tools only read, but the token it keeps could do more.
+ */
+export const RAILWAY_SCOPE_WITH_LOGS = 'openid email profile offline_access workspace:member';
+export const railwayScope = (logs: boolean): string => (logs ? RAILWAY_SCOPE_WITH_LOGS : RAILWAY_SCOPE);
 
 export interface RailwayClient {
   id: string;
@@ -56,6 +63,9 @@ export const readRailwayLogin = (): RailwayLogin => file.read() ?? {};
 export const writeRailwayLogin = (login: RailwayLogin): void => file.write(login);
 export const forgetRailwayLogin = (): void => file.forget();
 
+/** Did the person sign in with the access that reads logs? */
+export const railwayReadsLogs = (): boolean => readRailwayLogin().client?.scope === RAILWAY_SCOPE_WITH_LOGS;
+
 /** Has somebody signed in here (and not out)? */
 export function railwaySignedIn(): boolean {
   const l = readRailwayLogin();
@@ -77,7 +87,7 @@ async function post(url: string, init: RequestInit, what: string): Promise<{ sta
 }
 
 /** Register this installation as a public client (no secret; it proves itself with PKCE) for one return address. */
-export async function registerRailwayClient(redirectUri: string): Promise<RailwayClient> {
+export async function registerRailwayClient(redirectUri: string, scope: string = RAILWAY_SCOPE): Promise<RailwayClient> {
   const { status, json } = await post(
     `${railwayEndpoints.issuer}/oauth/register`,
     {
@@ -90,7 +100,7 @@ export async function registerRailwayClient(redirectUri: string): Promise<Railwa
         response_types: ['code'],
         token_endpoint_auth_method: 'none',
         application_type: 'native',
-        scope: RAILWAY_SCOPE,
+        scope,
       }),
     },
     'the registration',
@@ -101,7 +111,7 @@ export async function registerRailwayClient(redirectUri: string): Promise<Railwa
   return {
     id: json.client_id,
     redirectUri,
-    scope: RAILWAY_SCOPE,
+    scope,
     registrationUri: typeof json.registration_client_uri === 'string' ? json.registration_client_uri : undefined,
     registrationToken: typeof json.registration_access_token === 'string' ? json.registration_access_token : undefined,
   };

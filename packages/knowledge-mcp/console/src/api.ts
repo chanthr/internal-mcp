@@ -6,7 +6,9 @@
  * header.
  */
 
-const KEY = 'knowledge-mcp-console-token';
+/** Where this browser keeps the token, for this address (host and port). */
+export const TOKEN_KEY = 'knowledge-mcp-console-token';
+const KEY = TOKEN_KEY;
 
 /**
  * A token in the address (…/console/#token=…) is taken out of the address bar and tried on the server. It replaces
@@ -193,7 +195,8 @@ export interface State {
     drive: { set: boolean; trusted: string[]; via: 'key' | 'login' | null; account: string | null; reads: string[] };
     slack: { set: boolean };
     github: { set: boolean };
-    railway: { set: boolean; via: 'token' | 'login' | null; who: string | null };
+    /** `logs`: the sign-in asked for the access that reads logs (member). null with a token. */
+    railway: { set: boolean; via: 'token' | 'login' | null; who: string | null; logs: boolean | null };
     embeddings: { set: boolean; model: string | null; dim: number | null; baseUrl: string | null; keySet: boolean };
   };
   connections: ConnectionView[];

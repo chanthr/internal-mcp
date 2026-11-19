@@ -178,6 +178,51 @@ test('the address the server opens in the browser works once and holds no token'
   assert.equal((await fetch(`${base}/console/open?code=guess`, { redirect: 'manual' })).headers.get('location'), '/console/');
 });
 
+test('a browser without the token can ask the server to open the console, and is handed nothing itself', async () => {
+  // In place of the system's opener: each writes down its arguments and what it was given to read.
+  const openers = mkdtempSync(join(tmpdir(), 'kmcp-open-'));
+  const noted = join(openers, 'opened');
+  writeFileSync(join(openers, 'osascript'), `#!/bin/sh\necho "args:$*" >> "${noted}"\ncat >> "${noted}"\n`);
+  writeFileSync(join(openers, 'xdg-open'), `#!/bin/sh\necho "args:$*" >> "${noted}"\ncat "$1" >> "${noted}"\n`);
+  chmodSync(join(openers, 'osascript'), 0o755);
+  chmodSync(join(openers, 'xdg-open'), 0o755);
+  const before = { PATH: process.env.PATH, CI: process.env.CI, DISPLAY: process.env.DISPLAY };
+  process.env.PATH = `${openers}:${before.PATH}`;
+  delete process.env.CI; // a test runner has no desktop, and the server knows it
+  process.env.DISPLAY = ':0';
+  try {
+    const ask = (site?: string) => fetch(`${base}/console/open-here`, { method: 'POST', headers: site ? { 'Sec-Fetch-Site': site } : {} });
+    // Another site, and another app on this machine's localhost, cannot make a console pop up.
+    assert.deepEqual([(await ask('cross-site')).status, (await ask('same-site')).status], [403, 403]);
+    assert.equal(existsSync(noted), false);
+
+    const asked = await ask('same-origin');
+    const answer = await asked.text();
+    assert.deepEqual([asked.status, JSON.parse(answer)], [200, { ok: true }]);
+    assert.ok(!answer.includes(token) && !answer.includes('code='), 'the one who asks gets neither the token nor the address');
+    let text = '';
+    for (let i = 0; i < 100 && !/code=/.test(text); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      text = existsSync(noted) ? readFileSync(noted, 'utf8') : '';
+    }
+    // The one-time address did not go on a command line, where other users of the machine could read it first.
+    const args = text.split('\n').filter((l) => l.startsWith('args:')).join(' ');
+    assert.ok(!args.includes('code=') && !args.includes(token), args);
+    const url = /http:\/\/localhost:\d+\/console\/open\?code=[\w-]+/.exec(text)?.[0];
+    assert.ok(url, text);
+    // It leads into the console, once.
+    assert.equal((await fetch(url!, { redirect: 'manual' })).headers.get('location'), `/console/#token=${token}`);
+    assert.equal((await fetch(url!, { redirect: 'manual' })).headers.get('location'), '/console/');
+    // Asked again straight away: not opened over and over.
+    assert.equal((await ask('same-origin')).status, 429);
+  } finally {
+    for (const [k, v] of Object.entries(before)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test('a body the server cannot read is answered in one line, without file paths', async () => {
   for (const path of ['/console/api/run', '/mcp']) {
     const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: '{"name": ' });

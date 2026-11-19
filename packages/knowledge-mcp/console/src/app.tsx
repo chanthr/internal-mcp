@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ApiError, call, REFUSED, setToken, takeTokenFromAddress, token, type Changed, type State } from './api';
+import { ApiError, call, REFUSED, setToken, takeTokenFromAddress, token, type Changed, type State, TOKEN_KEY } from './api';
 import { Button } from './ui/button';
 import { AlertDialog } from './ui/dialog';
 import { Spinner } from './ui/spinner';
@@ -242,16 +242,51 @@ function Gate({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-/** No token in this browser yet: say where it comes from, and take one typed in. */
+/**
+ * No token in this browser yet. The first thing offered needs no looking for anything: the server opens the console
+ * itself, in the browser of the person at the machine. A token can still be pasted.
+ */
 function TokenGate({ onDone }: { onDone: () => Promise<boolean> }) {
   const [value, setValue] = useState('');
   const [refused, setRefused] = useState(false);
+  const open = useAction();
+  const [opened, setOpened] = useState(false);
+  // The console the server opens leaves its token where this tab finds it, when it is the same browser.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== TOKEN_KEY || !e.newValue) return;
+      setToken(e.newValue);
+      void onDone();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [onDone]);
   return (
-    <Gate title="This browser needs the access token">
-      <p className="muted">
-        Go to the terminal window where the server is running. It printed a line that starts with <code>console ·</code> followed by an
-        address. Open that address: it carries the token, and this browser remembers it for {location.host}.
-      </p>
+    <Gate title="This browser has no access yet">
+      <p className="muted">The console is for the person at this computer. The server can open it for you, signed in.</p>
+      <div className="stack">
+        <div>
+          <Button
+            loading={open.busy}
+            onClick={() =>
+              void open.run(async () => {
+                setOpened(false);
+                const res = await fetch('./open-here', { method: 'POST' });
+                if (!res.ok) throw new Error(((await res.json().catch(() => null)) as { error?: string } | null)?.error ?? `The server answered ${res.status}.`);
+                setOpened(true);
+              })
+            }
+          >
+            Open the console
+          </Button>
+        </div>
+        {open.error ? (
+          <p className="error" role="alert">{open.error}</p>
+        ) : (
+          opened && <p className="field-help">Opened in your default browser. If that is this browser, this tab goes on by itself.</p>
+        )}
+      </div>
+      <div className="or">or paste the token</div>
       <form
         className="stack"
         onSubmit={(e) => {
@@ -262,7 +297,7 @@ function TokenGate({ onDone }: { onDone: () => Promise<boolean> }) {
       >
         <TextField
           label="Access token"
-          hint="Or paste the token here. It is in the file data/console-token of the server's folder."
+          hint="It is in the file data/console-token of the server's folder, and in the address the server prints in its terminal (the line that starts with console ·)."
           error={refused ? 'The server did not accept that token.' : undefined}
           type="password"
           value={value}
@@ -270,9 +305,8 @@ function TokenGate({ onDone }: { onDone: () => Promise<boolean> }) {
             setValue(e.target.value);
             setRefused(false);
           }}
-          autoFocus
         />
-        <div><Button type="submit" disabled={value.trim().length < 20}>Open the console</Button></div>
+        <div><Button type="submit" variant="secondary" disabled={value.trim().length < 20}>Use this token</Button></div>
       </form>
     </Gate>
   );

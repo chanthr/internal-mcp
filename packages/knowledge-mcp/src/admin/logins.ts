@@ -27,7 +27,7 @@ import { dataDir } from '../core/paths.js';
 import {
   deleteRailwayClient,
   forgetRailwayLogin,
-  RAILWAY_SCOPE,
+  railwayScope,
   railwayEndpoints,
   railwayTokenRequest,
   readRailwayLogin,
@@ -150,18 +150,20 @@ async function json(url: string, init: RequestInit, what: string): Promise<{ sta
 // ── Railway ──
 
 /** The address that signs a person in to Railway. `origin` is how the console page was opened (http://localhost:PORT). */
-export async function startRailwayLogin(origin: string): Promise<string> {
+export async function startRailwayLogin(origin: string, opts: { logs?: boolean } = {}): Promise<string> {
   const redirectUri = `${origin}/console/login/railway`;
+  // Viewer access, or member access for a person who asked to read logs as well.
+  const scope = railwayScope(opts.logs === true);
   const saved = readRailwayLogin().client;
   // The return address and what is asked for are part of the registration. Opened on another port, or registered
   // by a version that asked for less, the server registers again. The old one is deleted when the new one is saved.
-  const client = saved && saved.redirectUri === redirectUri && saved.scope === RAILWAY_SCOPE ? saved : await registerRailwayClient(redirectUri);
+  const client = saved && saved.redirectUri === redirectUri && saved.scope === scope ? saved : await registerRailwayClient(redirectUri, scope);
   const { state, challenge } = remember({ service: 'railway', redirectUri, railway: client });
   const query = new URLSearchParams({
     response_type: 'code',
     client_id: client.id,
     redirect_uri: redirectUri,
-    scope: RAILWAY_SCOPE,
+    scope,
     state,
     prompt: 'consent', // Railway gives a refresh token only when the consent screen was shown
     code_challenge: challenge,

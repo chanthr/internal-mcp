@@ -6,6 +6,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
 import { Select } from '../ui/select';
+import { Switch } from '../ui/switch';
 import { TextField } from '../ui/text-field';
 
 type AppId = 'slack' | 'github' | 'railway';
@@ -243,6 +244,8 @@ function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onCl
   const [token, setToken] = useState('');
   const save = useAction();
   const quick = useAction(); // the way that needs no token
+  // Railway: also read logs. Off unless the person turns it on: it asks for more than looking.
+  const [railwayLogs, setRailwayLogs] = useState(false);
   // GitHub: is the gh CLI signed in on this machine, and as whom?
   const [gh, setGh] = useState<{ installed: boolean; login: string | null } | null>(null);
   const [ghAsked, setGhAsked] = useState(0); // asked again after a step with gh from here ended
@@ -297,11 +300,18 @@ function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onCl
           <>
             <Choice
               title={signedIn ? 'Sign in again with Railway' : 'Sign in with Railway'}
-              help="Railway opens in this tab. You pick the workspaces it may read, as a viewer. Nothing to copy."
+              help={`Railway opens in this tab. You pick the workspaces it may read, as a ${railwayLogs ? 'member' : 'viewer'}. Nothing to copy.`}
               error={quick.error}
             >
-              <Button variant="secondary" loading={quick.busy} onClick={() => void quick.run(() => signIn('/logins/railway'))}>Sign in</Button>
+              <Button variant="secondary" loading={quick.busy} onClick={() => void quick.run(() => signIn('/logins/railway', { logs: railwayLogs }))}>Sign in</Button>
             </Choice>
+            <Switch
+              size="sm"
+              label="Also read logs"
+              description="Railway shows logs to members of a workspace, not to viewers. With this on the sign-in asks for member access, which could also change things. This server only reads."
+              checked={railwayLogs}
+              onChange={(e) => setRailwayLogs(e.target.checked)}
+            />
             <div className="or">or paste a token</div>
           </>
         )}

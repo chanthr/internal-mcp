@@ -7,6 +7,9 @@
  */
 import '../bootstrap.js'; // .env first: whether to supervise and whether there is a console may be set there
 import { spawn } from 'node:child_process';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { dataDir } from '../core/paths.js';
 import { shouldSupervise, supervise } from './supervisor.js';
 
 const info = (s: string): void => void process.stderr.write(`${s}\n`);
@@ -17,14 +20,36 @@ export function servesHttp(argv: string[]): boolean {
 }
 
 /**
- * Open a page in the person's browser. Best effort: a missing opener is not an error.
- * A command line is visible to every user of the machine (`ps`), so what is opened is never the address with the
- * console token: it is the one-time address of the server (see routes.ts, /console/open).
+ * Open the console in the browser of the person who runs the server. Best effort: a missing opener is not an error.
+ *
+ * What is opened is never the address with the console token: it is the one-time address of the server (see
+ * routes.ts, /console/open). And where other users of the machine can read command lines (`ps`), even that address
+ * is kept off the command line, since whoever asks for it first gets the console:
+ *   macOS    the address goes to osascript on its input, not as an argument
+ *   Linux    a page only the owner can read (in the data directory) sends the browser on
+ *   Windows  a command line, which other users cannot read there
  */
-function openInBrowser(url: string): void {
-  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]] : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]] : ['xdg-open', [url]];
+export function openInBrowser(url: string, platform: NodeJS.Platform = process.platform): void {
   try {
-    spawn(cmd as string, args as string[], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+    if (platform === 'darwin') {
+      const child = spawn('osascript', [], { stdio: ['pipe', 'ignore', 'ignore'], detached: true });
+      child.on('error', () => {});
+      child.stdin?.on('error', () => {});
+      child.stdin?.end(`open location "${url.replace(/[\\"]/g, '')}"\n`);
+      child.unref();
+      return;
+    }
+    if (platform === 'win32') {
+      spawn('cmd', ['/c', 'start', '', url], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
+      return;
+    }
+    const page = join(dataDir(), 'console-open.html');
+    const safe = url.replace(/[<>"']/g, '');
+    writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>Knowledge MCP</title><meta http-equiv="refresh" content="0;url=${safe}"><p><a href="${safe}">Open the console</a></p>\n`, { mode: 0o600 });
+    chmodSync(page, 0o600);
+    // The address in it works once and for two minutes: the page has no use after that.
+    setTimeout(() => rmSync(page, { force: true }), 120_000).unref();
+    spawn('xdg-open', [page], { stdio: 'ignore', detached: true }).on('error', () => {}).unref();
   } catch {
     /* no browser to open */
   }
