@@ -5,9 +5,10 @@
 import type { DriveClient } from './client.js';
 import { createHash } from 'crypto';
 import { chunkMarkdown, type RawChunk } from './chunker.js';
+import { cutMark, indexProfile, LEGACY_CUT, passageMark, type IndexProfile } from './index_profile.js';
 import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
-import { getQdrantClient, getLocalIndex, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
+import { getQdrantClient, getLocalIndex, vectorForm, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
 import { withLock } from '../../core/lock.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
@@ -73,10 +74,14 @@ export interface IndexableFile {
  * incremental (indexFile) and full (reindex.ts) paths: both must embed the same input so the same chunk gets the
  * same vector (consistent vector space).
  */
-export function embedInputForChunk(chunk: RawChunk): string {
-  const h = chunk.heading?.trim();
-  if (!h || h === '문서 시작') return chunk.content;
-  return `${h}\n\n${chunk.content}`;
+export function embedInputForChunk(chunk: Pick<RawChunk, 'heading' | 'content'>, documentName?: string, profile: Pick<IndexProfile, 'header' | 'passagePrefix'> = indexProfile()): string {
+  const heading = chunk.heading?.trim();
+  const h = !heading || heading === '문서 시작' ? '' : heading;
+  // Which of these the model is given is a setting (index_profile.ts): the heading path, the document's name
+  // before it, or the passage alone. A prefix the model was trained with goes before everything.
+  const name = profile.header === 'document' ? (documentName ?? '').replace(/\.[A-Za-z0-9]{1,5}$/, '').trim() : '';
+  const head = profile.header === 'none' ? '' : [name, h].filter(Boolean).join(' > ');
+  return `${profile.passagePrefix}${head ? `${head}\n\n` : ''}${chunk.content}`;
 }
 
 /** Extracted text to sha256 (used to skip reindexing unchanged content). */
@@ -149,6 +154,7 @@ export function buildChunkPayload(
     content: chunk.content,
     modified_time: file.modifiedTime,
     content_hash: hash,
+    cut: cutMark(),
     file_type: classification.type,
     cluster: classification.cluster,
     source: file.source,
@@ -184,6 +190,8 @@ export async function getIndexedState(
   file_name: string;
   source: string;
   modified_time: string;
+  /** How it was cut (index_profile.ts cutMark). A document indexed before this was kept was cut the default way. */
+  cut: string;
 } | null> {
   try {
     const got = await (await getQdrantClient()).retrieve(DRIVE_COLLECTION, {
@@ -200,6 +208,7 @@ export async function getIndexedState(
       file_name: String(p?.file_name ?? ''),
       source: String(p?.source ?? ''),
       modified_time: String(p?.modified_time ?? ''),
+      cut: typeof p?.cut === 'string' ? p.cut : LEGACY_CUT,
     };
   } catch {
     return null; // lookup failed = unknown, so reindex (safe)
@@ -223,7 +232,8 @@ export async function indexFile(drive: DriveClient, file: IndexableFile): Promis
   // re-downloading the whole file (up to 50MB) and re-running paid OCR for a change to sharing settings or a star only.
   const prev = await getIndexedState(file.id);
   const sameLocation = !!prev && prev.file_path === file.path && prev.file_name === file.name && prev.source === file.source;
-  if (sameLocation && prev!.modified_time && prev!.modified_time === file.modifiedTime) return 0;
+  // (Cut another way than the settings ask for now, it is read and cut again.)
+  if (sameLocation && prev!.modified_time && prev!.modified_time === file.modifiedTime && prev!.cut === cutMark()) return 0;
 
   const { text, needsOcr } = await extractText(drive, file.id, file.mimeType);
   // Unsupported files, scans and images with OCR off, and files with empty extracted text are not indexed.
@@ -254,7 +264,7 @@ export async function indexText(
   // time). A file that was moved or only renamed is indexed again: the payload file_path decides the per-user folder
   // scope, so a stale path would keep the file searchable by people with access to the old folder after the move.
   // Path tags (doc_tags) are also rebuilt for every chunk.
-  if (sameLocation && prev!.content_hash === hash) return 0;
+  if (sameLocation && prev!.content_hash === hash && prev!.cut === cutMark()) return 0;
 
   const chunks = chunkMarkdown(text);
   if (chunks.length === 0) return 0;
@@ -263,7 +273,9 @@ export async function indexText(
   const bizMeta = deriveBizMeta(file.path, file.source);
   // Embed with the heading breadcrumb (embedInputForChunk): the stored content is unchanged, only the embedding input
   // gets the section context. No embedding model: store the text now, vectors come later (backfillVectors).
-  const vectors = opts.vectors !== false && (await vectorsUsable()) ? await embedTexts(chunks.map(embedInputForChunk)) : null;
+  // In the form the vectors already in the index were made in (qdrant.ts vectorForm): the two are not mixed.
+  const form = opts.vectors !== false && (await vectorsUsable()) ? await vectorForm() : null;
+  const vectors = form ? await embedTexts(chunks.map((c) => embedInputForChunk(c, file.name, form))) : null;
 
   const points = chunks.map((c, idx) => ({
     id: makeChunkId(file.id, idx),
@@ -272,7 +284,7 @@ export async function indexText(
   }));
 
   const client = await getQdrantClient();
-  if (vectors) await noteVectorModel();
+  if (form) await noteVectorModel(form);
   // Upsert the new chunks 0..M-1 (wait:true: cheap for one file, gives immediate search visibility and failure detection)
   await client.upsert(DRIVE_COLLECTION, { wait: true, points });
   // If the count shrank, delete the old chunks (index >= M) directly by their deterministic chunk IDs.
@@ -315,12 +327,13 @@ export async function fillMissingVectors(max: number): Promise<number> {
   while (n < max) {
     const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(128, max - n));
     if (batch.length === 0) break;
+    const form = await vectorForm();
     const inputs = batch.map((b) =>
-      embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') } as RawChunk),
+      embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') }, String(b.payload?.file_name ?? ''), form),
     );
     const vectors = await embedTexts(inputs);
     await index.setVectors(DRIVE_COLLECTION, batch.map((b, i) => ({ id: b.id, vector: vectors[i] })));
-    await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
+    await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL, passageMark(form));
     n += batch.length;
   }
   return n;
@@ -352,6 +365,6 @@ export async function vectorsUsable(): Promise<boolean> {
 }
 
 /** Record which model made the vectors (built-in index), so a later change of model is noticed. */
-export async function noteVectorModel(): Promise<void> {
-  await (await getLocalIndex())?.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL);
+export async function noteVectorModel(form: Pick<IndexProfile, 'header' | 'passagePrefix'>): Promise<void> {
+  await (await getLocalIndex())?.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL, passageMark(form));
 }

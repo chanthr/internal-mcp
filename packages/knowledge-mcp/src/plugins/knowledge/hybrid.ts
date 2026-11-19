@@ -19,7 +19,7 @@
  * merged with K=60 only 14, merged with any K from 0 to 5 found 17.
  */
 import { embedQuery, embeddingsConfigured } from '../drive/embeddings.js';
-import { DRIVE_COLLECTION, getLocalIndex, getQdrantClient, vectorProblem, type ChunkPayload, type ScoredPoint } from '../drive/qdrant.js';
+import { DRIVE_COLLECTION, getLocalIndex, getQdrantClient, vectorForm, vectorProblem, type ChunkPayload, type ScoredPoint } from '../drive/qdrant.js';
 
 export type SearchMode = 'keyword' | 'keyword + semantic' | 'semantic';
 export type Must = Array<{ key: string; match: { value: string | boolean } }>;
@@ -66,7 +66,7 @@ export async function searchIndex(query: string, must: Must, limit: number): Pro
   const local = await getLocalIndex();
 
   if (!local) {
-    const vector = await embedQuery(query);
+    const vector = await embedQuery(query, (await vectorForm()).queryPrefix);
     const points = await (await getQdrantClient()).search(DRIVE_COLLECTION, { vector, limit, with_payload: true, filter });
     return { mode: 'semantic', hits: fuse([{ kind: 'semantic', points }]), empty: points.length === 0 && (await isEmpty()) };
   }
@@ -79,7 +79,7 @@ export async function searchIndex(query: string, must: Must, limit: number): Pro
       // Vectors of another model must not be searched with this model's query vector.
       const problem = await vectorProblem();
       if (problem) throw new Error(problem);
-      const vector = await embedQuery(query);
+      const vector = await embedQuery(query, (await vectorForm()).queryPrefix);
       semantic = await local.search(DRIVE_COLLECTION, { vector, limit, with_payload: true, filter });
     } catch (e) {
       // The embedding endpoint is down, the key is wrong, or the stored vectors are another model's. Keywords still answer.

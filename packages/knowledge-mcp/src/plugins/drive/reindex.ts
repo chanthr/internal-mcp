@@ -26,7 +26,7 @@ import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
 import { classifyAndPath, ownerEmails } from './path.js';
 import { sharedScopeEnabled, SHARED_SOURCE } from './settings.js';
-import { ensureCollection, getQdrantClient, isDriveDocId, vectorProblem, DRIVE_COLLECTION } from './qdrant.js';
+import { ensureCollection, getQdrantClient, isDriveDocId, vectorProblem, DRIVE_COLLECTION, vectorForm } from './qdrant.js';
 // Single source of truth for the core indexing logic, shared with the incremental sync (sync.ts) to prevent drift.
 // In particular makeChunkId must match on both paths for the orphan chunk logic to hold.
 import {
@@ -378,7 +378,8 @@ export async function runReindex(argv: string[]): Promise<void> {
 
       // Embed with the heading breadcrumb (embedInputForChunk), the same input as the incremental path (indexFile).
       // No embedding model: the text is stored for keyword search and vectors are added later (backfillVectors).
-      const vectors = useVectors ? await embedTexts(chunks.map(embedInputForChunk)) : null;
+      const form = useVectors ? await vectorForm() : null;
+      const vectors = form ? await embedTexts(chunks.map((c) => embedInputForChunk(c, file.name, form))) : null;
 
       // Qdrant upsert: the payload is built by buildChunkPayload, shared with indexer.ts
       const points = chunks.map((c, idx) => ({
@@ -399,7 +400,7 @@ export async function runReindex(argv: string[]): Promise<void> {
         wait: false,
         points,
       });
-      if (vectors) await noteVectorModel();
+      if (form) await noteVectorModel(form);
 
       done.set(file.id, file.modifiedTime); // record in the checkpoint (upsert succeeded)
       saveCheckpoint(done);

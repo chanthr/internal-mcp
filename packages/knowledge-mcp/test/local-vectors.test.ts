@@ -90,10 +90,10 @@ test('ensureCollection: a keyword-only index takes the size of the model added l
 test('vectors of another model are never mixed: indexing and search fall back to keywords until reembed', async () => {
   // Same size, another model.
   await local.setVectors(DRIVE_COLLECTION, [{ id: 1, vector: [1, 0, 0, 0] }]);
-  await local.noteModel(DRIVE_COLLECTION, 'some-older-model');
+  await local.noteModel(DRIVE_COLLECTION, 'some-older-model', 'heading|');
   assert.match((await vectorProblem())!, /made by some-older-model \(4 dimensions\), but text-embedding-3-small \(4 dimensions\) is configured.*knowledge reembed/);
   await ensureCollection(); // does not throw: the index stays usable by keywords
-  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: 'some-older-model', vectors: 1 });
+  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: 'some-older-model', form: 'heading|', vectors: 1 });
   await assert.rejects(local.adoptDimension(DRIVE_COLLECTION, 8), /holds vectors/);
 
   // Another size (vectors written by a version that did not record the model).
@@ -104,12 +104,12 @@ test('vectors of another model are never mixed: indexing and search fall back to
 
   // reembed's first step: drop the vectors, keep the text and the keyword index, take the new size.
   assert.equal(await local.clearVectors(DRIVE_COLLECTION, 4), 1);
-  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: null, vectors: 0 });
+  assert.deepEqual(await local.embeddingState(DRIVE_COLLECTION), { dim: 4, model: null, form: null, vectors: 0 });
   assert.equal(await vectorProblem(), null);
   assert.equal((await local.keywordSearch(DRIVE_COLLECTION, { query: 'old vector', limit: 5, with_payload: true })).length, 1);
   assert.equal((await local.missingVectors(DRIVE_COLLECTION, 10)).length, 1);
   await local.setVectors(DRIVE_COLLECTION, [{ id: 1, vector: [0, 1, 0, 0] }]);
-  await local.noteModel(DRIVE_COLLECTION, 'text-embedding-3-small');
+  await local.noteModel(DRIVE_COLLECTION, 'text-embedding-3-small', 'heading|');
   assert.equal(await vectorProblem(), null);
   await client.deleteCollection(DRIVE_COLLECTION);
 });
@@ -184,7 +184,7 @@ test('counts, one document and paging read the indexes, and say the same as read
   // One folder's documents, and when each was indexed: one row per document.
   assert.equal(await local.countDocuments(B, 'local:fa/'), 15);
   const times = await local.documentTimes(B, 'local:fa/');
-  assert.deepEqual([times.size, times.get('local:fa/doc1.md'), times.has('local:fb/doc0.md')], [15, '2026-01-02', false]);
+  assert.deepEqual([times.size, times.get('local:fa/doc1.md'), times.has('local:fb/doc0.md')], [15, { modified: '2026-01-02', cut: null }, false]);
   assert.equal((await local.documentTimes(B)).size, 30);
   assert.deepEqual((await local.documentChunks(B, 'local:fa/doc1.md')).map((p) => p?.chunk_index).sort(), [0, 1, 2, 3]);
   assert.deepEqual((await local.documentChunks(B, 'local:fa/nope.md')).length, 0);

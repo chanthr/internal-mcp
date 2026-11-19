@@ -120,9 +120,11 @@ export class LocalVectorClient {
     db.exec('CREATE TABLE IF NOT EXISTS vec_collections (name TEXT PRIMARY KEY, dim INTEGER NOT NULL)');
     // Which model made the stored vectors. Added later, so a file from an older version gets the column here.
     const cols = db.prepare('PRAGMA table_info(vec_collections)').all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === 'model')) {
+    // And what they were made from (index_profile.ts passageMark): the heading before a passage, and a prefix.
+    for (const column of ['model', 'passage_form']) {
+      if (cols.some((c) => c.name === column)) continue;
       try {
-        db.exec('ALTER TABLE vec_collections ADD COLUMN model TEXT');
+        db.exec(`ALTER TABLE vec_collections ADD COLUMN ${column} TEXT`);
       } catch {
         /* another process added it first */
       }
@@ -516,19 +518,36 @@ export class LocalVectorClient {
    * Every indexed document with the modified time recorded for it, optionally only ids that start with `prefix`.
    * One row is read per document (its first chunk), not one per chunk.
    */
-  async documentTimes(name: string, prefix = ''): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
+  async documentTimes(name: string, prefix = ''): Promise<Map<string, { modified: string; cut: string | null }>> {
+    const out = new Map<string, { modified: string; cut: string | null }>();
     if (this.dimOf(name) === undefined) return out;
     this.requireDim(name);
     const table = tableOf(name);
     const rows = this.db
       .prepare(
-        `SELECT file_id, json_extract(payload, '$.modified_time') AS modified FROM ${table} ` +
+        `SELECT file_id, json_extract(payload, '$.modified_time') AS modified, json_extract(payload, '$.cut') AS cut FROM ${table} ` +
           `WHERE rowid IN (SELECT min(rowid) FROM ${table} WHERE file_id >= ? AND file_id < ? GROUP BY file_id)`,
       )
-      .iterate(prefix, `${prefix}\u{10FFFF}`) as Iterable<{ file_id: string | null; modified: string | null }>;
-    for (const r of rows) if (r.file_id) out.set(r.file_id, r.modified ?? '');
+      .iterate(prefix, `${prefix}\u{10FFFF}`) as Iterable<{ file_id: string | null; modified: string | null; cut: string | null }>;
+    for (const r of rows) if (r.file_id) out.set(r.file_id, { modified: r.modified ?? '', cut: r.cut ?? null });
     return out;
+  }
+
+  /**
+   * How many documents were cut another way than `cut` (index_profile.ts cutMark). A document indexed before the
+   * way was kept with it counts as `legacy`. Read from each document's first passage.
+   */
+  async documentsCutOtherwise(name: string, cut: string, legacy: string): Promise<number> {
+    if (this.dimOf(name) === undefined) return 0;
+    this.requireDim(name);
+    const table = tableOf(name);
+    const row = this.db
+      .prepare(
+        `SELECT count(*) AS n FROM ${table} WHERE rowid IN (SELECT min(rowid) FROM ${table} WHERE file_id IS NOT NULL GROUP BY file_id) ` +
+          `AND coalesce(json_extract(payload, '$.cut'), ?) <> ?`,
+      )
+      .get(legacy, cut) as { n: number };
+    return row.n;
   }
 
   /** The chunks of one document, found through the document index. Not in document order. */
@@ -572,14 +591,14 @@ export class LocalVectorClient {
    * What the stored vectors are: their size, the model that made them (null when unknown or none yet), and how many
    * chunks have one. Null when the collection does not exist.
    */
-  async embeddingState(name: string): Promise<{ dim: number; model: string | null; vectors: number } | null> {
-    const row = this.db.prepare('SELECT dim, model FROM vec_collections WHERE name = ?').get(name) as { dim: number; model: string | null } | undefined;
+  async embeddingState(name: string): Promise<{ dim: number; model: string | null; form: string | null; vectors: number } | null> {
+    const row = this.db.prepare('SELECT dim, model, passage_form AS form FROM vec_collections WHERE name = ?').get(name) as { dim: number; model: string | null; form: string | null } | undefined;
     if (!row) return null;
     this.requireDim(name);
     // Counted, not loaded: this is asked on every search and every status read, and loading every vector to count
     // them cost hundreds of megabytes each time the index had changed.
     const { chunks, missing } = this.counts(name);
-    return { dim: row.dim, model: row.model ?? null, vectors: chunks - missing };
+    return { dim: row.dim, model: row.model ?? null, form: row.form ?? null, vectors: chunks - missing };
   }
 
   /**
@@ -590,13 +609,16 @@ export class LocalVectorClient {
     const state = await this.embeddingState(name);
     if (!state) return;
     if (state.vectors > 0) throw new Error(`[index] collection '${name}' holds vectors; clear them before changing the size`);
-    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
+    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL, passage_form = NULL WHERE name = ?').run(dim, name);
     this.forget(name);
   }
 
-  /** Remember which model made the vectors, so a later change of model is noticed instead of mixing two models. */
-  async noteModel(name: string, model: string): Promise<void> {
-    this.db.prepare('UPDATE vec_collections SET model = ? WHERE name = ? AND model IS NOT ?').run(model, name, model);
+  /**
+   * Remember which model made the vectors and from what form of the passage, so a later change of either is
+   * noticed instead of mixing two kinds of vector.
+   */
+  async noteModel(name: string, model: string, form: string): Promise<void> {
+    this.db.prepare('UPDATE vec_collections SET model = ?, passage_form = ? WHERE name = ? AND (model IS NOT ? OR passage_form IS NOT ?)').run(model, form, name, model, form);
   }
 
   /**
@@ -606,7 +628,7 @@ export class LocalVectorClient {
   async clearVectors(name: string, dim: number): Promise<number> {
     this.requireDim(name);
     const r = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = NULL WHERE vector IS NOT NULL`).run();
-    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL WHERE name = ?').run(dim, name);
+    this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL, passage_form = NULL WHERE name = ?').run(dim, name);
     this.forget(name);
     return Number(r.changes);
   }

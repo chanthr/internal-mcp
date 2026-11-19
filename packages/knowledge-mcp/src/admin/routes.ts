@@ -45,7 +45,9 @@ import { EXCLUDED_FOLDER_NAMES } from '../plugins/drive/exclude.js';
 import { openInBrowser } from './launch.js';
 import { startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
-import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
+import { DRIVE_COLLECTION, getLocalIndex, vectorForm, vectorProblem } from '../plugins/drive/qdrant.js';
+import { cutMark, indexProfile, knownPrefixes, LEGACY_CUT } from '../plugins/drive/index_profile.js';
+import { measureView, startMeasure, stopMeasure, WAYS } from '../plugins/knowledge/measure.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
 import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList } from '../setup/commands.js';
@@ -345,7 +347,28 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         const problem = embeddingsConfigured() ? await vectorProblem() : null;
         const made = await local.embeddingState(DRIVE_COLLECTION);
         // `problem` is a sentence for the terminal. The page says it in its own words from these two facts.
-        index = { ...s, meaning: embeddingsConfigured() && !problem, problem, vectorsFrom: made && made.vectors > 0 ? made.model ?? 'another model' : null, job: vectorJob };
+        const profile = indexProfile();
+        index = {
+          ...s,
+          meaning: embeddingsConfigured() && !problem,
+          problem,
+          vectorsFrom: made && made.vectors > 0 ? made.model ?? 'another model' : null,
+          job: vectorJob,
+          // How passages are made (index_profile.ts), and how much of the index is not made that way yet.
+          profile: {
+            cut: profile.cut,
+            maxTokens: profile.maxTokens,
+            overlapTokens: profile.overlapTokens,
+            header: profile.header,
+            queryPrefix: profile.queryPrefix,
+            passagePrefix: profile.passagePrefix,
+            prefixFrom: profile.prefixFrom,
+            // The prefixes the model was trained with, when it is one this knows: offered even when set by hand.
+            modelPrefixes: embeddingsConfigured() ? knownPrefixes() : null,
+          },
+          recut: await local.documentsCutOtherwise(DRIVE_COLLECTION, cutMark(profile), LEGACY_CUT),
+          behind: embeddingsConfigured() && !problem ? (await vectorForm()).behind : false,
+        };
       }
       const tools = registry
         .listTools(pingTool)
@@ -864,6 +887,57 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           job.running = false;
         });
       res.json({ ok: true });
+    }),
+  );
+  // ── How documents are cut into passages, and measuring what search finds (index_profile.ts, measure.ts) ──
+  const way = z.object({ cut: z.enum(['sections', 'windows']), maxTokens: z.number().int().min(100).max(4000) });
+  api.post(
+    '/index/profile',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const body = way
+        .extend({
+          overlapTokens: z.number().int().min(0).max(1000).nullable().optional(),
+          header: z.enum(['heading', 'document', 'none']),
+          // null: back to what the model was trained with (or none). A string: as written.
+          queryPrefix: z.string().max(500).nullable().optional(),
+          passagePrefix: z.string().max(500).nullable().optional(),
+        })
+        .strict()
+        .parse(req.body);
+      const dir = settingsDir();
+      const config = readConfigFile(dir);
+      const next: Record<string, unknown> = { cut: body.cut, maxTokens: body.maxTokens, header: body.header };
+      if (typeof body.overlapTokens === 'number') next.overlapTokens = Math.min(body.overlapTokens, Math.floor(body.maxTokens / 2) - 1);
+      // Both prefixes together, or neither: one set by hand with the other left to the model would mix two sources.
+      if (typeof body.queryPrefix === 'string' || typeof body.passagePrefix === 'string') {
+        next.queryPrefix = body.queryPrefix ?? '';
+        next.passagePrefix = body.passagePrefix ?? '';
+      }
+      const isDefault = next.cut === 'sections' && next.maxTokens === 800 && next.header === 'heading' && next.overlapTokens === undefined && next.queryPrefix === undefined;
+      const knowledge = { ...(config.knowledge ?? {}) };
+      if (isDefault) delete knowledge.index;
+      else knowledge.index = next;
+      if (Object.keys(knowledge).length) config.knowledge = knowledge;
+      else delete config.knowledge;
+      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+      change(res, { note: 'Saved. Documents are cut the new way as the folders are read again, starting now.' });
+    }),
+  );
+  api.get('/index/measure', wrap(async (_req, res) => void res.json({ ...measureView(), ways: WAYS })));
+  api.post(
+    '/index/measure',
+    wrap(async (req, res) => {
+      const body = z.object({ what: z.enum(['measure', 'compare']), fresh: z.boolean().optional() }).strict().parse(req.body);
+      startMeasure(body.what, body.fresh === true);
+      res.json({ ...measureView(), ways: WAYS });
+    }),
+  );
+  api.post(
+    '/index/measure/stop',
+    wrap(async (_req, res) => {
+      stopMeasure();
+      res.json({ ...measureView(), ways: WAYS });
     }),
   );
   api.delete(

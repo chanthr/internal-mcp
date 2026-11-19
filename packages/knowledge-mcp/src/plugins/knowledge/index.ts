@@ -14,6 +14,7 @@ import { driveConfigured } from '../drive/index.js';
 import { backfillVectors, indexAvailable } from '../drive/indexer.js';
 import { EMBEDDING_MODEL } from '../drive/embeddings.js';
 import { reembed } from './reembed.js';
+import { compare, measure } from './measure.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 import { foldersConfigured, scanFolders, startFolderScans } from './folders.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
@@ -84,6 +85,44 @@ export const knowledgePlugin = definePlugin({
           `Scanned ${r.folders} folder(s), ${r.files} file(s): indexed ${r.indexed}, unchanged ${r.unchanged}, no text ${r.skipped}, removed ${r.removed}, errors ${r.errored}` +
             (r.unreadable.length ? `\nCould not read: ${r.unreadable.join(', ')}` : ''),
         );
+      },
+    },
+    measure: {
+      description: 'ask the measuring questions of the index as it is: where the right document comes, by keywords, by meaning and both (--new: write new questions)',
+      run: async (args) => {
+        const progress = { phase: 'asking' as const, done: 0, total: 0, way: null };
+        const timer = setInterval(() => console.error(`[knowledge] ${progress.phase} ${progress.done}/${progress.total}`), 5000);
+        try {
+          const r = await measure({ fresh: args.includes('--new'), progress });
+          console.log(`${r.questions} questions, ${r.passages} passages from ${r.documents} documents (${r.cut}${r.model ? `, ${r.model}` : ''})`);
+          for (const k of ['both', 'keyword', 'meaning'] as const) {
+            const s = r.modes[k];
+            console.log(`  ${k.padEnd(8)} ${s ? `first ${s.first}, first 3 ${s.top3}, first 10 ${s.top10}, MRR ${s.mrr}` : `not measured (${r.note})`}`);
+          }
+        } catch (e) {
+          console.log(e instanceof Error ? e.message : String(e));
+          process.exitCode = 1;
+        } finally {
+          clearInterval(timer);
+        }
+      },
+    },
+    compare: {
+      description: 'cut a sample of the folder documents each way, embed it in memory and ask the measuring questions by meaning; the index is not changed',
+      run: async (args) => {
+        const progress = { phase: 'embedding' as const, done: 0, total: 0, way: null as string | null };
+        const timer = setInterval(() => console.error(`[knowledge] ${progress.phase} ${progress.way ?? ''} ${progress.done}/${progress.total}`), 5000);
+        try {
+          const r = await compare({ fresh: args.includes('--new'), progress });
+          console.log(`${r.questions} questions on ${r.documents} documents, ${r.model}. Where the right document came, by meaning:`);
+          for (const w of r.ways) console.log(`  ${w.cut.padEnd(22)} ${String(w.passages).padStart(6)} passages  first ${w.score.first}, first 3 ${w.score.top3}, first 10 ${w.score.top10}, MRR ${w.score.mrr}`);
+          console.log('Set one in mcp.config.json under knowledge.index (cut, maxTokens), or choose it in the console.');
+        } catch (e) {
+          console.log(e instanceof Error ? e.message : String(e));
+          process.exitCode = 1;
+        } finally {
+          clearInterval(timer);
+        }
       },
     },
     reembed: {
