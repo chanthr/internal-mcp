@@ -202,11 +202,11 @@ p { margin: 0; }
 .chat-suggestion { appearance: none; font: inherit; font-size: 13px; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--sheet); color: var(--text); cursor: pointer; }
 .chat-suggestion:hover { background: var(--hover); }
 .chat-turns { display: flex; flex-direction: column; gap: 28px; }
-.chat-user { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 16px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.chat-user { align-self: flex-end; max-width: 80%; padding: 10px 16px; border-radius: 18px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.6; }
 .chat-answer { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
 /* The tool cards draw their edge with a shadow, and the group clips its list: room on every side keeps the edge */
 .chat-calls .ui-tclc-group__list { padding: 6px 3px 4px; }
-.chat-text { overflow-wrap: anywhere; line-height: 1.65; }
+.chat-text { overflow-wrap: anywhere; }
 .chat-meta { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* The actions bar measures itself (container query), so it gets its width here: one button */
 .chat-meta > .ui-mac { flex: none; width: 30px; }
@@ -224,33 +224,45 @@ p { margin: 0; }
 .chat-send:not([data-stop]) svg { fill: none; }
 .chat-send:disabled { opacity: 0.3; cursor: default; }
 .chat-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--faint); }
-/* An answer as a document. Headings by size and weight, lists and tables with room to breathe */
-.md { line-height: 1.65; }
-.md > * + * { margin-top: 12px; }
-.md p, .md ul, .md ol, .md pre, .md blockquote, .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 0; }
-.md h1, .md h2 { font-size: 17px; line-height: 1.35; font-weight: 600; letter-spacing: -0.01em; }
-.md h3 { font-size: 15px; line-height: 1.4; font-weight: 600; }
-.md h4, .md h5, .md h6 { font-size: 14px; font-weight: 600; }
-.md > :is(h1, h2, h3):not(:first-child) { margin-top: 22px; }
-.md ul, .md ol { padding-left: 22px; }
-.md li + li { margin-top: 4px; }
-.md li > ul, .md li > ol { margin-top: 4px; }
-.md li > p + p { margin-top: 6px; }
-.md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -20px; }
-.md li > input[type="checkbox"] { margin: 0 6px 0 0; vertical-align: -1px; }
+/* An answer as a document, sized for reading: 15px text with room between lines and between blocks. Headings by
+   size and weight; tables as rows with rules between them, no grid. The resets sit in :where() so the spacing
+   below always wins over them. */
+.md { font-size: 15px; line-height: 1.75; }
+.md :where(p, ul, ol, pre, blockquote, h1, h2, h3, h4, h5, h6, hr, table) { margin: 0; }
+.md > * + * { margin-top: 16px; }
+.md h1 { font-size: 21px; line-height: 1.35; font-weight: 600; letter-spacing: -0.015em; }
+.md h2 { font-size: 19px; line-height: 1.4; font-weight: 600; letter-spacing: -0.01em; }
+.md h3 { font-size: 16px; line-height: 1.45; font-weight: 600; }
+.md :is(h4, h5, h6) { font-size: 15px; line-height: 1.5; font-weight: 600; }
+.md > :is(h1, h2):not(:first-child) { margin-top: 32px; }
+.md > :is(h3, h4, h5, h6):not(:first-child) { margin-top: 26px; }
+.md > :is(h1, h2, h3, h4, h5, h6) + * { margin-top: 8px; }
+.md ul, .md ol { padding-left: 24px; }
+.md li { padding-left: 2px; }
+.md li::marker { color: var(--muted); }
+.md li + li { margin-top: 6px; }
+.md li > :is(ul, ol) { margin-top: 6px; }
+.md li > p + p { margin-top: 8px; }
+.md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -22px; }
+.md li > input[type="checkbox"] { margin: 0 8px 0 0; vertical-align: -1px; }
 .md strong { font-weight: 600; }
 /* Code in a sentence. Code blocks draw their own (the code block component) */
-.md :not(pre) > code { font-family: var(--mono); font-size: 0.9em; padding: 1px 5px; border-radius: 5px; background: var(--hover); }
-.md blockquote { padding: 2px 0 2px 14px; border-left: 2px solid var(--line); color: var(--muted); }
-.md hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+.md :not(pre) > code { font-family: var(--mono); font-size: 0.86em; padding: 2px 6px; border-radius: 6px; background: var(--hover); }
+.md blockquote { padding: 2px 0 2px 16px; border-left: 3px solid var(--line); color: var(--muted); }
+.md > hr { border: 0; border-top: 1px solid var(--line); margin: 28px 0; }
 .md a { color: inherit; text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 3px; }
+.md a:hover { text-decoration-color: currentColor; }
 .md .md-ref { text-decoration: underline dotted; text-decoration-color: var(--faint); text-underline-offset: 3px; cursor: help; }
 .md .md-code { margin: 0; }
-.md-table { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
-.md-table table { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.5; }
-.md-table th { text-align: left; font-weight: 600; background: var(--hover); white-space: nowrap; }
-.md-table th, .md-table td { padding: 8px 12px; border-top: 1px solid var(--line); vertical-align: top; }
-.md-table tr:first-child th { border-top: 0; }
+.md > .md-code, .md > .md-table { margin-top: 20px; }
+.md > :is(.md-code, .md-table) + * { margin-top: 20px; }
+.md-table { overflow-x: auto; }
+.md-table table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.md-table th { text-align: left; font-weight: 600; white-space: nowrap; border-bottom: 1px solid var(--faint); }
+.md-table th, .md-table td { padding: 10px 20px 10px 0; vertical-align: top; }
+.md-table :is(th, td):last-child { padding-right: 0; }
+.md-table td { border-bottom: 1px solid var(--line); }
+.md-table tbody tr:last-child td { border-bottom: 0; }
 .md-table td code { white-space: nowrap; }
 .chat-wait { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .chat-meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
