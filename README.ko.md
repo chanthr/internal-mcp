@@ -653,6 +653,19 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 2. **인스턴스 하나.** 세션과 진행 중인 로그인은 메모리에 있고, SQLite는 파일 하나입니다. 한 대만 띄웁니다.
 3. **`/data` 유지.** 볼륨이 없으면 재배포 때 키와 사용자가 사라집니다.
 
+### 내 컴퓨터에서 공개 주소 만들기
+
+밖에서 접속하게 하려고 서버를 다른 곳으로 옮기지 않아도 됩니다. 콘솔의 **Connect a client → Other people**에서 [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/)로 https 주소를 붙입니다. Cloudflare의 프로그램 cloudflared가 내 컴퓨터에서 바깥으로 연결하므로, 공유기에서 열 것도 없고 인증서를 만들 것도 없습니다.
+
+| | 임시 주소 | 내 주소 |
+| --- | --- | --- |
+| 모양 | `https://<낱말>.trycloudflare.com` | `https://mcp.example.com` |
+| 필요한 것 | 없음 | Cloudflare 계정에 있는 도메인. 한 번 로그인합니다. 콘솔이 `cloudflared tunnel login`을 실행하고 브라우저가 열립니다 |
+| 유지 | 끌 때까지. 켤 때마다 새 주소 | 주소가 그대로이고, 서버를 다시 띄우면 함께 돌아옵니다 |
+| 용도 | 시험. Cloudflare가 보장하지 않고, 오래 열어 두는 스트림은 지나가지 않습니다 | 다른 사람, 웹의 Claude, ChatGPT |
+
+Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과 DNS 레코드를 만들고, 터널을 시작합니다. 그 이름에 이미 있는 DNS 레코드는 덮어쓰지 않습니다. 바뀌지 않는 것이 있습니다. `/mcp`는 전과 같이 키나 로그인을 요구하고, 콘솔은 내 컴퓨터에서만 응답합니다(터널로 오면 403). 사용자의 cloudflared 설정(`~/.cloudflared/config.yml`, 다른 터널)은 읽지도 바꾸지도 않습니다. 이 터널의 설정 파일과 자격 증명은 데이터 폴더에 따로 둡니다.
+
 ## 클라이언트 연결
 
 콘솔의 **Connect a client** 화면이 대신 해 줍니다. 클라이언트마다 버튼이 하나 있고, 내 폴더와 서버 이름에 맞춘

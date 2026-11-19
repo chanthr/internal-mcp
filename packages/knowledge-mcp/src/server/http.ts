@@ -26,6 +26,7 @@ import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import { VERSION } from '../version.js';
 import { consoleOpenUrl, consoleUrl, mountConsole } from '../admin/routes.js';
 import { followSupervisor, reportReady } from '../admin/supervisor.js';
+import { resumeTunnel } from '../admin/tunnel.js';
 import type { Registry } from '../plugin/registry.js';
 import { resolveUser } from './identity.js';
 import { createMcpServer } from './mcp.js';
@@ -524,6 +525,8 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   const port = typeof address === 'object' && address ? address.port : wanted;
   console.error(`[knowledge-mcp] HTTP mode · listening on :${port} · version=${VERSION}`);
   reportReady({ port, consoleUrl: consoleOn ? consoleUrl(port) : null, openUrl: consoleOn ? consoleOpenUrl(port) : null });
+  // The public address the person turned on in the console (admin/tunnel.ts) comes back with the server.
+  if (consoleOn) void resumeTunnel(port);
 
   // External connections start in the background after the port is open, so /health comes up first even when upstream
   // or Qdrant does not respond

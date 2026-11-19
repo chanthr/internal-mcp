@@ -40,6 +40,7 @@ import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
 import { checkLlm, listLlmModels, llmConfigured, llmSettings, type LlmKind } from '../core/llm.js';
 import { createWiki, startWikiRun, stopWikiRun, WIKI, wikiDir, wikiExists, wikiStatus } from '../plugins/knowledge/wiki.js';
 import { openInBrowser } from './launch.js';
+import { startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
@@ -476,6 +477,24 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       change(res);
     }),
   );
+  // ── Reaching the server from outside through a Cloudflare Tunnel (tunnel.ts) ──
+  api.get('/tunnel', wrap(async (_req, res) => void res.json(await tunnelView())));
+  api.post(
+    '/tunnel',
+    wrap(async (req, res) => {
+      const body = z.discriminatedUnion('mode', [z.object({ mode: z.literal('quick') }), z.object({ mode: z.literal('named'), hostname: visible(253).min(4) })]).parse(req.body);
+      const port = req.socket.localPort ?? 0;
+      res.json(body.mode === 'quick' ? await startQuickTunnel(port) : await startNamedTunnel(port, body.hostname));
+    }),
+  );
+  api.delete(
+    '/tunnel',
+    wrap(async (_req, res) => {
+      stopTunnel();
+      res.json(await tunnelView());
+    }),
+  );
+
   // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
   api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured() })));
   api.post(

@@ -47,6 +47,12 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A public address from your own machine (Cloudflare Tunnel).** *Connect a client → Other people* gives the
+  server an https address without moving it: a temporary one (`…trycloudflare.com`, no account, for trying it
+  out) or your own (`mcp.example.com`, on a domain in your Cloudflare account). The console installs cloudflared,
+  runs its sign-in, makes the tunnel and its DNS record (an existing record is never written over), starts it,
+  and brings it back when the server is started again. `/mcp` asks for a key as before, and the console is not
+  reachable through the tunnel (403). Your own cloudflared config and tunnels are not touched.
 - **A wiki written from your documents.** With a model connected, *Agent → Create the wiki* makes `wiki/`
   beside the settings, and *Read documents* fills it: one page per document (what it says, the topics it feeds)
   and one page per topic that gathers what all the documents say, each fact with the document it comes from,

@@ -659,10 +659,31 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 | Built-in connectors | `ghcr.io/chanthr/knowledge-mcp` (`latest` = newest release, `x.y.z`, `edge` = `main`). [`compose.yaml`](compose.yaml) runs it with a data volume |
 | Your own project | `docker build` with the generated `Dockerfile`, then run it with a volume at `/data` |
 | Railway | [`railway.toml`](railway.toml). Add a volume at `/data`, or set `MCP_STORE=supabase` |
+| From your own machine | A Cloudflare Tunnel, set up in the console (below). The server, the documents and the index stay where they are |
 
 1. **HTTPS.** Put the server behind HTTPS before remote clients connect. OAuth needs an `https` issuer.
 2. **One replica.** Sessions and pending sign-ins live in memory, and SQLite is one file. Run a single instance.
 3. **Keep `/data`.** Without a volume, keys and users are lost on redeploy.
+
+### A public address from your own machine
+
+The server does not have to move anywhere to be reached from outside. **Connect a client → Other people** in the
+console gives it an https address through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/):
+cloudflared, Cloudflare's program, connects out from your machine, so there is nothing to open in a router and no
+certificate to make.
+
+| | A temporary address | Your own address |
+| --- | --- | --- |
+| Looks like | `https://<words>.trycloudflare.com` | `https://mcp.example.com` |
+| Needs | Nothing | A domain in a Cloudflare account. You sign in once; the console runs `cloudflared tunnel login` and the browser opens |
+| Lasts | Until it is stopped. New each time | It stays the same, and comes back when the server is started again |
+| For | Trying it out. Cloudflare gives no guarantee for it and it carries no long-lived streams | Other people, Claude on the web, ChatGPT |
+
+The console installs cloudflared where there is Homebrew or winget, makes the tunnel and its DNS record, and
+starts it. A DNS record that already exists under that name is not written over. What does not change: `/mcp`
+asks for a key or a sign-in as before, and the console answers on your machine only (through the tunnel it
+answers 403). Your own cloudflared setup (`~/.cloudflared/config.yml`, your other tunnels) is not read or changed:
+the tunnel has a config file and credentials of its own in the data directory.
 
 ## Connect a client
 

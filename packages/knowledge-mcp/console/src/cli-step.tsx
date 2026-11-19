@@ -29,7 +29,7 @@ export function CliStep({
   onStart,
   autoStart,
 }: {
-  tool: 'gcloud' | 'gh';
+  tool: 'gcloud' | 'gh' | 'cloudflared';
   action: 'install' | 'sign-in';
   label: string;
   /** The command ended well: look at the tool again. */
