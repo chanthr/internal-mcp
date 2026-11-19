@@ -88,8 +88,6 @@ p { margin: 0; }
 .inline { display: flex; align-items: flex-end; gap: 8px; }
 .field-help { color: var(--muted); font-size: 12px; margin-top: -4px; }
 .inline > :first-child { flex: 1; min-width: 0; }
-/* A button that reads as a link inside a sentence */
-.link-button { appearance: none; border: 0; padding: 0; background: none; font: inherit; color: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 /* A choice in a list row: the radio and its label on one line */
 .radio-line { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .radio-line input { margin: 0; accent-color: var(--text); }
@@ -120,6 +118,17 @@ p { margin: 0; }
 .one-time-code { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: 0.08em; user-select: all; }
 .link:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 2px; }
 .error { color: var(--danger); font-size: 12px; }
+.error.below { margin-top: 8px; }
+/* Setting up, step by step: a number, or a check once done */
+.step-title { display: inline-flex; align-items: center; gap: 10px; }
+.step-mark { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--line); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.step-mark[data-done] { border-color: transparent; background: var(--text); color: var(--sheet); }
+/* Tabs under a page's title, and the line that opens a tab */
+.page-tabs { margin: -4px 0 24px; }
+.tab-intro { margin: 0 0 16px; }
+/* The tool being tried: its name, then what it does */
+.try-name { font-size: 13px; font-weight: 500; }
+.try-description { margin-top: 4px; }
 .drop { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border: 1px dashed var(--faint); border-radius: 10px; transition: background-color 120ms ease, border-color 120ms ease; }
 .drop[data-over] { background: var(--hover); border-color: var(--text); }
 .drop-title { font-weight: 500; }

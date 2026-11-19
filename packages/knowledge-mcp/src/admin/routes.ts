@@ -634,7 +634,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (configuredFolders(dir).some((f) => f.path === root)) return void res.json({ ok: true, restarting: false, restartNeeded: false });
       const r = await setup(['folder', root, '--name', WIKI], dir);
       if (!r.ok) return refuse(res, 422, firstLine(r.lines));
-      change(res, { note: 'The wiki folder is made. Read your documents into it from the Agent page.' });
+      change(res, { note: 'The wiki folder is made. Read your documents into it from the Wiki page.' });
     }),
   );
   api.post(
@@ -1305,7 +1305,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         .strict()
         .parse(req.body);
       const settings = llmSettings();
-      if (!settings) return refuse(res, 409, 'No model is connected. Connect one on the Agent page.');
+      if (!settings) return refuse(res, 409, 'No language model is connected. Connect one on the Models page.');
       // One event per line, as they happen. The page reads them while the answer is written.
       res.status(200);
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { call, type Changed } from '../api';
 import { AskFirst, Row, Section, useAction, useServer } from '../app';
+import { hostOf, num, plural } from '../format';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
@@ -54,64 +55,36 @@ const LOCAL_MODELS: Array<{ model: string; size: string; note: string }> = [
   { model: 'glm-ocr:q8_0', size: '1.8 GB', note: 'Smaller and three times as fast, about 5 seconds a page. About 1 character in 10 wrong on Korean pages.' },
 ];
 const HF_BASE = 'https://router.huggingface.co/v1';
-const n = (count: number, word: string) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
 const gb = (bytes: number) => `${(bytes / 1e9).toFixed(1)} GB`;
 
-export function Scanned() {
-  const { state, apply } = useServer();
+/** What reading scans stands at: the files waiting, the run going on, models in Ollama. Read again while it moves. */
+function useOcr() {
+  const { state } = useServer();
   const o = state.services.ocr;
   const [s, setS] = useState<OcrStatus | null>(null);
-  const [open, setOpen] = useState(false);
-  const act = useAction();
-  const off = useAction();
   const load = useCallback(() => call<OcrStatus>('GET', '/ocr').then(setS, () => undefined), []);
   useEffect(() => void load(), [load, o.set, o.model, state.folders.length]);
   const running = !!s?.run?.running;
-  // While reading, the numbers move: read them again every second or so, on this page only.
   useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => void load(), 1200);
     return () => clearInterval(timer);
   }, [running, load]);
+  return { s, load, running };
+}
+
+/** Models page: which model reads scans, set up and turned off here. */
+export function ScanModel() {
+  const { state, apply } = useServer();
+  const o = state.services.ocr;
+  const { s, load, running } = useOcr();
+  const [open, setOpen] = useState(false);
+  const act = useAction();
+  const off = useAction();
   if (!s) return null;
-
-  const run = s.run;
-  const last = run && !run.running ? run : null;
-  const where = !o.set ? null : o.kind === 'mathpix' ? 'Mathpix' : o.local ? 'On this computer' : (() => {
-    try {
-      return new URL(o.baseUrl ?? '').host;
-    } catch {
-      return o.baseUrl;
-    }
-  })();
-
-  const help = running && run ? (
-    <>
-      Reading {Math.min(run.done + 1, run.total).toLocaleString()} of {n(run.total, 'file')}
-      {run.current ? `: ${run.current}` : ''}
-      {run.page && run.page.total > 1 ? `, page ${Math.min(run.page.done + 1, run.page.total)} of ${run.page.total}` : ''}
-    </>
-  ) : (
-    <>
-      {s.waiting > 0 ? `${n(s.waiting, 'file')} with no text: scans or images.` : 'No scanned files are waiting.'}
-      {!o.set && s.waiting > 0 && ' They are left out of search until their text is read.'}
-      {last && (
-        <span className="row-note">
-          Last run: {n(last.read, 'file')} read ({n(last.pages, 'page')}){last.empty ? `, ${last.empty} with nothing found` : ''}
-          {last.endedAt ? ` in ${Math.max(1, Math.round((last.endedAt - last.startedAt) / 1000)).toLocaleString()} s` : ''}.{last.stopped ? ` ${last.stopped}` : ''}
-        </span>
-      )}
-      {last && last.failed.length > 0 && (
-        <span className="row-note error">
-          Not read: {last.failed.slice(0, 2).map((f) => `${f.name} (${f.why})`).join('; ')}
-          {last.failed.length > 2 ? ` and ${last.failed.length - 2} more` : ''}
-        </span>
-      )}
-    </>
-  );
-
+  const where = !o.set ? null : o.kind === 'mathpix' ? 'Mathpix' : o.local ? 'On this computer' : hostOf(o.baseUrl);
   return (
-    <Section title="Scanned files" text="Scanned PDFs and images have no text to search until it is read from the page (OCR).">
+    <Section title="Reading scans" text="Scanned PDFs and images have no text to search until a model reads it from the page (OCR).">
       <div className="rows">
         <Row
           title={
@@ -123,21 +96,12 @@ export function Scanned() {
               'Off'
             )
           }
-          help={<span className={act.error || off.error ? 'error' : undefined}>{act.error ?? off.error ?? help}</span>}
+          help={
+            <span className={act.error || off.error ? 'error' : undefined}>
+              {act.error ?? off.error ?? (o.set ? 'Scans are read from the Documents page.' : 'A model on this computer through Ollama, Hugging Face, another endpoint, or Mathpix.')}
+            </span>
+          }
         >
-          {running ? (
-            <>
-              <Spinner />
-              <Button size="sm" variant="ghost" onClick={() => void call('POST', '/ocr/stop').then(load, load)}>Stop</Button>
-            </>
-          ) : (
-            o.set &&
-            s.waiting > 0 && (
-              <Button size="sm" loading={act.busy} onClick={() => void act.run(async () => { await call('POST', '/ocr/run', {}); await load(); })}>
-                Read {n(s.waiting, 'file')}
-              </Button>
-            )
-          )}
           {o.set && !running && (
             <AskFirst
               label="Turn off"
@@ -164,6 +128,66 @@ export function Scanned() {
         )}
       </div>
       {open && <SetUp status={s} reload={load} onClose={() => setOpen(false)} />}
+    </Section>
+  );
+}
+
+/** Documents page: the scanned files waiting to be read, and reading them. */
+export function ScannedFiles() {
+  const { state, go } = useServer();
+  const o = state.services.ocr;
+  const { s, load, running } = useOcr();
+  const act = useAction();
+  // Nothing scanned and nothing set up: nothing to say.
+  if (!s || (!o.set && s.waiting === 0 && !s.run)) return null;
+
+  const run = s.run;
+  const last = run && !run.running ? run : null;
+  const help = running && run ? (
+    <>
+      Reading {num(Math.min(run.done + 1, run.total))} of {plural(run.total, 'file')}
+      {run.current ? `: ${run.current}` : ''}
+      {run.page && run.page.total > 1 ? `, page ${Math.min(run.page.done + 1, run.page.total)} of ${run.page.total}` : ''}
+    </>
+  ) : (
+    <>
+      {s.waiting > 0 ? `${plural(s.waiting, 'file')} with no text: scans or images.` : 'No scanned files are waiting.'}
+      {!o.set && s.waiting > 0 && ' They are left out of search until a model reads their text.'}
+      {last && (
+        <span className="row-note">
+          Last run: {plural(last.read, 'file')} read ({plural(last.pages, 'page')}){last.empty ? `, ${last.empty} with nothing found` : ''}
+          {last.endedAt ? ` in ${num(Math.max(1, Math.round((last.endedAt - last.startedAt) / 1000)))} s` : ''}.{last.stopped ? ` ${last.stopped}` : ''}
+        </span>
+      )}
+      {last && last.failed.length > 0 && (
+        <span className="row-note error">
+          Not read: {last.failed.slice(0, 2).map((f) => `${f.name} (${f.why})`).join('; ')}
+          {last.failed.length > 2 ? ` and ${last.failed.length - 2} more` : ''}
+        </span>
+      )}
+    </>
+  );
+
+  return (
+    <Section title="Scanned files" text={o.set ? `Read by ${o.model}.` : 'Scanned PDFs and images have no text to search until it is read from the page (OCR).'}>
+      <div className="rows">
+        <Row title={running ? 'Reading' : s.waiting > 0 ? 'Waiting to be read' : 'All read'} help={<span className={act.error ? 'error' : undefined}>{act.error ?? help}</span>}>
+          {running ? (
+            <>
+              <Spinner />
+              <Button size="sm" variant="ghost" onClick={() => void call('POST', '/ocr/stop').then(load, load)}>Stop</Button>
+            </>
+          ) : !o.set ? (
+            <Button size="sm" variant="secondary" onClick={() => go('models')}>Choose a model</Button>
+          ) : (
+            s.waiting > 0 && (
+              <Button size="sm" loading={act.busy} onClick={() => void act.run(async () => { await call('POST', '/ocr/run', {}); await load(); })}>
+                Read {plural(s.waiting, 'file')}
+              </Button>
+            )
+          )}
+        </Row>
+      </div>
     </Section>
   );
 }

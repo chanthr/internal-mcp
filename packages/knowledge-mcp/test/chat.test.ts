@@ -90,7 +90,7 @@ test('reasoning in <think> is hidden, even when its tag arrives in pieces', () =
 test('without a connected model the chat says where to connect one', async () => {
   const r = await chat('hello');
   assert.equal(r.status, 409);
-  assert.match(r.text, /Agent page/);
+  assert.match(r.text, /Models page/);
 });
 
 test('an OpenAI-style endpoint: the model searches, the result goes back to it, and the answer streams to the page', async () => {

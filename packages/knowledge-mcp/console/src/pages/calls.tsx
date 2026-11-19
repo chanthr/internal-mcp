@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { call } from '../api';
-import { Page, Section } from '../app';
+import { Section } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { EmptyState } from '../ui/empty-state';
@@ -26,14 +26,14 @@ function ago(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-export function Activity() {
+/** The latest tool calls: the second tab of the Tools page. */
+export function Calls() {
   const [calls, setCalls] = useState<Call[] | null>(null);
   const load = useCallback(async () => setCalls((await call<{ calls: Call[] }>('GET', '/activity?limit=100')).calls), []);
   useEffect(() => void load().catch(() => setCalls([])), [load]);
 
   return (
-    <Page title="Activity" text="The latest tool calls. What was asked is not stored, only that it was.">
-      <Section title="Latest calls" action={<Button size="sm" variant="ghost" onClick={() => void load()}>Refresh</Button>}>
+    <Section title="Latest calls" text="What was asked is not stored, only that it was." action={<Button size="sm" variant="ghost" onClick={() => void load()}>Refresh</Button>}>
         {calls?.length === 0 ? (
           <EmptyState icon={null} title="No calls yet" text="When a client uses a tool, or you try one here, the call shows up." />
         ) : (
@@ -64,7 +64,6 @@ export function Activity() {
             </table>
           </div>
         )}
-      </Section>
-    </Page>
+    </Section>
   );
 }

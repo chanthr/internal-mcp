@@ -1,6 +1,7 @@
 /**
- * Agent: work the server does by itself, with a language model the person connects. Until one is connected the
- * server calls no model. The model is picked from the provider's own list.
+ * Models: the language model (Chat, the wiki), the embedding model (search by meaning) and the model that reads
+ * scans. Each is picked from what its provider lists, and asked once before it is saved. Until one is connected the
+ * server calls no model.
  */
 import { useEffect, useState } from 'react';
 import { call, type Changed } from '../api';
@@ -13,7 +14,10 @@ interface ChatgptView {
   waiting: boolean;
   error: string | null;
 }
-import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
+import { AskFirst, LinkButton, Page, Row, Section, useAction, useServer } from '../app';
+import { Meaning } from './meaning';
+import { ScanModel } from './scanned';
+import { ModelList } from '../model-list';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
 import { Select } from '../ui/select';
@@ -47,20 +51,31 @@ const PROVIDERS: Provider[] = [
 const providerOf = (kind: Kind | null, baseUrl: string | null): Provider =>
   PROVIDERS.find((p) => p.kind === kind && (kind !== 'openai' || p.baseUrl === baseUrl)) ?? PROVIDERS[kind === 'openai' ? PROVIDERS.length - 1 : 0];
 
-export function Agent() {
+export function Models() {
+  return (
+    <Page title="Models" text="Every model here is optional. Without any, search works by keywords and the tools work as they are.">
+      <LanguageModel />
+      <Meaning />
+      <ScanModel />
+    </Page>
+  );
+}
+
+/** The language model: answers in Chat, writes the wiki, writes questions to measure search with. */
+function LanguageModel() {
   const { state, apply } = useServer();
   const llm = state.services.llm;
   const [open, setOpen] = useState(false);
   const saved = providerOf(llm.provider, llm.baseUrl);
   return (
-    <Page title="Agent" text="Work the server does by itself, with a model you connect.">
-      <Section title="Model" text="Used for the jobs on this page and for Chat. Search and the tools work without it.">
+    <>
+      <Section title="Language model" text="Answers in Chat and writes the wiki.">
         <div className="rows">
           <Row
             title={llm.set ? llm.model : 'No model connected'}
             help={
               llm.set
-                ? `${saved.id === 'other' ? llm.baseUrl : saved.label}. Text of your documents goes to it only while a job here runs or you chat.`
+                ? `${saved.id === 'other' ? llm.baseUrl : saved.label}. Text of your documents goes to it only while you chat or the wiki is written.`
                 : 'Your ChatGPT plan, Claude, OpenRouter, OpenAI, a model on this machine, or any endpoint that speaks the OpenAI API.'
             }
           >
@@ -78,123 +93,8 @@ export function Agent() {
           </Row>
         </div>
       </Section>
-      <Wiki />
       {open && <ConnectModel onClose={() => setOpen(false)} />}
-    </Page>
-  );
-}
-
-interface WikiRun {
-  running: boolean;
-  done: number;
-  total: number;
-  phase: 'reading' | 'writing';
-  current: string | null;
-  written: number;
-  failed: Array<{ document: string; why: string }>;
-  usage: { input: number; output: number; calls: number };
-  stopped: string | null;
-  finishedAt: string | null;
-}
-interface WikiStatus {
-  exists: boolean;
-  path: string;
-  documents: number;
-  topics: number;
-  waiting: number;
-  gone: number;
-  run: WikiRun | null;
-  model: boolean;
-}
-/** How many documents one press reads. Reading costs: a person sees what it came to before reading on. */
-const BATCH = 25;
-const n = (count: number, word: string) => `${count.toLocaleString()} ${word}${count === 1 ? '' : 's'}`;
-
-/** The wiki the model writes from the documents: make it, read documents into it, and see how far a run is. */
-function Wiki() {
-  const { state, apply } = useServer();
-  const [wiki, setWiki] = useState<WikiStatus | null>(null);
-  const act = useAction();
-  const load = () => call<WikiStatus>('GET', '/wiki').then(setWiki, () => undefined);
-  // Asked again when the settings change (a model was connected, the folder was made).
-  useEffect(() => {
-    void load();
-  }, [state.services.llm.set, state.folders.length]);
-  const running = !!wiki?.run?.running;
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => void load(), 1500);
-    return () => clearInterval(timer);
-  }, [running]);
-
-  const run = wiki?.run ?? null;
-  const next = Math.min(wiki?.waiting ?? 0, BATCH);
-  const last = run && !run.running ? run : null;
-  return (
-    <Section title="Wiki" text="Pages the model writes from your documents: one per document, and one per topic that gathers what all of them say.">
-      <div className="rows">
-        {!wiki ? null : !wiki.exists ? (
-          <Row
-            title="No wiki yet"
-            help="A folder of Markdown pages with links between them, beside your settings. It is searched like your other folders, and opens in Obsidian as it is. Your documents are not changed."
-          >
-            <Button size="sm" variant="secondary" loading={act.busy} disabled={!state.editable} onClick={() => void act.run(async () => { await apply(() => call<Changed>('POST', '/wiki')); await load(); })}>
-              Create the wiki
-            </Button>
-          </Row>
-        ) : (
-          <Row
-            title={wiki.path}
-            help={
-              running && run ? (
-                run.phase === 'writing' ? (
-                  <>All {n(run.total, 'document')} read. Writing the topic pages{run.current ? `: ${run.current}` : ''}</>
-                ) : (
-                  <>
-                    Reading {Math.min(run.done + 1, run.total).toLocaleString()} of {run.total.toLocaleString()}
-                    {run.current ? `: ${run.current}` : ''}
-                  </>
-                )
-              ) : (
-                <>
-                  {n(wiki.documents, 'document')} read, {n(wiki.topics, 'topic')}.{' '}
-                  {wiki.waiting > 0 ? `${n(wiki.waiting, 'document')} new or changed since.` : wiki.documents > 0 ? 'Nothing new to read.' : 'Nothing is read yet.'}
-                  {!wiki.model && <span className="row-note">Connect a model above to read documents into it.</span>}
-                  {last && (
-                    <span className="row-note">
-                      Last run: {n(last.done - last.failed.filter((f) => !f.document.startsWith('topic: ')).length, 'document')} read with {n(last.usage.calls, 'question')} to the model (
-                      {last.usage.input.toLocaleString()} tokens in, {last.usage.output.toLocaleString()} out).
-                      {last.stopped ? ` ${last.stopped}` : ''}
-                    </span>
-                  )}
-                  {last && last.failed.length > 0 && (
-                    <span className="row-note">
-                      Not read: {last.failed.slice(0, 3).map((f) => `${f.document} (${f.why})`).join('; ')}
-                      {last.failed.length > 3 ? ` and ${last.failed.length - 3} more` : ''}
-                    </span>
-                  )}
-                </>
-              )
-            }
-          >
-            {running ? (
-              <Button size="sm" variant="ghost" onClick={() => void call('POST', '/wiki/stop').then(load, load)}>Stop</Button>
-            ) : (
-              <Button
-                size="sm"
-                variant="secondary"
-                loading={act.busy}
-                disabled={!wiki.model || next === 0}
-                onClick={() => void act.run(async () => { await call('POST', '/wiki/run', { limit: BATCH }); await load(); })}
-              >
-                {next > 0 ? `Read ${n(next, 'document')}` : 'Read documents'}
-              </Button>
-            )}
-          </Row>
-        )}
-      </div>
-      {act.error && <p className="error" role="alert">{act.error}</p>}
-    </Section>
+    </>
   );
 }
 
@@ -205,7 +105,6 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
   const [address, setAddress] = useState(llm.provider === 'openai' && providerOf(llm.provider, llm.baseUrl).id === 'other' ? llm.baseUrl ?? '' : '');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState<Array<{ id: string; name: string }> | null>(null);
-  const [filter, setFilter] = useState('');
   const [model, setModel] = useState('');
   const find = useAction();
   const save = useAction();
@@ -248,7 +147,6 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
     setProvider(PROVIDERS.find((p) => p.id === id) ?? PROVIDERS[0]);
     setModels(null);
     setModel('');
-    setFilter('');
     find.clear();
     save.clear();
   };
@@ -264,7 +162,6 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
     if (gptReady && models === null) findModels();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gptReady]);
-  const shown = (models ?? []).filter((m) => !filter.trim() || `${m.id} ${m.name}`.toLowerCase().includes(filter.trim().toLowerCase()));
 
   return (
     <Dialog
@@ -273,8 +170,8 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
       title="Connect a model"
       description={
         provider.kind === 'chatgpt'
-          ? 'The sign-in is kept on this machine, readable only by you. Text of your documents goes to OpenAI only while a job on the Agent page runs, or while you chat.'
-          : 'The key is saved in .env on this machine. Text of your documents goes to this provider only while a job on the Agent page runs, or while you chat.'
+          ? 'The sign-in is kept on this machine, readable only by you. Text of your documents goes to OpenAI only while you chat or the wiki is written.'
+          : 'The key is saved in .env on this machine. Text of your documents goes to this provider only while you chat or the wiki is written.'
       }
       footer={
         <>
@@ -312,9 +209,7 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
                 ) : (
                   'Using your plan was not allowed. Continue with ChatGPT again and allow it.'
                 )}{' '}
-                <button
-                  type="button"
-                  className="link-button"
+                <LinkButton
                   onClick={() =>
                     void signIn.run(async () => {
                       const after = await apply(() => call<Changed & ChatgptView>('DELETE', '/llm/chatgpt'));
@@ -325,7 +220,7 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
                   }
                 >
                   Sign out
-                </button>
+                </LinkButton>
               </p>
             ) : (
               <p className="field-help">
@@ -359,16 +254,7 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
         ) : models.length === 0 ? (
           <p className="field-help">This provider lists no models for the key.</p>
         ) : (
-          <>
-            {models.length > 25 && <TextField label="Find a model" placeholder="claude, gpt, llama…" value={filter} onChange={(e) => setFilter(e.target.value)} autoComplete="off" spellCheck={false} />}
-            <Select
-              label="Model"
-              value={model}
-              onChange={setModel}
-              options={shown.slice(0, 200).map((m) => ({ value: m.id, label: m.name === m.id ? m.id : `${m.name} (${m.id})` }))}
-              hint={shown.length > 200 ? `${shown.length.toLocaleString()} match. Type more to narrow the list.` : `${models.length.toLocaleString()} models from the provider's own list.`}
-            />
-          </>
+          <ModelList models={models} value={model} onChange={setModel} placeholder="claude, gpt, llama…" />
         )}
         {save.error && <p className="error" role="alert">{save.error}</p>}
       </div>

@@ -18,6 +18,7 @@ import { MessageActions } from '../ui/message-actions';
 import { TextArea } from '../ui/text-area';
 import { ThinkingLoader } from '../ui/thinking-loader';
 import { ToolCallCard, ToolCallGroup } from '../ui/tool-call-card';
+import { num } from '../format';
 
 interface Call {
   id: string;
@@ -46,7 +47,6 @@ function about(input: unknown): string {
   const first = Object.values(input as Record<string, unknown>).find((v) => typeof v === 'string' && v.trim());
   return typeof first === 'string' ? `“${first.length > 70 ? `${first.slice(0, 70)}…` : first}”` : '';
 }
-const count = (n: number) => n.toLocaleString();
 
 /** Tools by where they come from, for the list under the title. */
 const SOURCES: Array<{ label: string; test: (name: string) => boolean }> = [
@@ -118,7 +118,7 @@ export function Chat() {
   if (!llm.set) {
     return (
       <Page title="Chat" text="Ask the connected model, and watch it use this server's tools.">
-        <EmptyState title="No model is connected" text="Connect one on the Agent page: Claude, OpenRouter, OpenAI, or a model on this computer with Ollama." action={<Button onClick={() => go('agent')}>Connect a model</Button>} />
+        <EmptyState title="No model is connected" text="Connect one on the Models page: your ChatGPT plan, Claude, OpenRouter, OpenAI, or a model on this computer with Ollama." action={<Button onClick={() => go('models')}>Connect a model</Button>} />
       </Page>
     );
   }
@@ -177,7 +177,7 @@ export function Chat() {
           <span className="chat-model">{llm.model}</span>
           {tools && (
             <button type="button" className="chat-tools-toggle" aria-expanded={showTools} onClick={() => setShowTools((v) => !v)}>
-              {tools.length ? `${count(tools.length)} tool${tools.length === 1 ? '' : 's'} that only read` : 'No tools yet'}
+              {tools.length ? `${num(tools.length)} tool${tools.length === 1 ? '' : 's'} that only read` : 'No tools yet'}
             </button>
           )}
           <span className="chat-bar-gap" />
@@ -248,7 +248,7 @@ export function Chat() {
                     <div className="chat-meta">
                       {t.text && <MessageActions text={t.text} actions={['copy']} label="Answer actions" />}
                       <span>
-                        {t.end.model} · {t.end.seconds}s · {count(t.end.usage.input)} tokens in{t.end.usage.cached ? ` (${count(t.end.usage.cached)} cached)` : ''}, {count(t.end.usage.output)} out
+                        {t.end.model} · {t.end.seconds}s · {num(t.end.usage.input)} tokens in{t.end.usage.cached ? ` (${num(t.end.usage.cached)} cached)` : ''}, {num(t.end.usage.output)} out
                         {t.end.note ? ` · ${t.end.note}` : ''}
                       </span>
                     </div>

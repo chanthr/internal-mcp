@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { call, type ToolView } from '../api';
-import { Page, useAction, useServer } from '../app';
+import { LinkButton, ListItem, Page, Tabs, useAction, useServer } from '../app';
+import { Calls } from './calls';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { EmptyState } from '../ui/empty-state';
@@ -18,6 +19,22 @@ interface Ran {
 }
 
 export function Tools() {
+  return (
+    <Page title="Tools" text="Everything an AI client can call. Try one here to see what it gets back.">
+      <Tabs
+        label="Tools"
+        tabs={[
+          { value: 'try', label: 'Try a tool' },
+          { value: 'calls', label: 'Recent calls' },
+        ]}
+      >
+        {(tab) => (tab === 'calls' ? <Calls /> : <TryTools />)}
+      </Tabs>
+    </Page>
+  );
+}
+
+function TryTools() {
   const { state, go } = useServer();
   const groups = useMemo(() => {
     const by = new Map<string, ToolView[]>();
@@ -26,9 +43,8 @@ export function Tools() {
   }, [state.tools]);
   const [selected, setSelected] = useState<string | null>(state.tools[0]?.name ?? null);
   const tool = state.tools.find((t) => t.name === selected) ?? state.tools[0];
-
   return (
-    <Page title="Tools" text="Everything an AI client can call. Try one here to see what it gets back.">
+    <>
       {state.tools.length === 0 ? (
         <EmptyState icon={null} title="No tools yet" text="Add documents or connect a database, and its tools appear here." action={<Button size="sm" variant="secondary" onClick={() => go('documents')}>Add documents</Button>} />
       ) : (
@@ -38,9 +54,9 @@ export function Tools() {
               <div key={group}>
                 <div className="list-group">{group}</div>
                 {tools.map((t) => (
-                  <button key={t.name} type="button" className="list-item" aria-current={t.name === tool?.name} onClick={() => setSelected(t.name)}>
+                  <ListItem key={t.name} current={t.name === tool?.name} onClick={() => setSelected(t.name)}>
                     <span className="mono">{t.name}</span>
-                  </button>
+                  </ListItem>
                 ))}
               </div>
             ))}
@@ -48,7 +64,7 @@ export function Tools() {
           {tool && <Try key={tool.name} tool={tool} />}
         </div>
       )}
-    </Page>
+    </>
   );
 }
 
@@ -100,13 +116,11 @@ function Try({ tool }: { tool: ToolView }) {
     <div className="stack">
       <div>
         <div className="actions">
-          <span className="mono" style={{ fontSize: 13, fontWeight: 500 }}>{tool.name}</span>
+          <span className="mono try-name">{tool.name}</span>
           {!tool.readOnly && <Badge size="md" tone="warning">Changes data</Badge>}
         </div>
-        <p className={whole ? 'muted' : 'muted clamp'} style={{ marginTop: 4 }}>{tool.description}</p>
-        {tool.description.length > 150 && (
-          <button type="button" className="link" onClick={() => setWhole((w) => !w)}>{whole ? 'Show less' : 'Show all'}</button>
-        )}
+        <p className={whole ? 'muted try-description' : 'muted clamp try-description'}>{tool.description}</p>
+        {tool.description.length > 150 && <LinkButton onClick={() => setWhole((w) => !w)}>{whole ? 'Show less' : 'Show all'}</LinkButton>}
       </div>
       <form
         className="stack"
@@ -148,7 +162,7 @@ function Try({ tool }: { tool: ToolView }) {
         <div className="actions">
           <Button type="submit" loading={run.busy} disabled={missing}>{tool.readOnly ? 'Run' : 'Run (changes data)'}</Button>
           {optional.length > 1 && (
-            <button type="button" className="link" aria-expanded={more} onClick={() => setMore((m) => !m)}>{more ? 'Fewer options' : `${optional.length} more options`}</button>
+            <LinkButton expanded={more} onClick={() => setMore((m) => !m)}>{more ? 'Fewer options' : `${optional.length} more options`}</LinkButton>
           )}
           {run.error && <span className="error" role="alert">{run.error}</span>}
         </div>

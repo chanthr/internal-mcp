@@ -254,7 +254,7 @@ let refreshing: Promise<string> | null = null;
 /** A valid access token, refreshed when it is about to run out. Refreshes never race each other. */
 export async function chatgptToken(): Promise<string> {
   const a = stored.read();
-  if (!a?.refreshToken || !a.clientId) throw new ChatgptError('Not signed in to ChatGPT. Sign in on the Agent page.');
+  if (!a?.refreshToken || !a.clientId) throw new ChatgptError('Not signed in to ChatGPT. Sign in on the Models page.');
   if (a.accessToken && (a.expiresAt ?? 0) - Date.now() > 120_000) return a.accessToken;
   refreshing ??= (async () => {
     try {
@@ -263,7 +263,7 @@ export async function chatgptToken(): Promise<string> {
         const code = t.body.error ?? '';
         if (/invalid_grant|invalid_refresh_token|token_expired|refresh_token_(expired|invalidated|reused)/.test(code)) {
           stored.write({ hostId: a.hostId, clientId: a.clientId, email: a.email, idToken: a.idToken });
-          throw new ChatgptError('The ChatGPT sign-in ran out or was disconnected in ChatGPT. Sign in again on the Agent page.');
+          throw new ChatgptError('The ChatGPT sign-in ran out or was disconnected in ChatGPT. Sign in again on the Models page.');
         }
         throw new ChatgptError(`ChatGPT's sign-in could not be renewed (${code || t.status}).`, t.status >= 500);
       }
@@ -284,7 +284,7 @@ export function chatgptFailure(status: number, body: { error?: { code?: string; 
   if (code === 'subscription_sharing_usage_limit_exceeded') return new ChatgptError('The usage your ChatGPT plan allows for this app is used up for now. See chatgpt.com/settings/usage.');
   if (code === 'subscription_sharing_user_not_eligible') return new ChatgptError('This ChatGPT account or workspace may not use its plan in other apps.');
   if (code === 'subscription_sharing_unsupported_capability') return new ChatgptError(`ChatGPT plan usage does not support part of this request${error?.param ? ` (${error.param})` : ''}.`);
-  if (code === 'subscription_sharing_invalid_user' || status === 401) return new ChatgptError('ChatGPT did not accept the sign-in. Sign in again on the Agent page.');
+  if (code === 'subscription_sharing_invalid_user' || status === 401) return new ChatgptError('ChatGPT did not accept the sign-in. Sign in again on the Models page.');
   if (code === 'subscription_sharing_usage_unavailable' || code === 'subscription_sharing_user_unavailable' || status === 503) return new ChatgptError('ChatGPT could not check the plan just now. Try again in a moment.', true);
   if (status === 403) return new ChatgptError(`ChatGPT refused the request${body.detail ? ` (${String(body.detail).slice(0, 160)})` : error?.message ? ` (${error.message.slice(0, 160)})` : ''}.`);
   if (status === 429) return new ChatgptError('ChatGPT is limiting requests right now. Try again in a moment.', true);

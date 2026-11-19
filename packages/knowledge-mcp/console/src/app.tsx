@@ -4,17 +4,17 @@ import { Button } from './ui/button';
 import { AlertDialog } from './ui/dialog';
 import { Spinner } from './ui/spinner';
 import { TextField } from './ui/text-field';
+import { SegmentedControl } from './ui/segmented-control';
 import { Overview } from './pages/overview';
 import { Documents } from './pages/documents';
-import { Graph } from './pages/graph';
-import { Data } from './pages/data';
-import { Apps } from './pages/apps';
-import { Agent } from './pages/agent';
-import { Tools } from './pages/tools';
+import { AppsAndData } from './pages/apps';
+import { Models } from './pages/models';
 import { Chat } from './pages/chat';
+import { WikiPage } from './pages/wiki';
+import { Search } from './pages/search';
 import { Connect } from './pages/connect';
+import { Tools } from './pages/tools';
 import { People } from './pages/people';
-import { Activity } from './pages/activity';
 
 // ── The server, as every page sees it ──
 interface Server {
@@ -48,36 +48,48 @@ export function useServer(): Server {
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * The menu, in the order a person sets the server up: what it reads, the models it uses, how search finds, and who
+ * may ask it. Pages that belong together are one page, with tabs where both halves are long.
+ */
 const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: string; render: () => ReactNode }> }> = [
   { group: null, items: [{ id: 'overview', label: 'Overview', render: () => <Overview /> }] },
   {
-    group: 'Knowledge',
+    group: 'Sources',
     items: [
       { id: 'documents', label: 'Documents', render: () => <Documents /> },
-      { id: 'graph', label: 'Graph', render: () => <Graph /> },
-      { id: 'data', label: 'Databases and APIs', render: () => <Data /> },
-      { id: 'apps', label: 'Apps', render: () => <Apps /> },
-      { id: 'agent', label: 'Agent', render: () => <Agent /> },
+      { id: 'apps', label: 'Apps and data', render: () => <AppsAndData /> },
     ],
   },
   {
-    group: 'Use',
+    group: 'AI',
     items: [
+      { id: 'models', label: 'Models', render: () => <Models /> },
       { id: 'chat', label: 'Chat', render: () => <Chat /> },
-      { id: 'tools', label: 'Tools', render: () => <Tools /> },
-      { id: 'connect', label: 'Connect a client', render: () => <Connect /> },
+      { id: 'wiki', label: 'Wiki', render: () => <WikiPage /> },
     ],
   },
+  { group: 'Search', items: [{ id: 'search', label: 'Search', render: () => <Search /> }] },
   {
-    group: 'Manage',
+    group: 'Share',
     items: [
+      { id: 'connect', label: 'Connect', render: () => <Connect /> },
+      { id: 'tools', label: 'Tools', render: () => <Tools /> },
       { id: 'people', label: 'People and keys', render: () => <People /> },
-      { id: 'activity', label: 'Activity', render: () => <Activity /> },
     ],
   },
 ];
 const ALL = PAGES.flatMap((g) => g.items);
-const pageFromHash = () => ALL.find((p) => `#/${p.id}` === location.hash.split('?')[0])?.id ?? 'overview';
+/** Pages that moved: an old address (a bookmark, a link in a message) opens where the page is now. */
+const MOVED: Record<string, string> = { agent: 'models', data: 'apps', graph: 'search?tab=links', activity: 'tools?tab=calls' };
+function pageFromHash(): string {
+  const id = location.hash.replace(/^#\//, '').split('?')[0];
+  if (MOVED[id]) {
+    history.replaceState(null, '', `#/${MOVED[id]}`);
+    return MOVED[id].split('?')[0];
+  }
+  return ALL.find((p) => p.id === id)?.id ?? 'overview';
+}
 
 export function App() {
   const [state, setState] = useState<State | null>(null);
@@ -364,10 +376,6 @@ export function Row({ title, help, children, onClick }: { title: ReactNode; help
   );
 }
 
-/**
- * A quiet button that asks first. For what cannot be brought back from here: a saved secret, a query somebody wrote,
- * a key that was handed out. (Removing a folder does not ask: adding it again restores everything.)
- */
 /** One way of doing something and the button that does it, for a dialog that offers more than one way. */
 /** `stacked`: what is chosen goes under the words, across the whole width (a step that shows a code or how far it is). */
 export function Choice({ title, help, error, stacked, children }: { title: ReactNode; help?: ReactNode; error?: string | null; stacked?: boolean; children: ReactNode }) {
@@ -382,6 +390,10 @@ export function Choice({ title, help, error, stacked, children }: { title: React
   );
 }
 
+/**
+ * A quiet button that asks first. For what cannot be brought back from here: a saved secret, a query somebody wrote,
+ * a key that was handed out. (Removing a folder does not ask: adding it again restores everything.)
+ */
 export function AskFirst({ label, title, text, confirm, disabled, onConfirm }: { label: string; title: string; text: string; confirm: string; disabled?: boolean; onConfirm: () => Promise<unknown> }) {
   return (
     <AlertDialog
@@ -392,6 +404,55 @@ export function AskFirst({ label, title, text, confirm, disabled, onConfirm }: {
       danger
       onConfirm={onConfirm}
     />
+  );
+}
+
+/** A button that reads as a link: for a small second step inside a sentence or under a form. */
+export function LinkButton({ children, onClick, expanded }: { children: ReactNode; onClick: () => void; expanded?: boolean }) {
+  return (
+    <button type="button" className="link" aria-expanded={expanded} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
+/** One line of a list to pick from (tools, documents): the picked one is marked. */
+export function ListItem({ current, title, onClick, children }: { current: boolean; title?: string; onClick: () => void; children: ReactNode }) {
+  return (
+    <button type="button" className="list-item" aria-current={current} title={title} onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The halves of a page, under its title. The tab is kept in the address (#/page?tab=…), so a link or a reload opens
+ * the same one.
+ */
+export function Tabs<T extends string>({ label, tabs, children }: { label: string; tabs: Array<{ value: T; label: string }>; children: (tab: T) => ReactNode }) {
+  const fromAddress = () => {
+    const asked = new URLSearchParams(location.hash.split('?')[1] ?? '').get('tab');
+    return tabs.find((t) => t.value === asked)?.value ?? tabs[0].value;
+  };
+  const [tab, setTab] = useState<T>(fromAddress);
+  useEffect(() => {
+    const onHash = () => setTab(fromAddress());
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const choose = (t: T) => {
+    setTab(t);
+    const page = location.hash.split('?')[0] || '#/';
+    history.replaceState(null, '', t === tabs[0].value ? page : `${page}?tab=${t}`);
+  };
+  return (
+    <>
+      <div className="page-tabs">
+        <SegmentedControl<T> aria-label={label} variant="tray" value={tab} onChange={choose} options={tabs} />
+      </div>
+      {children(tab)}
+    </>
   );
 }
 

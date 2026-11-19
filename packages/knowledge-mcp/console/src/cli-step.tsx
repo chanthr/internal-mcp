@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { call } from './api';
-import { useAction } from './app';
+import { LinkButton, useAction } from './app';
 import { Button } from './ui/button';
 import { Spinner } from './ui/spinner';
 
@@ -117,7 +117,7 @@ export function CliStep({
               {tool === 'gh' ? 'Open GitHub' : 'No window opened? Open the sign-in page'}
             </a>
           )}
-          <button type="button" className="link" onClick={cancel}>Cancel</button>
+          <LinkButton onClick={cancel}>Cancel</LinkButton>
         </div>
       </div>
     );
