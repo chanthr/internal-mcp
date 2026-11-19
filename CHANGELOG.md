@@ -69,7 +69,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   service gives one, and an open server needs nothing.
 - **Connect a service without copying a token.** In the console: *Sign in with Railway* (the server registers
   itself with Railway, you pick the workspaces it may read as a viewer, and the sign-in renews itself; a sign-in
-  that shares no workspace is not kept, and the page says to pick one), *Sign in
+  that shares no workspace is not kept, and the page says to pick one; a viewer sees projects and deployments
+  but not logs, and `railway_logs` says so and that a token reads them), *Sign in
   with Google* for Drive (through an OAuth client of your own Google Cloud project, made once; the server reads
   your My Drive or the folders you list), *Account with gcloud* (creates the Drive service account and its key
   without stopping the server while gcloud works), *Use the gh login* for GitHub, and for Slack a link that opens
@@ -138,6 +139,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Fixed
 
+- **The server no longer starts on a port another program already answers on.** It listens on every address,
+  and the system allows that beside a program that listens on 127.0.0.1 only. The two then shared the port: a
+  browser on `localhost` reached one or the other, and the console asked for its token over and over because the
+  other program answered "not allowed". The server now says which port is taken and how to pick another, and
+  does not start.
+- **The console address is printed after every start**, not only the first, so it is the last thing in the
+  terminal after a restart. The page that asks for the token says which line to look for and which address the
+  token is remembered for.
 - **The line the generator prints for Claude Code broke in a folder with a space in its path.** Pasted as
   printed, `claude mcp add` took half the path as the command and the server never started ("ENOENT"). Paths are
   quoted now, Node is named by its full path, and the entry is added for the user rather than for the folder

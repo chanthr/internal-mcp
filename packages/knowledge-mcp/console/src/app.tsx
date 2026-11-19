@@ -246,10 +246,10 @@ function TokenGate({ onDone }: { onDone: () => Promise<boolean> }) {
   const [value, setValue] = useState('');
   const [refused, setRefused] = useState(false);
   return (
-    <Gate title="Open the console from the terminal">
+    <Gate title="This browser needs the access token">
       <p className="muted">
-        When the server starts in a terminal it prints the console address. That address carries the access token: open it once and this
-        browser remembers it.
+        Go to the terminal window where the server is running. It printed a line that starts with <code>console ·</code> followed by an
+        address. Open that address: it carries the token, and this browser remembers it for {location.host}.
       </p>
       <form
         className="stack"
@@ -261,7 +261,7 @@ function TokenGate({ onDone }: { onDone: () => Promise<boolean> }) {
       >
         <TextField
           label="Access token"
-          hint="Also in the data folder, in the file console-token."
+          hint="Or paste the token here. It is in the file data/console-token of the server's folder."
           error={refused ? 'The server did not accept that token.' : undefined}
           type="password"
           value={value}

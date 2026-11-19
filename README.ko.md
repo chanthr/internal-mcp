@@ -419,7 +419,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
 | `github` | `repo_tree`, GitHub 원격 MCP 도구 `github_*`(읽기 전용) | Contents 읽기 권한이 있는 `GITHUB_PAT`(또는 `GITHUB_TOKEN`) |
-| `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | 콘솔에서 한 로그인이나 `RAILWAY_TOKEN` |
+| `railway` | `railway_services`, `railway_deployments`, `railway_logs`(로그 속 비밀값은 가림) | 콘솔에서 한 로그인이나 `RAILWAY_TOKEN`. 로그인은 뷰어 권한만 요청합니다. 프로젝트와 배포 상태는 읽고, 로그는 Railway가 보여 주지 않습니다. 로그는 토큰이 있어야 합니다 |
 | 코어 | `ping` | 없음. 내가 누구로 접속했는지, 어떤 플러그인이 켜졌는지 보여 줍니다 |
 
 </details>

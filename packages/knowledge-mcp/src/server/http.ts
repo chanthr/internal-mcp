@@ -11,6 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request as ExpressRequest, type Response as ExpressResponse } from 'express';
 import rateLimit from 'express-rate-limit';
 import { randomUUID, createHash } from 'crypto';
+import { connect } from 'node:net';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 
 import { authenticateApiKey, type AuthContext, type Role, type ResourceScopes } from '../core/auth.js';
@@ -97,6 +98,30 @@ function trustProxySetting(): number | boolean | string {
   if (v === 'false') return false;
   return v;
 }
+
+/**
+ * Does a program on this machine already answer on this port?
+ *
+ * The server listens on every address, and the system allows that beside a program that listens on 127.0.0.1
+ * only. The two then share the port: a browser that opens http://localhost:PORT reaches one or the other, and the
+ * console is answered "not allowed" by a program that has never heard of it. So the port is asked first.
+ */
+async function portAnswers(port: number): Promise<boolean> {
+  const answers = (host: string) =>
+    new Promise<boolean>((resolve) => {
+      const socket = connect({ host, port });
+      const end = (yes: boolean) => {
+        socket.destroy();
+        resolve(yes);
+      };
+      socket.setTimeout(500, () => end(false));
+      socket.once('connect', () => end(true));
+      socket.once('error', () => end(false));
+    });
+  return (await Promise.all(['127.0.0.1', '::1'].map(answers))).some(Boolean);
+}
+const portTaken = (port: number) =>
+  new Error(`Port ${port} is already used by another program on this computer. Start on another port (PORT=${port + 10}, on the command line or in .env), or stop the other program.`);
 
 export async function runHttp(registry: Registry): Promise<{ port: number; close: () => Promise<void> }> {
   // One boot log line showing which plugins are on (only those with credentials) and which store is used, for ops
@@ -490,9 +515,10 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
 
   // PORT=0 picks a free port (for tests). The actual port is reported in the return value.
   const wanted = parseInt(process.env.PORT || '8080', 10);
+  if (wanted !== 0 && (await portAnswers(wanted))) throw portTaken(wanted);
   const httpServer = await new Promise<import('node:http').Server>((resolveListen, rejectListen) => {
     const srv = app.listen(wanted, () => resolveListen(srv));
-    srv.once('error', rejectListen);
+    srv.once('error', (e: NodeJS.ErrnoException) => rejectListen(e.code === 'EADDRINUSE' ? portTaken(wanted) : e));
   });
   const address = httpServer.address();
   const port = typeof address === 'object' && address ? address.port : wanted;
