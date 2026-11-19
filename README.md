@@ -732,15 +732,23 @@ certificate to make.
 | | A temporary address | Your own address |
 | --- | --- | --- |
 | Looks like | `https://<words>.trycloudflare.com` | `https://mcp.example.com` |
-| Needs | Nothing | A domain in a Cloudflare account. You sign in once; the console runs `cloudflared tunnel login` and the browser opens |
+| Needs | Nothing | A domain in a Cloudflare account. The console checks the address, then runs `cloudflared tunnel login`: the browser opens and you pick that domain |
 | Lasts | Until it is stopped. New each time | It stays the same, and comes back when the server is started again |
 | For | Trying it out. Cloudflare gives no guarantee for it and it carries no long-lived streams | Other people, Claude on the web, ChatGPT |
 
 The console installs cloudflared where there is Homebrew or winget, makes the tunnel and its DNS record, and
-starts it. A DNS record that already exists under that name is not written over. What does not change: `/mcp`
-asks for a key or a sign-in as before, and the console answers on your machine only (through the tunnel it
-answers 403). Your own cloudflared setup (`~/.cloudflared/config.yml`, your other tunnels) is not read or changed:
-the tunnel has a config file and credentials of its own in the data directory.
+starts it. Before anything is made in your account it checks the address: its domain must be on Cloudflare (public
+DNS says so), and the sign-in must be for that domain (Cloudflare's API, asked with the sign-in's own token, says
+which one it is; a sign-in is for one domain). After the record is made, what cloudflared says it made is compared
+with what was asked for, and the address counts as working only once `https://<address>/health` answers from
+outside. A DNS record that already exists under that name is not written over.
+
+What does not change: `/mcp` asks for a key or a sign-in as before, and the console answers on your machine only
+(through the tunnel it answers 403). Your own cloudflared setup is not read, used or changed: not
+`~/.cloudflared/config.yml`, not your other tunnels, and not the certificate of your own `cloudflared tunnel login`.
+This server signs in for itself (cloudflared runs with `HOME` in the data directory), and its tunnel has a config file
+and credentials of its own there. Signing out in the console deletes that file; the token in it stays valid until
+you delete it in the Cloudflare dashboard (My Profile, API Tokens).
 
 ## Connect a client
 

@@ -46,7 +46,7 @@ import { createWiki, startWikiRun, stopWikiRun, WIKI, wikiDir, wikiExists, wikiS
 import { canPickFolder, pickFolder } from './folder_picker.js';
 import { EXCLUDED_FOLDER_NAMES } from '../plugins/drive/exclude.js';
 import { openInBrowser } from './launch.js';
-import { startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
+import { checkAddress, recheckTunnel, signOutCloudflare, startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorForm, vectorProblem } from '../plugins/drive/qdrant.js';
 import { cutMark, indexProfile, knownPrefixes, LEGACY_CUT } from '../plugins/drive/index_profile.js';
@@ -559,8 +559,24 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.json(await tunnelView());
     }),
   );
+  // Before an address of one's own: is its domain on Cloudflare, and is this server signed in for it? Reads only.
+  api.post(
+    '/tunnel/check',
+    wrap(async (req, res) => {
+      const { hostname } = z.object({ hostname: visible(253).min(4) }).strict().parse(req.body);
+      res.json(await checkAddress(hostname));
+    }),
+  );
+  api.post('/tunnel/recheck', wrap(async (_req, res) => void res.json(await recheckTunnel())));
+  // Forget this server's Cloudflare sign-in, to sign in for another domain. A running tunnel keeps running.
+  api.delete(
+    '/tunnel/sign-in',
+    wrap(async (_req, res) => {
+      signOutCloudflare();
+      res.json(await tunnelView());
+    }),
+  );
 
-  // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
   // ── Reading scanned documents (plugins/drive/ocr.ts, plugins/knowledge/ocr_run.ts) ──
   api.get(
     '/ocr',
@@ -603,6 +619,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     }),
   );
 
+  // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
   api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured() })));
   api.post(
     '/wiki',

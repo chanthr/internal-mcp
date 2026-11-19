@@ -717,11 +717,21 @@ OAuth 환경변수와 허용 목록을 넣으면 Google로 로그인하는 OAuth
 | | 임시 주소 | 내 주소 |
 | --- | --- | --- |
 | 모양 | `https://<낱말>.trycloudflare.com` | `https://mcp.example.com` |
-| 필요한 것 | 없음 | Cloudflare 계정에 있는 도메인. 한 번 로그인합니다. 콘솔이 `cloudflared tunnel login`을 실행하고 브라우저가 열립니다 |
+| 필요한 것 | 없음 | Cloudflare 계정에 있는 도메인. 콘솔이 주소를 먼저 확인한 뒤 `cloudflared tunnel login`을 실행합니다. 브라우저가 열리면 그 도메인을 고릅니다 |
 | 유지 | 끌 때까지. 켤 때마다 새 주소 | 주소가 그대로이고, 서버를 다시 띄우면 함께 돌아옵니다 |
 | 용도 | 시험. Cloudflare가 보장하지 않고, 오래 열어 두는 스트림은 지나가지 않습니다 | 다른 사람, 웹의 Claude, ChatGPT |
 
-Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과 DNS 레코드를 만들고, 터널을 시작합니다. 그 이름에 이미 있는 DNS 레코드는 덮어쓰지 않습니다. 바뀌지 않는 것이 있습니다. `/mcp`는 전과 같이 키나 로그인을 요구하고, 콘솔은 내 컴퓨터에서만 응답합니다(터널로 오면 403). 사용자의 cloudflared 설정(`~/.cloudflared/config.yml`, 다른 터널)은 읽지도 바꾸지도 않습니다. 이 터널의 설정 파일과 자격 증명은 데이터 폴더에 따로 둡니다.
+Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과 DNS 레코드를 만들고, 터널을 시작합니다. 계정에
+무엇이든 만들기 전에 주소부터 확인합니다. 그 도메인이 Cloudflare에 있어야 하고(공개 DNS로 확인), 로그인이 그
+도메인 것이어야 합니다(로그인에 든 토큰으로 Cloudflare API에 묻습니다. 로그인 하나는 도메인 하나용입니다).
+레코드를 만든 뒤에는 cloudflared가 실제로 만든 이름을 요청한 이름과 대조하고, 밖에서 `https://<주소>/health`가
+응답해야 정상으로 표시합니다. 그 이름에 이미 있는 DNS 레코드는 덮어쓰지 않습니다.
+
+바뀌지 않는 것도 있습니다. `/mcp`는 전과 같이 키나 로그인을 요구하고, 콘솔은 내 컴퓨터에서만 응답합니다(터널로
+오면 403). 사용자의 cloudflared 설정은 읽지도 쓰지도 바꾸지도 않습니다. `~/.cloudflared/config.yml`, 다른 터널,
+사용자가 직접 한 `cloudflared tunnel login`의 인증서 모두 그렇습니다. 이 서버는 따로 로그인하고(cloudflared를
+`HOME`을 데이터 폴더로 두고 실행), 터널의 설정 파일과 자격 증명도 거기에 둡니다. 콘솔에서 로그아웃하면 그 파일을
+지웁니다. 그 안의 토큰은 Cloudflare 대시보드(My Profile, API Tokens)에서 지울 때까지 유효합니다.
 
 ## 클라이언트 연결
 
