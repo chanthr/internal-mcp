@@ -104,7 +104,7 @@ npm run dev                    # in a generated project: the address is in the f
 
 | Page | What you do there |
 | --- | --- |
-| Documents | Drop files or folders on the page, add a folder by its path, connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
+| Documents | Drop files or folders on the page to copy them in, add a folder where it is (pick it in the computer's own folder chooser, or type its path), connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
 | Graph | How your documents point at each other: the links people wrote, with the most linked documents, a view around any one document, and the loose ends (links to nowhere, documents nothing links to) |
 | Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
 | Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |

@@ -234,6 +234,10 @@ export interface State {
     job: { running: boolean; done: number; total: number; error: string | null } | null;
   } | null;
   plugins: PluginStatus[];
+  /** The computer's own folder chooser can be opened from the page. */
+  folderPicker: boolean;
+  /** Folder names that are never indexed (node_modules, build, …), lower-cased. */
+  excludedFolders: string[];
   folders: FolderView[];
   services: {
     /** `via`: a service account key, or a Google sign-in (then `account` is who, and `reads` the folders). */

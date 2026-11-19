@@ -46,6 +46,7 @@ function Folders() {
   const { state, apply, refresh } = useServer();
   const add = useAction();
   const remove = useAction();
+  const choose = useAction();
   const [path, setPath] = useState('');
   // While a folder is read its numbers move: read them again every second or so, on this page only. Files that
   // were just added are watched for a little while as well, for the moment before the server starts on them.
@@ -89,11 +90,32 @@ function Folders() {
               disabled={!state.editable}
             />
             <Button type="submit" variant="secondary" loading={add.busy} disabled={!path.trim() || !state.editable}>Add</Button>
+            {state.folderPicker && (
+              <Button
+                type="button"
+                variant="secondary"
+                loading={choose.busy}
+                disabled={!state.editable || add.busy}
+                onClick={() =>
+                  void choose.run(async () => {
+                    // The chooser opens on this computer; the answer comes when the person has picked a folder.
+                    const r = await call<Changed & { canceled?: boolean }>('POST', '/folders/choose');
+                    if (!r.canceled) await apply(async () => r);
+                  })
+                }
+              >
+                {choose.busy ? 'Choosing…' : 'Choose…'}
+              </Button>
+            )}
           </div>
-          {add.error || remove.error ? (
-            <p className="error" role="alert">{add.error ?? remove.error}</p>
+          {add.error || remove.error || choose.error ? (
+            <p className="error" role="alert">{add.error ?? remove.error ?? choose.error}</p>
           ) : (
-            <p className="field-help">Everything under it becomes searchable by everyone who may use this server.</p>
+            <p className="field-help">
+              {choose.busy
+                ? 'A folder chooser is open on this computer. It may be behind this window.'
+                : 'It is searched where it is: nothing is copied, and changes to its files are followed. Everything under it becomes searchable by everyone who may use this server.'}
+            </p>
           )}
         </form>
       </div>
@@ -181,14 +203,15 @@ interface Picked {
 }
 
 /** Everything under what was dropped: files as they are, folders walked to the bottom. */
-async function dropped(items: DataTransferItemList): Promise<Picked[]> {
+/** The files of what was dropped, folders walked. A folder `skip` names is not opened at all (node_modules can hold tens of thousands). */
+async function dropped(items: DataTransferItemList, skip: (name: string) => boolean): Promise<Picked[]> {
   type Entry = { isFile: boolean; isDirectory: boolean; fullPath: string; file?: (ok: (f: File) => void, no: (e: unknown) => void) => void; createReader?: () => { readEntries: (ok: (e: Entry[]) => void, no: (e: unknown) => void) => void } };
   const out: Picked[] = [];
   const walk = async (entry: Entry): Promise<void> => {
     if (entry.isFile && entry.file) {
       const file = await new Promise<File>((ok, no) => entry.file!(ok, no));
       out.push({ file, path: entry.fullPath.replace(/^\/+/, '') });
-    } else if (entry.isDirectory && entry.createReader) {
+    } else if (entry.isDirectory && entry.createReader && !skip(entry.fullPath.split('/').pop() ?? '')) {
       const reader = entry.createReader();
       // A folder is read a batch at a time until a batch comes back empty.
       for (;;) {
@@ -220,7 +243,10 @@ function Upload({ onAdded }: { onAdded: () => void }) {
     void up.run(async () => {
       setResult(null);
       const hidden = (path: string) => path.split('/').some((part) => part.startsWith('.'));
-      const fit = picked.filter((p) => CAN_SEARCH.test(p.path) && p.file.size <= MAX_BYTES && !hidden(p.path));
+      // Folders the index never reads (node_modules, build, …): not sent at all, the server would refuse each file.
+      const never = new Set(state.excludedFolders);
+      const excluded = (path: string) => path.split('/').slice(0, -1).some((part) => never.has(part.normalize('NFC').trim().toLowerCase()));
+      const fit = picked.filter((p) => CAN_SEARCH.test(p.path) && p.file.size <= MAX_BYTES && !hidden(p.path) && !excluded(p.path));
       if (fit.length === 0) throw new Error('None of these can be searched. Markdown, text, PDF, Word, PowerPoint and Excel files can.');
       setProgress({ done: 0, total: fit.length });
       let done = 0;
@@ -251,7 +277,7 @@ function Upload({ onAdded }: { onAdded: () => void }) {
         setSaving(false);
       }
       onAdded();
-      setResult(`${added.toLocaleString()} file${added === 1 ? '' : 's'} added.${refused ? ` ${refused.toLocaleString()} left out (another type, hidden, or over 50 MB).` : ''}`);
+      setResult(`${added.toLocaleString()} file${added === 1 ? '' : 's'} added.${refused ? ` ${refused.toLocaleString()} left out (another type, hidden, over 50 MB, or in a folder that is never indexed, like node_modules).` : ''}`);
     });
   const fromInput = (list: FileList | null) => {
     if (list?.length) send([...list].map((file) => ({ file, path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name })));
@@ -272,7 +298,7 @@ function Upload({ onAdded }: { onAdded: () => void }) {
           setOver(false);
           if (busy) return;
           const items = e.dataTransfer.items;
-          void dropped(items).then(send, () => fromInput(e.dataTransfer.files));
+          void dropped(items, (name) => name.startsWith('.') || state.excludedFolders.includes(name.normalize('NFC').trim().toLowerCase())).then(send, () => fromInput(e.dataTransfer.files));
         }}
       >
         <div>
@@ -281,7 +307,9 @@ function Upload({ onAdded }: { onAdded: () => void }) {
         </div>
         <div className="actions">
           <Button size="sm" variant="secondary" disabled={busy} onClick={() => files.current?.click()}>Choose files</Button>
-          <Button size="sm" variant="ghost" disabled={busy} onClick={() => folder.current?.click()}>Choose a folder</Button>
+          {/* With the computer's own chooser (Add a folder, below) a folder is searched where it is. Without it, a
+              folder can still be copied here: the browser asks first whether to upload its files. */}
+          {!state.folderPicker && <Button size="sm" variant="ghost" disabled={busy} onClick={() => folder.current?.click()}>Choose a folder</Button>}
         </div>
         <input ref={files} type="file" multiple hidden accept=".md,.markdown,.mdx,.txt,.pdf,.docx,.pptx,.xlsx" onChange={(e) => { fromInput(e.target.files); e.target.value = ''; }} />
         <input ref={folder} type="file" multiple hidden onChange={(e) => { fromInput(e.target.files); e.target.value = ''; }} />

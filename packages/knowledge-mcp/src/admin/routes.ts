@@ -40,6 +40,8 @@ import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
 import { checkLlm, listLlmModels, llmConfigured, llmSettings, type LlmKind } from '../core/llm.js';
 import { converse, type ChatEvent, type ChatTool } from '../core/llm_chat.js';
 import { createWiki, startWikiRun, stopWikiRun, WIKI, wikiDir, wikiExists, wikiStatus } from '../plugins/knowledge/wiki.js';
+import { canPickFolder, pickFolder } from './folder_picker.js';
+import { EXCLUDED_FOLDER_NAMES } from '../plugins/drive/exclude.js';
 import { openInBrowser } from './launch.js';
 import { startNamedTunnel, startQuickTunnel, stopTunnel, tunnelView } from './tunnel.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
@@ -376,6 +378,10 @@ export function mountConsole(app: Express, registry: Registry): boolean {
             return { path: f.path, name: f.name ?? null, documents, reading: known ? folderReading(known.name) : null, noText: some(left.noText), failed: some(left.failed) };
           }),
         ),
+        // The computer's folder chooser can be opened from the page (folder_picker.ts).
+        folderPicker: await canPickFolder(),
+        // Folder names never indexed (node_modules, …): the page leaves them out of an upload instead of sending them.
+        excludedFolders: [...EXCLUDED_FOLDER_NAMES],
         services: {
           drive: { set: isSet(SERVICE_ENV.drive), trusted: trustedList({ dir }), ...driveVia(dir) },
           slack: { set: isSet(SERVICE_ENV.slack) },
@@ -418,6 +424,21 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   );
 
   // ── Documents on this machine ──
+  /**
+   * Open the computer's folder chooser and add the folder that is picked, where it is (folder_picker.ts). Waits
+   * while the person chooses. Nothing is added when they close the chooser.
+   */
+  api.post(
+    '/folders/choose',
+    wrap(async (_req, res) => {
+      if (!mustEdit(res)) return;
+      const picked = await pickFolder();
+      if ('canceled' in picked) return void res.json({ canceled: true });
+      const r = await setup(['folder', picked.path], settingsDir());
+      if (!r.ok) return refuse(res, 422, firstLine(r.lines));
+      change(res, { path: picked.path });
+    }),
+  );
   api.post(
     '/folders',
     wrap(async (req, res) => {
