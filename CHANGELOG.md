@@ -47,6 +47,13 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Connect a language model (the Agent page).** For work the server does by itself, a model can be connected
+  in the console: Claude through Anthropic's API, OpenRouter, OpenAI, a local model through Ollama, or any
+  endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list, checked with
+  one question, and its key saved in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`). Until
+  one is connected the server calls no model, as before. For Claude, instructions that repeat between calls are
+  marked to be cached, and on the models that support it a declined request is handed to another model by
+  Anthropic within the same call.
 - **"Open the console" where the page asks for the token.** A browser that has no token yet (another browser,
   another port) no longer sends you to find an address in the terminal: one button, and the server opens the
   console in your default browser, signed in. The one who asks is handed nothing, and the one-time address is

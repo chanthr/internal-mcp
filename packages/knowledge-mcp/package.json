@@ -53,6 +53,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@supabase/supabase-js": "^2.45.0",
     "@types/express": "^5.0.6",
