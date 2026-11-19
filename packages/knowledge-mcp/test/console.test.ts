@@ -586,3 +586,27 @@ test('supervised: saving in the console restarts the server with the new setting
     }
   });
 });
+
+test('a port another program already answers on is not shared: the server says so and does not start', async () => {
+  // A program that listens on 127.0.0.1 only. The system lets a second one listen on "every address" beside it,
+  // and a browser on localhost then reaches one or the other.
+  const other = createServer((socket) => socket.end());
+  await new Promise<void>((r) => other.listen(0, '127.0.0.1', r));
+  const { port } = other.address() as AddressInfo;
+  try {
+    const home = mkdtempSync(join(tmpdir(), 'kmcp-port-'));
+    writeFileSync(join(home, 'mcp.config.json'), '{}');
+    const env: NodeJS.ProcessEnv = { ...process.env, MCP_DATA_DIR: join(home, 'data'), MCP_CONFIG_PATH: join(home, 'mcp.config.json'), PORT: String(port) };
+    const run = spawn(process.execPath, ['--import', 'tsx', 'src/cli.ts', 'serve'], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+    started.push(run);
+    let log = '';
+    run.stderr!.on('data', (c) => (log += c));
+    const code = await new Promise<number | null>((r) => run.on('exit', r));
+    assert.notEqual(code, 0, log);
+    assert.match(log, new RegExp(`Port ${port} is already used by another program on this computer\\. Start on another port \\(PORT=${port + 10}`));
+    assert.ok(!log.includes('listening on'), 'it did not start beside the other program');
+    assert.ok(!/\n\s+at .*\(.*:\d+:\d+\)/.test(log), `no stack trace for something a person can fix:\n${log}`);
+  } finally {
+    await new Promise((r) => other.close(r));
+  }
+});

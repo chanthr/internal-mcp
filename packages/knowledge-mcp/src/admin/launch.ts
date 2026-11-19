@@ -36,11 +36,12 @@ function openInBrowser(url: string): void {
  */
 export async function serveSupervised(open: boolean): Promise<never> {
   return supervise(({ port, consoleUrl, openUrl }, first) => {
-    if (!consoleUrl || !first) return;
-    // The address carries the access token, so it is printed only to a terminal, never into a log file.
+    if (!consoleUrl) return;
+    // After every start, not only the first: a restart pushes the earlier line out of sight, and this is the line
+    // a person looks for. The address carries the access token, so it goes to a terminal only, never into a log file.
     if (process.stderr.isTTY) info(`[knowledge-mcp] console · ${consoleUrl}`);
     else info(`[knowledge-mcp] console · http://localhost:${port}/console/ (the access token is in the data directory, file console-token)`);
-    if (open && openUrl && process.stderr.isTTY && !process.env.CI) openInBrowser(openUrl);
+    if (first && open && openUrl && process.stderr.isTTY && !process.env.CI) openInBrowser(openUrl);
   });
 }
 

@@ -423,7 +423,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
 | `github` | `repo_tree`, plus GitHub's remote MCP tools as `github_*` (read-only) | `GITHUB_PAT` (or `GITHUB_TOKEN`) with Contents: read |
-| `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | A sign-in from the console, or `RAILWAY_TOKEN` |
+| `railway` | `railway_services`, `railway_deployments`, `railway_logs` (secrets in logs are masked) | A sign-in from the console, or `RAILWAY_TOKEN`. A sign-in asks for viewer access: it lists projects and deployments, and Railway does not show it logs. Logs need a token |
 | core | `ping` | Nothing. Shows who you are and which plugins are on |
 
 </details>

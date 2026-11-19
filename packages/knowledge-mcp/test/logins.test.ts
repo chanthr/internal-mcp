@@ -35,7 +35,8 @@ const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
 const { googleEndpoints, githubEndpoint, parseGoogleClient, driveFolderIds } = await import('../src/admin/logins.js');
 const { railwayEndpoints, railwayAuth, railwayConfigured, readRailwayLogin, writeRailwayLogin } = await import('../src/plugins/railway/login.js');
-const { railwayProjects } = await import('../src/plugins/railway/tools.js');
+const { railwayProjects, handleRailwayLogs } = await import('../src/plugins/railway/tools.js');
+const { authStore } = await import('../src/core/context.js');
 const { credentialsFromJson } = await import('../src/plugins/drive/client.js');
 const { UpstreamManager, isExposed } = await import('../src/core/upstream.js');
 const { upstreamToken, readUpstreamLogin, writeUpstreamLogin } = await import('../src/core/upstream_login.js');
@@ -187,6 +188,9 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   // What the tools list: the projects of each workspace that was shared.
   const listed = await railwayProjects();
   assert.deepEqual([listed.workspaces, listed.projects.map((p) => `${p.workspace}/${p.name}`), listed.projects[0].services], [['Acme'], ['Acme/api', 'Acme/web'], [{ id: 'p1-s', name: 'server' }]]);
+  // Logs are not shown to a viewer (seen with a real sign-in). The tool says why and what reads them, not just "Not Authorized".
+  const logs = (await authStore.run({ ok: true, role: 'admin', email: 'a@test', org_id: 'o' } as never, () => handleRailwayLogs({ deploymentId: 'd1', type: 'deploy', limit: 5 }))) as { isError?: boolean; content: Array<{ text: string }> };
+  assert.deepEqual([logs.isError, /does not show it the logs\..*paste a Railway token in the console \(Apps → Railway\) or set RAILWAY_TOKEN/.test(logs.content[0].text)], [true, true], logs.content[0].text);
   writeRailwayLogin({ ...readRailwayLogin(), expiresAt: Date.now() - 1000 });
   const both = await Promise.all([railwayAuth(), railwayAuth(), railwayAuth()]);
   assert.deepEqual([both.map((b) => b.token), rw.refreshes, readRailwayLogin().refreshToken], [['at-2', 'at-2', 'at-2'], 1, 'rt-2']);
