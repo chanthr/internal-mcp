@@ -117,6 +117,28 @@ const ConfigSchema = z
      * (default: the folder's own name). `source` is the label for the `source` search filter (default "files").
      * A relative path is resolved against the project folder. env KNOWLEDGE_FOLDERS (comma-separated paths) adds more.
      */
+    /**
+     * `knowledge.index`: how documents are cut into passages and what the embedding model is given
+     * (plugins/drive/index_profile.ts). Everything is optional: left out, documents are cut at headings into
+     * passages of up to 800 tokens, and an embedding model known to need a prefix gets it.
+     */
+    knowledge: z
+      .object({
+        index: z
+          .object({
+            cut: z.enum(['sections', 'windows']).optional(),
+            maxTokens: z.number().int().min(100).max(4000).optional(),
+            minTokens: z.number().int().min(0).max(500).optional(),
+            overlapTokens: z.number().int().min(0).max(1000).optional(),
+            header: z.enum(['heading', 'document', 'none']).optional(),
+            queryPrefix: z.string().max(500).optional(),
+            passagePrefix: z.string().max(500).optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     folders: z
       .array(
         z

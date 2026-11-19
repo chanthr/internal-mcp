@@ -14,6 +14,7 @@
  * The API takes an `input` array, so one call embeds many chunks. 429 and 5xx are retried with exponential
  * backoff and jitter, and every call has a timeout.
  */
+
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 // Read when used, like the key: an endpoint set after this module loaded (a test, a setup step) is picked up.
 const baseUrl = () => (process.env.EMBEDDING_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -157,7 +158,9 @@ export async function embedTexts(
 }
 
 /** Single query → vector. This is the interactive search path, so it uses the fail-fast policy (QUERY_POLICY). */
-export async function embedQuery(query: string): Promise<number[]> {
-  const [vec] = await embedTexts([query], QUERY_POLICY);
+export async function embedQuery(query: string, prefix = ''): Promise<number[]> {
+  // Some embedding models are trained with a prefix on the question ("query: …", an instruction): without it they
+  // find less. Which one goes with the vectors in the index is the caller's to say (qdrant.ts vectorForm).
+  const [vec] = await embedTexts([`${prefix}${query}`], QUERY_POLICY);
   return vec;
 }

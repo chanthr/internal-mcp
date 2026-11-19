@@ -10,6 +10,7 @@
  * this package. Only nine endpoints are used, so calling them directly is lighter. Method names and return shapes
  * are kept the same as that library.
  */
+import { indexProfile, LEGACY_PASSAGE, passageMark, type IndexProfile } from './index_profile.js';
 import { EMBEDDING_DIM, EMBEDDING_MODEL } from './embeddings.js';
 import { getConfig } from '../../core/config.js';
 import { cli } from '../../core/invocation.js';
@@ -184,6 +185,44 @@ export const isDriveDocId = (id: string): boolean => id.length > 0 && !id.includ
  * Vectors from two models must not be mixed: the scores would be meaningless without any error. While this returns
  * a reason, indexing stores text only and search answers by keywords.
  */
+export interface VectorForm {
+  /** What goes before a passage in what the embedding model reads. */
+  header: IndexProfile['header'];
+  passagePrefix: string;
+  /** What goes before a question. */
+  queryPrefix: string;
+  /** The stored vectors were made in another form than the settings ask for now: new ones have to be made. */
+  behind: boolean;
+}
+
+/**
+ * The form every vector is made in right now. Vectors made in two forms do not belong in one index, so while the
+ * index holds vectors, a new passage is embedded the way those were, and a question is asked the way that goes
+ * with them. The form the settings ask for takes over once new vectors are made (reembed.ts).
+ *
+ * A prefix that comes with the model goes before questions only when the stored passages have its other half
+ * (for a model with a prefix on questions only, that is always). One set by hand is used as it is set.
+ */
+export async function vectorForm(): Promise<VectorForm> {
+  const p = indexProfile();
+  const asked: VectorForm = { header: p.header, passagePrefix: p.passagePrefix, queryPrefix: p.queryPrefix, behind: false };
+  const local = await getLocalIndex();
+  if (!local) return asked;
+  const s = await local.embeddingState(DRIVE_COLLECTION);
+  if (!s || s.vectors === 0) return asked;
+  const stored = s.form ?? LEGACY_PASSAGE;
+  if (stored === passageMark(p)) return asked;
+  const bar = stored.indexOf('|');
+  const header = stored.slice(0, Math.max(0, bar));
+  const passagePrefix = bar < 0 ? '' : stored.slice(bar + 1);
+  return {
+    header: header === 'document' || header === 'none' ? header : 'heading',
+    passagePrefix,
+    queryPrefix: p.prefixFrom === 'model' && passagePrefix !== p.passagePrefix ? '' : p.queryPrefix,
+    behind: true,
+  };
+}
+
 export async function vectorProblem(): Promise<string | null> {
   const local = await getLocalIndex();
   if (!local) return null;
@@ -257,6 +296,8 @@ export async function ensureCollection(): Promise<void> {
 // A type alias, not an interface: it must be assignable to the Qdrant upsert payload (Record<string, unknown>).
 // (An interface is not assignable to an index-signature type because of declaration merging. A type alias is.)
 export type ChunkPayload = {
+  /** How the document was cut when this passage was made (index_profile.ts cutMark). Not there on older passages. */
+  cut?: string;
   chunk_id: string;
   file_id: string;
   file_name: string;

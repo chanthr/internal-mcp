@@ -250,6 +250,22 @@ test('state: what is set up, without any secret', async () => {
   }
 });
 
+test('how documents are cut is saved under knowledge.index, checked, and the default leaves nothing behind', async () => {
+  const saved = await api('POST', '/index/profile', { cut: 'windows', maxTokens: 400, header: 'document' });
+  assert.deepEqual([saved.status, saved.json.restartNeeded], [200, true]);
+  assert.deepEqual(config().knowledge, { index: { cut: 'windows', maxTokens: 400, header: 'document' } });
+  // Prefixes go together: one given, the other is saved empty. The overlap stays under half a passage.
+  await api('POST', '/index/profile', { cut: 'sections', maxTokens: 300, overlapTokens: 400, header: 'heading', queryPrefix: 'query: ', passagePrefix: null });
+  assert.deepEqual(config().knowledge.index, { cut: 'sections', maxTokens: 300, header: 'heading', overlapTokens: 149, queryPrefix: 'query: ', passagePrefix: '' });
+  for (const bad of [{ cut: 'sections', maxTokens: 50, header: 'heading' }, { cut: 'pages', maxTokens: 400, header: 'heading' }, { cut: 'sections', maxTokens: 400, header: 'heading', extra: 1 }]) {
+    assert.ok((await api('POST', '/index/profile', bad)).status >= 400, JSON.stringify(bad));
+  }
+  await api('POST', '/index/profile', { cut: 'sections', maxTokens: 800, header: 'heading' });
+  assert.equal(config().knowledge, undefined);
+  const m = await api('GET', '/index/measure');
+  assert.deepEqual([m.status, m.json.questions, m.json.ways.length], [200, 0, 4]);
+});
+
 test('folders, connections and tools are saved through the same checks as the setup commands', async () => {
   const added = await api('POST', '/folders', { path: docs });
   assert.deepEqual([added.status, added.json.restarting, added.json.restartNeeded], [200, false, true]); // nothing supervises a test

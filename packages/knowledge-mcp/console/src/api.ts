@@ -187,6 +187,21 @@ export interface State {
     vectorsFrom: string | null;
     /** New vectors being made for the whole index, started from this page. */
     job: { running: boolean; done: number; total: number; error: string | null } | null;
+    /** How passages are made now (server: index_profile.ts). */
+    profile: {
+      cut: 'sections' | 'windows';
+      maxTokens: number;
+      overlapTokens: number;
+      header: 'heading' | 'document' | 'none';
+      queryPrefix: string;
+      passagePrefix: string;
+      prefixFrom: 'settings' | 'model' | null;
+      modelPrefixes: { query: string; passage: string } | null;
+    };
+    /** Documents cut another way than the setting asks for: they are cut again as the folders are read. */
+    recut: number;
+    /** The stored vectors were made from another form of the passage than the setting asks for now. */
+    behind: boolean;
   } | null;
   plugins: PluginStatus[];
   folders: FolderView[];

@@ -506,6 +506,41 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 주소라면 무엇이든 쓸 수 있습니다. `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIM`을 정하십시오(예: Ollama 뒤의
 로컬 `bge-m3`).
 
+**조각을 만드는 방식.** 문서를 어떻게 자르느냐에 따라 검색이 찾는 것이 달라집니다. 어느 방식이 나은지는 문서마다
+다릅니다. 콘솔의 Documents → Passages에서 고르고, 고르기 전에 내 문서로 방식을 비교할 수 있습니다. 설정 파일에서는
+`knowledge.index`입니다.
+
+| 설정 | 값 | 기본 |
+| --- | --- | --- |
+| `cut` | `sections`: 제목에서 자르고, 절이 길면 문단에서 자릅니다. `windows`: 제목을 무시하고 길이로 자릅니다 | `sections` |
+| `maxTokens` | 조각 하나의 최대 토큰. 100~4,000 | 800 |
+| `overlapTokens` | 앞 조각에서 되풀이할 토큰 | 조각의 8분의 1, 최대 100 |
+| `header` | 임베딩 모델이 조각과 함께 읽는 것. `heading`(제목 경로), `document`(문서 이름과 제목 경로), `none` | `heading` |
+| `queryPrefix`, `passagePrefix` | 질문 앞, 조각 앞에 붙이는 말 | 아는 모델이면 그 모델의 것 |
+
+환경 변수가 설정 파일보다 먼저입니다. `KNOWLEDGE_CHUNK_CUT`, `KNOWLEDGE_CHUNK_TOKENS`, `KNOWLEDGE_CHUNK_OVERLAP`,
+`KNOWLEDGE_EMBED_HEADER`, `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_PASSAGE_PREFIX`입니다. 임베딩 모델이 학습한 접두어는
+모델 이름으로 알아봅니다. qwen3-embedding, e5, nomic-embed-text, embeddinggemma, mxbai-embed-large, bge-*-en이
+대상이고, 값은 각 모델 카드를 따릅니다. 그 밖의 모델은 직접 정하지 않으면 붙이지 않습니다. Qdrant를 쓸 때는 조각
+앞 접두어를 스스로 붙이지 않습니다.
+
+| 바꾼 것 | 일어나는 일 |
+| --- | --- |
+| `cut`, `maxTokens`, `overlapTokens` | 로컬 폴더 문서는 다음 훑기 때 새로 자릅니다. 콘솔에서 저장하면 바로 시작합니다. Drive 문서는 바뀔 때, 또는 `drive reindex`로 한 번에 자릅니다 |
+| `header`, 조각 앞 접두어 | 모든 조각의 벡터를 새로 만들어야 합니다. 콘솔의 Make new vectors나 `knowledge reembed`를 씁니다. 그 전까지는 새 조각과 질문도 저장된 벡터와 같은 방식으로 임베딩합니다. 두 방식은 섞지 않습니다 |
+
+| 명령 | 하는 일 |
+| --- | --- |
+| `knowledge-mcp knowledge measure` | 정답 문서가 정해진 질문을 지금 색인에 묻고, 키워드, 뜻, 둘 다로 정답이 몇 위에 나오는지 셉니다 |
+| `knowledge-mcp knowledge compare` | 로컬 폴더 문서를 200개까지 방식마다 잘라 메모리에서 임베딩하고, 같은 질문을 뜻으로 묻습니다. 색인은 바꾸지 않습니다 |
+
+질문은 Agent 화면에 연결한 모델이 문서 40개에서 하나씩 씁니다. 쓴 질문은 `<데이터 폴더>/search-measure.json`에
+두고 매번 같은 질문을 묻기 때문에 결과를 나란히 볼 수 있습니다. 직접 쓴 질문으로 바꿔도 됩니다
+(`{"questions":[{"question":"…","document":"경로의 일부"}]}`). `--new`는 질문을 새로 씁니다. Markdown 503개로 된
+위키에서 `qwen3-embedding:0.6b`와 질문 84개로 잰 값은 다음과 같습니다. 제목 단위 250~800토큰은 비슷했습니다(정답이
+3위 안에 든 질문 71~75개). 길이로 자르면 덜 찾았습니다. 모델의 접두어를 질문 앞에 붙이면 정답이 1위인 질문이
+43개에서 48개로 늘었습니다.
+
 </details>
 
 <details>

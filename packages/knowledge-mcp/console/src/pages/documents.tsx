@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { call, signIn, uploadFile, type Changed, type FolderView, type SomeFiles } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
 import { CliStep } from '../cli-step';
+import { Passages } from './passages';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { AlertDialog, Dialog } from '../ui/dialog';
@@ -17,6 +18,7 @@ export function Documents() {
       <Folders />
       <Drive />
       <Meaning />
+      <Passages />
     </Page>
   );
 }

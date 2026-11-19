@@ -1,6 +1,9 @@
 /**
  * Markdown chunking: split by heading, then a token-aware sub-split, then overlap.
  *
+ * The sizes below (MAX_TOKENS, MIN_TOKENS, OVERLAP_TOKENS) and whether headings are cut at come from the index
+ * profile (index_profile.ts): 800, 50 and 100 at headings unless set otherwise.
+ *
  * Strategy:
  * 1. Split off the front matter (---...---) and extract metadata (promoted to the search payload)
  * 2. Split at each heading (^#{1,6} ) into sections. A "# comment" line inside a code block is not a heading
@@ -12,12 +15,7 @@
  */
 import { encode } from 'gpt-tokenizer';
 import { parse as parseYaml } from 'yaml';
-
-const MAX_TOKENS = 800;
-const MIN_TOKENS = 50;
-const OVERLAP_TOKENS = 100;
-// Hard cap for one unit (paragraph or sentence). Larger units are force-split to avoid an embedding API Bad Request.
-const HARD_MAX_TOKENS = MAX_TOKENS;
+import { indexProfile, type IndexProfile } from './index_profile.js';
 
 export interface RawChunk {
   heading: string;
@@ -346,12 +344,18 @@ interface PreChunk {
 /**
  * Full markdown to an array of chunks. Keeps the heading context and image/table/code/front matter metadata.
  */
-export function chunkMarkdown(markdown: string): RawChunk[] {
+export function chunkMarkdown(markdown: string, profile: IndexProfile = indexProfile()): RawChunk[] {
   const { frontmatter, body } = parseFrontmatter(markdown);
   const docMeta = parseDocMeta(frontmatter);
   if (body.trim().length === 0) return [];
+  const MAX_TOKENS = profile.maxTokens;
+  const MIN_TOKENS = profile.minTokens;
+  const OVERLAP_TOKENS = profile.overlapTokens;
+  // Hard cap for one unit (paragraph or sentence). Larger units are force-split to avoid an embedding API Bad Request.
+  const HARD_MAX_TOKENS = MAX_TOKENS;
 
-  const sections = splitSections(body);
+  // "windows": the document is one run of paragraphs. Headings stay in the text and are not cut at.
+  const sections = profile.cut === 'windows' ? [body] : splitSections(body);
   const chunks: PreChunk[] = [];
   const headingStack: string[] = []; // index = (heading level - 1), keeps the parent > child breadcrumb context
   let currentHeading = ''; // body before the first heading has no heading (older versions used a Korean placeholder here)
@@ -359,7 +363,7 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
   for (const section of sections) {
     if (section.trim().length === 0) continue;
 
-    const h = extractHeading(section);
+    const h = profile.cut === 'windows' ? null : extractHeading(section);
     if (h) {
       headingStack.length = h.level - 1; // drop entries at the same or a deeper level
       headingStack[h.level - 1] = h.text; // then set the current level
@@ -425,7 +429,7 @@ export function chunkMarkdown(markdown: string): RawChunk[] {
   //    If that lone surrogate reaches the Qdrant payload content, the JSON is invalid UTF-8 and the upsert returns 400.
   //    Step 3 below strips the final content once more to remove it.
   for (let i = 1; i < withMeta.length; i++) {
-    const overlap = tailByTokens(withMeta[i - 1].content, OVERLAP_TOKENS);
+    const overlap = OVERLAP_TOKENS > 0 ? tailByTokens(withMeta[i - 1].content, OVERLAP_TOKENS) : '';
     if (overlap) withMeta[i].content = `…${overlap}\n\n${withMeta[i].content}`;
   }
 

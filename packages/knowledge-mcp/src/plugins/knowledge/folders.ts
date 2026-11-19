@@ -17,6 +17,7 @@
  * files are indexed, and documents whose file is gone are removed. A scan never uses paid OCR: scanned PDFs are
  * counted and left out.
  */
+import { cutMark, LEGACY_CUT } from '../drive/index_profile.js';
 import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { getConfig } from '../../core/config.js';
@@ -162,24 +163,24 @@ export async function resolveLocalId(id: string): Promise<(LocalFile & { folder:
 }
 
 /** Indexed local documents: id → the modified time recorded when each was indexed. */
-async function indexedLocalDocs(): Promise<Map<string, string>> {
+async function indexedLocalDocs(): Promise<Map<string, { modified: string; cut: string | null }>> {
   // The built-in index answers from its document index. (Paging through every chunk to learn the same thing read
   // the text of the whole index on every pass.)
   const local = await getLocalIndex();
   if (local) return local.documentTimes(DRIVE_COLLECTION, LOCAL_PREFIX);
   const client = await getQdrantClient();
-  const out = new Map<string, string>();
+  const out = new Map<string, { modified: string; cut: string | null }>();
   let offset: string | number | null | undefined;
   do {
     const page = await client.scroll(DRIVE_COLLECTION, {
       limit: 2000,
       offset: offset ?? undefined,
-      with_payload: ['file_id', 'modified_time'],
+      with_payload: ['file_id', 'modified_time', 'cut'],
       with_vector: false,
     });
     for (const pt of page.points) {
       const id = String(pt.payload?.file_id ?? '');
-      if (isLocalId(id) && !out.has(id)) out.set(id, String(pt.payload?.modified_time ?? ''));
+      if (isLocalId(id) && !out.has(id)) out.set(id, { modified: String(pt.payload?.modified_time ?? ''), cut: typeof pt.payload?.cut === 'string' ? pt.payload.cut : null });
     }
     offset = page.next_page_offset ?? null;
   } while (offset !== null);
@@ -277,6 +278,8 @@ function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult |
     await ensureCollection();
     const folders = localFolders();
     const indexed = await indexedLocalDocs();
+    // How documents are cut now (index_profile.ts). One that was cut another way is read and cut again.
+    const cut = cutMark();
     const r: FolderScanResult = { folders: folders.length, files: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0, errored: 0, unreadable: [] };
     const seen = new Set<string>();
     const keepPrefixes: string[] = [];
@@ -315,7 +318,8 @@ function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult |
         r.files++;
         seen.add(file.id);
         const rel = inFolder(file.path);
-        if (indexed.get(file.id) === file.modifiedTime) {
+        const was = indexed.get(file.id);
+        if (was && was.modified === file.modifiedTime && (was.cut ?? LEGACY_CUT) === cut) {
           r.unchanged++;
           links[rel] = await linksOfFile(file, known[rel]);
           continue;

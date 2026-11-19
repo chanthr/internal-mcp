@@ -514,6 +514,41 @@ per folder are indexed (`KNOWLEDGE_MAX_FILES`). Embeddings use OpenAI `text-embe
 OpenAI-compatible `/embeddings` endpoint works: set `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIM`
 (for example a local `bge-m3` behind Ollama).
 
+**How passages are made.** What search finds depends on how documents are cut, and which way is best depends on
+the documents. Choose it under Documents → Passages in the console, and compare the ways on your own documents
+there first. In the config it is `knowledge.index`:
+
+| Setting | Values | Default |
+| --- | --- | --- |
+| `cut` | `sections`: at headings, then at paragraphs when a section is long. `windows`: by length, headings ignored | `sections` |
+| `maxTokens` | The most tokens in a passage, 100 to 4,000 | 800 |
+| `overlapTokens` | Tokens repeated from the passage before | An eighth of a passage, at most 100 |
+| `header` | What the embedding model reads with each passage: `heading` (its heading path), `document` (the document's name and the heading path) or `none` | `heading` |
+| `queryPrefix`, `passagePrefix` | Put before each question and before each passage | The model's own, when it is known |
+
+Environment variables win over the config: `KNOWLEDGE_CHUNK_CUT`, `KNOWLEDGE_CHUNK_TOKENS`,
+`KNOWLEDGE_CHUNK_OVERLAP`, `KNOWLEDGE_EMBED_HEADER`, `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_PASSAGE_PREFIX`. The
+prefixes an embedding model was trained with are known by its name for qwen3-embedding, e5, nomic-embed-text,
+embeddinggemma, mxbai-embed-large and bge-*-en, as their model cards give them. Other models get none unless you set
+them. With Qdrant a passage prefix is never added by itself.
+
+| What changed | What happens |
+| --- | --- |
+| `cut`, `maxTokens`, `overlapTokens` | Documents in local folders are cut again by the next scan, which starts when the console saves. Drive documents are cut again when they change, or all at once with `drive reindex` |
+| `header`, the passage prefix | Every passage needs a new vector: Make new vectors in the console, or `knowledge reembed`. Until then new passages and questions are embedded the way the stored vectors were. The two are never mixed |
+
+| Command | What it does |
+| --- | --- |
+| `knowledge-mcp knowledge measure` | Asks questions whose answer is known of the index as it is, and counts where the right document comes by keywords, by meaning and with both |
+| `knowledge-mcp knowledge compare` | Cuts up to 200 documents from the local folders each way, embeds them in memory and asks the same questions by meaning. The index is not changed |
+
+The questions are written by the model connected on the Agent page, one from each of 40 documents, and kept in
+`<data dir>/search-measure.json`: every run asks the same ones, so results can be set side by side. Write your own
+there instead if you like (`{"questions":[{"question":"…","document":"a part of its path"}]}`); `--new` writes new
+ones. Measured on a wiki of 503 Markdown files with `qwen3-embedding:0.6b` and 84 questions: 250 to 800 tokens at
+headings found about the same (the right document among the first three for 71 to 75), cutting by length found
+less, and the model's own prefix on questions put the right document first for 48 instead of 43.
+
 </details>
 
 <details>
