@@ -150,6 +150,30 @@ this machine that asks for `localhost`, and its API needs a token the server cre
 token is set, not what it is. Whoever holds the console token is the admin of this server, so keep it like a
 password. `KNOWLEDGE_CONSOLE=off` turns the console off.
 
+### A wiki written from your documents
+
+Search finds passages again for every question. A wiki keeps what was understood. With a model connected on the
+Agent page, the server reads your documents and writes one, as plain Markdown in `wiki/` beside your settings:
+
+```
+wiki/
+  AGENTS.md    the rules of this wiki: what to take from a document, in which language. Yours to change
+  index.md     every page with one line
+  log.md       what was read, and when
+  sources/     one page per document: what it says, and the topics it feeds
+  topics/      one page per topic: what all the documents say about it, each fact with the document it is from
+```
+
+| | |
+| --- | --- |
+| Start | **Agent → Create the wiki**, then **Read documents**. A press reads up to 25 documents and says what it came to (questions asked, tokens in and out) before you read on |
+| What it reads | The documents in your folders and in `uploads/`. They are never changed. A document is read again only when it has changed, and what a removed document said leaves the wiki with it |
+| What it costs | One question to the model per document (more for a long one, read in parts), and one per topic page that at least three facts speak of |
+| Where it shows up | The wiki is a folder of this server: `search_knowledge` and `read_document` find its pages, and the Graph page and `linked_documents` follow its links, from a topic to its documents and back |
+| Obsidian | Open `wiki/` as a vault: pages link with `[[…]]`, and file names are the titles |
+| Your own notes | Whatever you write under a `## Notes` heading on a page stays when the page is written again |
+| A small or local model | Works: the model is asked for labelled lines, not JSON. Set `WIKI_PART_CHARS` (default 24000) lower when the model's window is small. What a page says is as good as the model that read the document |
+
 ## How it works
 
 <p align="center">
