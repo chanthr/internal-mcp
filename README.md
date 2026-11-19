@@ -126,7 +126,7 @@ offers something better, the console uses it:
 
 | Service | In the console | What it takes |
 | --- | --- | --- |
-| Railway | **Sign in with Railway** | Nothing to prepare. The server registers itself with Railway, you sign in and pick the workspaces it may read, as a viewer. The sign-in renews itself |
+| Railway | **Sign in with Railway** | Nothing to prepare. The server registers itself with Railway, you sign in and pick the workspaces it may read, as a viewer. The sign-in renews itself. A viewer sees projects and deployments; Railway shows logs to members only, so **Also read logs** asks for member access instead (it could also change things; this server only reads) |
 | Google Drive | **Sign in with Google** | An OAuth client of your own Google Cloud project, made once: client ID and secret go into the form. The server then reads your My Drive, or the folders you list, as you. Google reviews every shared app that reads Drive, which is why there is no ready-made one to offer |
 | Google Drive | **Account with gcloud** | Nothing to prepare on a machine with Homebrew or winget: the console installs the gcloud CLI and runs its sign-in (a browser window opens). gcloud then creates a service account and its key; you share folders with that account. When Google asks an organization account to sign in again, the console runs the sign-in again |
 | Notion, Supabase, Linear and other apps with an MCP server | **Add an app** | Nothing to prepare where the app's server follows MCP's sign-in rules: this server registers itself there and you sign in at the app. Only its tools that read are turned on, and Supabase is added in its read-only mode |

@@ -217,7 +217,7 @@ export async function handleRailwayLogs(args: z.infer<typeof logSchema>) {
     // Seen with a real sign-in: projects and deployments are listed, logs are refused. Railway shows logs to the
     // members of a workspace, and the sign-in asks for viewer access so that it cannot change anything.
     if (auth?.via === 'login' && e instanceof Error && /not authori[sz]ed/i.test(e.message)) {
-      return errOut(new Error('Railway: this sign-in lists projects and deployments, but Railway does not show it the logs. The sign-in asks for viewer access, and logs are for members of the workspace. To read logs, paste a Railway token in the console (Apps → Railway) or set RAILWAY_TOKEN.'));
+      return errOut(new Error('Railway: this sign-in lists projects and deployments, but Railway does not show it the logs. It asked for viewer access, and logs are for members of the workspace. To read logs, sign in again in the console (Apps → Railway) with "Also read logs" on, or set RAILWAY_TOKEN.'));
     }
     return errOut(e);
   }

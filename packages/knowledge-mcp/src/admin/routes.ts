@@ -37,6 +37,7 @@ import { folderLeftOut, folderReading, LOCAL_PREFIX, localFolders, scanFoldersSo
 import { getGraph, unlinked, type Graph, type GraphEdge, type GraphNode } from '../plugins/knowledge/graph.js';
 import { MAX_FILE_BYTES } from '../plugins/drive/settings.js';
 import { saveUpload, UPLOADS, uploadsDir } from './uploads.js';
+import { openInBrowser } from './launch.js';
 import { cancelCliRun, CLI_ACTIONS, CLI_TOOLS, cliRun, installPlan, startCliRun, type CliAction, type CliTool } from './cli_runs.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorProblem } from '../plugins/drive/qdrant.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
@@ -45,8 +46,8 @@ import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralS
 import { readEnvKeys, readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { countDocuments } from '../setup/wizard.js';
 import { backgroundExec, createDriveServiceAccount, gcloudAccount } from '../setup/auto.js';
-import { railwayAuth, railwaySignedIn, readRailwayLogin } from '../plugins/railway/login.js';
-import { consoleEnabled, consoleToken, localOnly, tokenRequired } from './auth.js';
+import { railwayAuth, railwaySignedIn, readRailwayLogin, railwayReadsLogs } from '../plugins/railway/login.js';
+import { consoleEnabled, consoleToken, localOnly, tokenRequired, foreignPage } from './auth.js';
 import {
   completeLogin,
   driveFolderIds,
@@ -176,10 +177,11 @@ function nodeView(g: Graph, n: GraphNode) {
 }
 
 /** How Railway is connected: a token in the environment wins over a sign-in. */
-function railwayVia(): { set: boolean; via: 'token' | 'login' | null; who: string | null } {
-  if (isSet(SERVICE_ENV.railway)) return { set: true, via: 'token', who: null };
-  if (railwaySignedIn()) return { set: true, via: 'login', who: readRailwayLogin().who ?? null };
-  return { set: false, via: null, who: null };
+/** `logs`: a sign-in that asked for the access Railway shows logs to. null for a token (it reads what it was made for). */
+function railwayVia(): { set: boolean; via: 'token' | 'login' | null; who: string | null; logs: boolean | null } {
+  if (isSet(SERVICE_ENV.railway)) return { set: true, via: 'token', who: null, logs: null };
+  if (railwaySignedIn()) return { set: true, via: 'login', who: readRailwayLogin().who ?? null, logs: railwayReadsLogs() };
+  return { set: false, via: null, who: null, logs: null };
 }
 
 /** Lines of a setup command, collected instead of printed. */
@@ -237,6 +239,9 @@ function foreignEnvProblem(dir: string, values: string[]): string | null {
   }
   return null;
 }
+
+/** Is there a desktop to open a browser on? macOS and Windows have one; Linux has one when a display is set. */
+const consoleOpens = (): boolean => process.platform !== 'linux' || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 
 /** On every answer of the console (see mountConsole). The page looks for it. */
 export const CONSOLE_HEADER = 'X-Knowledge-MCP-Console';
@@ -612,7 +617,13 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.json({ clientSaved: !!saved, account: saved?.account ?? null, redirectUri: `${origin(req)}/console/login/google` });
     }),
   );
-  api.post('/logins/railway', wrap(async (req, res) => void res.json({ url: await startRailwayLogin(origin(req)) })));
+  api.post(
+    '/logins/railway',
+    wrap(async (req, res) => {
+      const { logs } = z.object({ logs: z.boolean().optional() }).parse(req.body ?? {});
+      res.json({ url: await startRailwayLogin(origin(req), { logs }) });
+    }),
+  );
   api.post(
     '/logins/google',
     wrap(async (req, res) => {
@@ -1029,6 +1040,19 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   // The browser the server opened: trade the one-time code for the address with the token. Anything else lands on
   // the page, which works if this browser already has the token and asks for it if not.
   router.get('/open', (req, res) => void res.redirect(302, redeemOpenCode(String(req.query.code ?? '')) ? `/console/#token=${consoleToken()}` : '/console/'));
+  // A browser that has no token (another browser, another port) can ask the server to open the console for the
+  // person at the machine, instead of sending them to look for an address in the terminal. Nothing is handed to
+  // whoever asks: the console opens in the browser of the one who runs the server, with a one-time address that
+  // is kept off the command line (launch.ts). Asked by the console page only, and not over and over.
+  let openedAt = 0;
+  router.post('/open-here', (req, res) => {
+    if (foreignPage(req.headers)) return void res.status(403).json({ error: 'Only the console page asks for this.' });
+    if (process.env.CI || !consoleOpens()) return void res.status(409).json({ error: 'This server cannot open a browser. Use the address it printed in the terminal.' });
+    if (Date.now() - openedAt < 10_000) return void res.status(429).json({ error: 'The console was just opened. Look at your browser.' });
+    openedAt = Date.now();
+    openInBrowser(consoleOpenUrl(req.socket.localPort ?? 0));
+    res.json({ ok: true });
+  });
   // The browser comes back from Railway or Google. It carries no console token (it arrives from another site), so
   // this accepts only the answer to a sign-in started from the console minutes ago, and saves nothing by itself.
   router.get('/login/:service', (req, res) => {

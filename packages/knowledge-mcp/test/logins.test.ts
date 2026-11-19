@@ -178,7 +178,7 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   assert.equal(mode(file), 0o600);
   assert.equal(readRailwayLogin().refreshToken, 'rt-1');
   const after1 = (await api('GET', '/state')).json;
-  assert.deepEqual([after1.login, after1.services.railway], [null, { set: true, via: 'login', who: 'ann@example.com' }]);
+  assert.deepEqual([after1.login, after1.services.railway], [null, { set: true, via: 'login', who: 'ann@example.com', logs: false }]);
   assert.ok(!JSON.stringify(after1).includes('rt-1'));
   assert.equal((await api('POST', '/logins/finish')).status, 422); // nothing is waiting any more
 
@@ -191,7 +191,7 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   assert.deepEqual([listed.workspaces, listed.projects.map((p) => `${p.workspace}/${p.name}`), listed.projects[0].services], [['Acme'], ['Acme/api', 'Acme/web'], [{ id: 'p1-s', name: 'server' }]]);
   // Logs are not shown to a viewer (seen with a real sign-in). The tool says why and what reads them, not just "Not Authorized".
   const logs = (await authStore.run({ ok: true, role: 'admin', email: 'a@test', org_id: 'o' } as never, () => handleRailwayLogs({ deploymentId: 'd1', type: 'deploy', limit: 5 }))) as { isError?: boolean; content: Array<{ text: string }> };
-  assert.deepEqual([logs.isError, /does not show it the logs\..*paste a Railway token in the console \(Apps → Railway\) or set RAILWAY_TOKEN/.test(logs.content[0].text)], [true, true], logs.content[0].text);
+  assert.deepEqual([logs.isError, /does not show it the logs\..*sign in again in the console \(Apps → Railway\) with "Also read logs" on, or set RAILWAY_TOKEN/.test(logs.content[0].text)], [true, true], logs.content[0].text);
   writeRailwayLogin({ ...readRailwayLogin(), expiresAt: Date.now() - 1000 });
   const both = await Promise.all([railwayAuth(), railwayAuth(), railwayAuth()]);
   assert.deepEqual([both.map((b) => b.token), rw.refreshes, readRailwayLogin().refreshToken], [['at-2', 'at-2', 'at-2'], 1, 'rt-2']);
@@ -241,6 +241,20 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   await new Promise((r) => setTimeout(r, 100)); // the old registration is deleted without being waited for
   assert.deepEqual([readRailwayLogin().client?.id, readRailwayLogin().client?.scope, rw.deleted], ['rlwy_test_2', renewed.get('scope'), ['rlwy_test_1 Bearer reg-1']]);
 
+  // Reading logs is asked for knowingly. The sign-in then asks for member access (Railway shows logs to members,
+  // not to viewers), with a registration made for exactly that, and the state says which of the two it is.
+  const withLogs = new URL((await api('POST', '/logins/railway', { logs: true })).json.url).searchParams;
+  const asked = withLogs.get('scope')!.split(' ');
+  assert.deepEqual(
+    [asked.includes('workspace:member'), asked.includes('workspace:viewer'), withLogs.get('client_id'), rw.registered.at(-1).scope],
+    [true, false, 'rlwy_test_3', withLogs.get('scope')],
+  );
+  rw.challenge = withLogs.get('code_challenge')!;
+  await comeBack('railway', { code: 'good-code', state: withLogs.get('state')! });
+  assert.equal((await api('POST', '/logins/finish')).status, 200);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual([(await api('GET', '/state')).json.services.railway.logs, rw.deleted], [true, ['rlwy_test_1 Bearer reg-1', 'rlwy_test_2 Bearer reg-2']]);
+
   // Railway withdrew the sign-in: the tools say what to do, instead of an error code.
   rw.ended = true;
   writeRailwayLogin({ ...readRailwayLogin(), expiresAt: Date.now() - 1000 });
@@ -249,8 +263,8 @@ test('Railway: the server registers itself, the person signs in, and nothing is 
   // Disconnect: the file goes, and so does the registration at Railway.
   const off = await api('DELETE', '/services/railway');
   assert.equal(off.status, 200, off.text);
-  assert.deepEqual([existsSync(file), rw.deleted, railwayConfigured()], [false, ['rlwy_test_1 Bearer reg-1', 'rlwy_test_2 Bearer reg-2'], false]);
-  assert.deepEqual((await api('GET', '/state')).json.services.railway, { set: false, via: null, who: null });
+  assert.deepEqual([existsSync(file), rw.deleted, railwayConfigured()], [false, ['rlwy_test_1 Bearer reg-1', 'rlwy_test_2 Bearer reg-2', 'rlwy_test_3 Bearer reg-3'], false]);
+  assert.deepEqual((await api('GET', '/state')).json.services.railway, { set: false, via: null, who: null, logs: null });
 });
 
 test('Google: a sign-in through your own OAuth client reads the folders you chose, and goes away cleanly', async () => {

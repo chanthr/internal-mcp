@@ -47,6 +47,13 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **"Open the console" where the page asks for the token.** A browser that has no token yet (another browser,
+  another port) no longer sends you to find an address in the terminal: one button, and the server opens the
+  console in your default browser, signed in. The one who asks is handed nothing, and the one-time address is
+  kept off the command line (which other users of a machine can read) on macOS and Linux, at start as well.
+- **Railway: reading logs is a choice at sign-in.** A viewer sees projects and deployments but not logs (seen
+  with a real sign-in). *Also read logs* asks Railway for member access instead, said plainly because a member
+  could also change things. The default stays viewer.
 - **The console installs and signs in the command-line tools it leans on.** *Account with gcloud* and the gh
   login used to need a tool that was already installed and signed in, and said "in a terminal: …" otherwise. The
   console now runs those commands itself: the package manager's install (`brew install gh`,
