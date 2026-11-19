@@ -35,7 +35,8 @@ async function approve() {
   await oauthProvider.authorize(client, { redirectUri: 'https://evil.example/cb', codeChallenge: 'ch', state: 'client-state', scopes: ['mcp'] } as never, res);
   const csrf = /kmcp_consent=([^;]+)/.exec(String(out.headers['set-cookie']))![1]!;
   const id = /name="id" value="([^"]+)"/.exec(out.body)![1]!;
-  const r = oauthProvider.consumeConsent(id, csrf, csrf, true);
+  const r = await oauthProvider.consumeConsent(id, csrf, csrf, 'approve');
+  assert.ok('redirect' in r);
   const state = new URL(r.redirect).searchParams.get('state')!;
   return { ...r, state };
 }
@@ -73,5 +74,15 @@ test('consent POST without the consent cookie is refused', async () => {
   await oauthProvider.authorize(client, { redirectUri: 'https://evil.example/cb', codeChallenge: 'ch', scopes: ['mcp'] } as never, res);
   const csrf = /kmcp_consent=([^;]+)/.exec(String(out.headers['set-cookie']))![1]!;
   const id = /name="id" value="([^"]+)"/.exec(out.body)![1]!;
-  assert.throws(() => oauthProvider.consumeConsent(id, csrf, '', true), /Could not verify/);
+  await assert.rejects(oauthProvider.consumeConsent(id, csrf, '', 'approve'), /Could not verify/);
+  // The key way checks the same cookie.
+  await assert.rejects(oauthProvider.consumeConsent(id, csrf, '', 'key', 'kmcp_anything'), /Could not verify/);
+});
+
+test('with Google set up, the consent page offers both a key and Google', async () => {
+  const { res, out } = fakeRes();
+  await oauthProvider.authorize(client, { redirectUri: 'https://evil.example/cb', codeChallenge: 'ch', scopes: ['mcp'] } as never, res);
+  assert.match(out.body, /name="key"/);
+  assert.match(out.body, /Continue with Google/);
+  assert.match(String(out.headers['content-security-policy']), /frame-ancestors 'none'/);
 });

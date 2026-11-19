@@ -274,6 +274,8 @@ export interface State {
   upstreams: UpstreamView[];
   /** A sign-in that came back from the other site and waits to be saved. */
   login: { service: 'railway' | 'google' | 'mcp' } | null;
+  /** Sign-in for connectors (Claude, ChatGPT): `address` is the public address they add, with /mcp. */
+  connectors: { on: boolean; address: string | null; google: boolean; googleMissing: string[] };
 }
 export interface UpstreamView {
   name: string;
