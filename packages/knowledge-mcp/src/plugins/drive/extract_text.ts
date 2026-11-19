@@ -9,19 +9,20 @@
  *   - Word .docx                     → ooxml.ts (paragraph text from the XML inside the zip)
  *   - PDF (digital)                  → pdf-parse (text layer)
  *
- * OCR needed (follow-up step, Mathpix):
- *   - PDF (scanned, too little text) → Mathpix
- *   - .pptx / image                  → Mathpix / Gemini multimodal
+ * OCR needed (ocr.ts: a vision model, or Mathpix):
+ *   - PDF (scanned, too little text) → each page drawn and read
+ *   - image                          → read
  *
  * Lazy imports (pdf-parse, xlsx): loaded only when needed.
  */
 import type { DriveClient } from './client.js';
+import { keepOcr, keptOcr, ocrBy, ocrConfigured, ocrImage, ocrPdf, ocrSettings } from './ocr.js';
 import { cleanExtractedText, stripEmbeddedImages } from './clean_text.js';
 
 export interface ExtractResult {
   text: string;
   method: string;
-  needsOcr?: boolean; // pdf-parse found too little text → a candidate for the Mathpix follow-up
+  needsOcr?: boolean; // pdf-parse found too little text → a candidate for OCR (ocr.ts)
   meta?: Record<string, unknown>;
 }
 
@@ -67,8 +68,8 @@ async function exportGoogle(
 
 /** Extraction + cleaning (noise cleanup). Entry point for indexing and search. */
 /**
- * With opts.ocr=false, files that need OCR (scanned PDFs, images) are not sent to Mathpix and are returned with needsOcr.
- * The same applies when there is no Mathpix key. Previously this threw, was counted as a reindex failure, and the
+ * With opts.ocr=false, files that need OCR (scanned PDFs, images) are not read and are returned with needsOcr.
+ * The same applies when no OCR is set (ocr.ts). Previously this threw, was counted as a reindex failure, and the
  * checkpoint was never cleared.
  */
 export async function extractText(
@@ -77,8 +78,7 @@ export async function extractText(
   mimeType: string,
   opts: { ocr?: boolean } = {},
 ): Promise<ExtractResult> {
-  const { mathpixConfigured } = await import('./mathpix.js');
-  const raw = await extractRaw(drive, fileId, mimeType, opts.ocr !== false && mathpixConfigured());
+  const raw = await extractRaw(drive, fileId, mimeType, opts.ocr !== false && ocrConfigured());
   return { ...raw, text: cleanExtractedText(raw.text) };
 }
 
@@ -111,8 +111,16 @@ async function extractRaw(
   return extractBytes(mimeType, { text: () => downloadText(drive, fileId), buffer: () => downloadBuffer(drive, fileId) }, ocr);
 }
 
+/** How a scan is read: stopped from outside, and how far it is (a long scan takes minutes). */
+export interface OcrProgress {
+  signal?: AbortSignal;
+  onPage?: (done: number, total: number) => void;
+}
+/** The most pages read from one scan. A 500-page scan is read in part, and the text says how much was left out. */
+const OCR_MAX_PAGES = Math.max(1, Number(process.env.OCR_MAX_PAGES ?? 200) || 200);
+
 /** Extraction for formats that are plain files: text, Word, PDF, PowerPoint, Excel, images. */
-async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean): Promise<ExtractResult> {
+async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean, progress: OcrProgress = {}): Promise<ExtractResult> {
   // 1. Native text
   if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
     return { text: await src.text(), method: 'native' };
@@ -144,13 +152,13 @@ async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean): Pr
     if (charsPerPage >= MIN_CHARS_PER_PAGE) {
       return { text, method: 'pdf-parse', meta: { pages, charsPerPage: Math.round(charsPerPage) } };
     }
-    // Scan → Mathpix OCR (only when a key is present and OCR is allowed)
-    if (!ocr) return { text, method: 'pdf-parse (scanned, OCR off)', needsOcr: true, meta: { pages, charsPerPage: Math.round(charsPerPage) } };
-    const { mathpixPdfToMarkdown } = await import('./mathpix.js');
-    const md = await mathpixPdfToMarkdown(buffer);
+    // Scan → OCR (only when one is set and OCR is allowed here)
+    const s = ocr ? ocrSettings() : null;
+    if (!s) return { text, method: 'pdf-parse (scanned, OCR off)', needsOcr: true, meta: { pages, charsPerPage: Math.round(charsPerPage) } };
+    const read = await ocrPdf(buffer, s, { maxPages: OCR_MAX_PAGES, ...progress });
     return {
-      text: md,
-      method: 'pdf→mathpix-ocr',
+      text: read.text,
+      method: s.kind === 'mathpix' ? 'pdf→mathpix-ocr' : `pdf→ocr (${s.model})`,
       meta: { pages, charsPerPage: Math.round(charsPerPage), ocr: true },
     };
   }
@@ -167,13 +175,12 @@ async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean): Pr
     return { text: await workbookText(await src.buffer()), method: 'xlsx→sheetjs' };
   }
 
-  // 7. Image → Mathpix OCR (v3/text, immediate)
+  // 7. Image → OCR
   if (mimeType.startsWith('image/')) {
-    if (!ocr) return { text: '', method: 'image (OCR off)', needsOcr: true };
-    const buffer = await src.buffer();
-    const { mathpixImageToMarkdown } = await import('./mathpix.js');
-    const md = await mathpixImageToMarkdown(buffer, mimeType);
-    return { text: md, method: 'image→mathpix' };
+    const s = ocr ? ocrSettings() : null;
+    if (!s) return { text: '', method: 'image (OCR off)', needsOcr: true };
+    const text = await ocrImage(await src.buffer(), mimeType, s, progress.signal);
+    return { text, method: s.kind === 'mathpix' ? 'image→mathpix' : `image→ocr (${s.model})`, meta: { pages: 1, ocr: true } };
   }
 
   // 8. Unsupported
@@ -192,23 +199,28 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 };
 
+/** Images are documents only when OCR is set: without it there is nothing to read in them. */
+const IMAGE_BY_EXTENSION: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp' };
+
 /** The MIME type for a local file name, or null when the format is not supported. */
 export function mimeForFileName(name: string): string | null {
   const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
-  return MIME_BY_EXTENSION[ext] ?? null;
+  return MIME_BY_EXTENSION[ext] ?? (ocrConfigured() ? (IMAGE_BY_EXTENSION[ext] ?? null) : null);
 }
 
 /**
  * Extraction + cleaning for a file on disk (local folder sources). OCR is off unless asked for: a folder scan must
  * never start a paid job on its own.
  */
-export async function extractLocalFile(path: string, mimeType: string, opts: { ocr?: boolean } = {}): Promise<ExtractResult> {
-  const { readFile } = await import('node:fs/promises');
-  const { mathpixConfigured } = await import('./mathpix.js');
-  const raw = await extractBytes(
-    mimeType,
-    { text: () => readFile(path, 'utf8'), buffer: () => readFile(path) },
-    opts.ocr === true && mathpixConfigured(),
-  );
+export async function extractLocalFile(path: string, mimeType: string, opts: { ocr?: boolean } & OcrProgress = {}): Promise<ExtractResult> {
+  const { readFile, stat } = await import('node:fs/promises');
+  // A scan read before is not read again while the file is unchanged: that took minutes, or was billed.
+  const info = await stat(path);
+  const stamp = `${info.size}:${Math.round(info.mtimeMs)}`;
+  const kept = keptOcr(path, stamp);
+  const s = ocrSettings();
+  const raw = await extractBytes(mimeType, { text: () => readFile(path, 'utf8'), buffer: () => readFile(path) }, opts.ocr === true && !!s && !kept, opts);
+  if (raw.needsOcr && kept) return { text: cleanExtractedText(kept.text), method: `ocr (kept, ${kept.by})`, meta: { pages: kept.pages, ocr: true } };
+  if (raw.meta?.ocr && s) keepOcr(path, { stamp, by: ocrBy(s), text: raw.text, pages: Number(raw.meta.pages ?? 0) });
   return { ...raw, text: cleanExtractedText(raw.text) };
 }

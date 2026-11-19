@@ -17,7 +17,7 @@ import { getConfig } from '../../core/config.js';
 export { DRIVE_ROOTS, MAX_FILE_BYTES };
 
 /**
- * MIME types supported for extraction (must match extract_text.ts). Scanned PDFs and images go through Mathpix OCR.
+ * MIME types supported for extraction (must match extract_text.ts). Scanned PDFs and images go through OCR (ocr.ts).
  * Single source of truth for the full reindex and the incremental sync.
  */
 export const SUPPORTED_MIMES = new Set<string>([

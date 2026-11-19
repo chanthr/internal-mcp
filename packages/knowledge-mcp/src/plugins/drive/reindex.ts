@@ -86,7 +86,7 @@ interface DriveRoot {
 interface CliArgs {
   roots: DriveRoot[];
   dryRun: boolean;
-  /** Leave out files that need OCR instead of sending them to Mathpix (billed per page). */
+  /** Leave out files that need OCR instead of reading them (a remote OCR may bill per page). */
   noOcr: boolean;
   recreate: boolean;
   /** True when the run covers only some roots. Cleanup is then skipped so vectors of other roots are not deleted. */
@@ -340,7 +340,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       continue;
     }
     try {
-      // A dry run does not call OCR (Mathpix charges per page).
+      // A dry run does not call OCR (a remote one may charge per page).
       const { text, needsOcr } = await extractText(drive, file.id, file.mimeType, { ocr: !dryRun && !noOcr });
       if (needsOcr && noOcr) {
         // Not recorded as done: a later run with OCR must still pick this file up.
@@ -435,7 +435,7 @@ export async function runReindex(argv: string[]): Promise<void> {
       `${useVectors ? `model ${EMBEDDING_MODEL}${cost}` : embeddingsConfigured() ? 'keyword index only (stored vectors are from another model)' : 'keyword index only (no embedding model)'}, ${elapsedSec}s`,
   );
   if (ocrLeftOut > 0) {
-    console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: ${cli('drive reindex')} (Mathpix is billed per page).`);
+    console.log(`[index] ${ocrLeftOut} scanned file(s) or image(s) were left out because they need OCR. To include them: ${cli('drive reindex')} without --no-ocr (a remote OCR may bill per page).`);
   }
   // If everything succeeded, clear the checkpoint (keep it if failures remain)
   if (!dryRun && done.size + ocrLeftOut >= allFiles.length) clearCheckpoint();

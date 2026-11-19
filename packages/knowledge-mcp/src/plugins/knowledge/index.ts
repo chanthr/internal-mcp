@@ -15,7 +15,9 @@ import { backfillVectors, indexAvailable } from '../drive/indexer.js';
 import { EMBEDDING_MODEL } from '../drive/embeddings.js';
 import { reembed } from './reembed.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
-import { foldersConfigured, scanFolders, startFolderScans } from './folders.js';
+import { afterFolderPass, foldersConfigured, scanFolders, startFolderScans } from './folders.js';
+import { ocrIsLocal } from '../drive/ocr.js';
+import { ocrRun, ocrWaiting, startOcrRun } from './ocr_run.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
 import { readDocumentTool } from './tools/read_document.js';
 import { linkedDocumentsTool } from './tools/linked_documents.js';
@@ -66,6 +68,10 @@ export const knowledgePlugin = definePlugin({
   async start({ state, log }) {
     // HTTP server: scan the folders now and then on a timer. KNOWLEDGE_SCAN_ENABLED=false turns it off.
     if (!(await shouldScan(state, log))) return;
+    // Scans the OCR on this computer can read are read after each pass, when the person turned that on (console).
+    afterFolderPass(() => {
+      if (process.env.OCR_AUTO?.trim() === 'true' && ocrIsLocal() && ocrWaiting() > 0 && !ocrRun()?.running) startOcrRun();
+    });
     startFolderScans(parseInt(process.env.KNOWLEDGE_SCAN_INTERVAL_MIN || '10', 10), log);
   },
   async catchUp({ state, log }) {

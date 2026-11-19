@@ -224,6 +224,18 @@ export function folderReading(name: string): FolderReading | null {
   return passes > 0 ? { ...(reading.get(name) ?? { done: 0, total: 0 }) } : null;
 }
 
+/**
+ * Files with no text that OCR could read: scanned PDFs, and images (listed only while OCR is set). By id, as this
+ * process last saw them.
+ */
+export function waitingForOcr(): string[] {
+  return [...noText.keys()].filter((id) => /\.(pdf|png|jpe?g|webp)$/i.test(id));
+}
+/** A file was read by OCR and indexed: it no longer counts as having no text. */
+export function readByOcr(id: string): void {
+  noText.delete(id);
+}
+
 /** The files of a folder that are not in the index, as this process last saw them: nothing to read in them, or they would not open. */
 export function folderLeftOut(name: string): { noText: string[]; failed: string[] } {
   const prefix = `${LOCAL_PREFIX}${name}/`;
@@ -236,6 +248,12 @@ export function folderLeftOut(name: string): { noText: string[]; failed: string[
  * Documents of a folder that cannot be read right now (an unmounted disk) are kept; documents of a folder that was
  * removed from the config are deleted.
  */
+/** What runs after each pass of a server (registered at start): reading new scans, when that is turned on. */
+const afterPass: Array<() => void> = [];
+export function afterFolderPass(fn: () => void): void {
+  afterPass.push(fn);
+}
+
 export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Promise<FolderScanResult | null> {
   passes++; // before the first await: whoever started the pass can say "reading" in the same breath
   let result: FolderScanResult | null;
@@ -254,6 +272,13 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
     if (filled > 0) log(`added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
   } catch (e) {
     log(`adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
+  }
+  for (const fn of afterPass) {
+    try {
+      fn();
+    } catch (e) {
+      log(`after the pass: ${e instanceof Error ? e.message : e}`);
+    }
   }
   return result;
 }

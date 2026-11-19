@@ -27,6 +27,9 @@ import { cli, stdioEntry } from '../core/invocation.js';
 import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
+import { checkOcr, ocrIsLocal, ocrPrompt, ocrSettings, type OcrSettings } from '../plugins/drive/ocr.js';
+import { ocrRun, ocrWaiting, startOcrRun, stopOcrRun } from '../plugins/knowledge/ocr_run.js';
+import { ollamaModels, pullOllamaModel, pullState } from './ollama.js';
 import { pingTool } from '../plugin/ping.js';
 import { VERSION } from '../version.js';
 import { checkConnection, sqlAdapterFor } from '../connections/index.js';
@@ -128,10 +131,26 @@ const SERVICE_ENV: Record<string, string[]> = {
   railway: ['RAILWAY_TOKEN'],
   // A model the server uses for its own work (core/llm.ts).
   llm: ['LLM_PROVIDER', 'LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'],
+  // Reading scanned documents (plugins/drive/ocr.ts). The Mathpix keys go with it: turning OCR off turns them off.
+  ocr: ['OCR_PROVIDER', 'OCR_BASE_URL', 'OCR_API_KEY', 'OCR_MODEL', 'OCR_PROMPT', 'OCR_AUTO', 'MATHPIX_APP_ID', 'MATHPIX_APP_KEY'],
 };
 const isSet = (names: string[]) => names.some((n) => !!process.env[n]?.trim());
 
 /** How Drive is connected: a key (service account) or a sign-in, and for a sign-in who it is and which folders are read. */
+/** The OCR that is set, for the page. Keys are never sent back. */
+function ocrView(): { set: boolean; kind: 'model' | 'mathpix' | null; model: string | null; baseUrl: string | null; local: boolean; keySet: boolean; auto: boolean } {
+  const s = ocrSettings();
+  return {
+    set: !!s,
+    kind: s?.kind ?? null,
+    model: s?.kind === 'model' ? s.model ?? null : s ? 'Mathpix' : null,
+    baseUrl: s?.baseUrl ?? null,
+    local: ocrIsLocal(s),
+    keySet: !!process.env.OCR_API_KEY?.trim(),
+    auto: process.env.OCR_AUTO?.trim() === 'true' && ocrIsLocal(s),
+  };
+}
+
 function driveVia(dir: string): { via: 'key' | 'login' | null; account: string | null; reads: string[] } {
   if (!isSet(SERVICE_ENV.drive)) return { via: null, account: null, reads: [] };
   if (!driveUsesLogin(dir)) return { via: 'key', account: null, reads: [] };
@@ -232,7 +251,7 @@ const toolStrings = (tool: { request?: unknown }): string[] => stringsIn(tool.re
 /** Credentials and settings of the server itself. A connection has no business sending these anywhere. */
 const SERVER_OWN = new Set([
   'SLACK_BOT_TOKEN', 'SLACK_USER_TOKEN', 'SLACK_TOKEN', 'GITHUB_PAT', 'GITHUB_TOKEN', 'RAILWAY_TOKEN', 'RAILWAY_MCP_TOKEN',
-  'OPENAI_API_KEY', 'EMBEDDING_API_KEY', 'QDRANT_API_KEY', 'MATHPIX_APP_ID', 'MATHPIX_APP_KEY',
+  'OPENAI_API_KEY', 'EMBEDDING_API_KEY', 'QDRANT_API_KEY', 'MATHPIX_APP_ID', 'MATHPIX_APP_KEY', 'OCR_API_KEY', 'LLM_API_KEY',
   'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_SERVICE_ACCOUNT_KEY', 'GOOGLE_OAUTH_CLIENT_SECRET', 'GOOGLE_OAUTH_REFRESH_TOKEN',
   'OAUTH_GOOGLE_CLIENT_SECRET', 'OAUTH_JWT_SECRET', 'SUPABASE_SERVICE_ROLE_KEY', 'MCP_API_KEY', 'MCP_CONFIG_JSON',
 ]);
@@ -381,6 +400,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           github: { set: isSet(SERVICE_ENV.github) },
           railway: railwayVia(),
           llm: llmView(),
+          ocr: ocrView(),
           embeddings: {
             set: embeddingsConfigured(),
             model: embeddingsConfigured() ? EMBEDDING_MODEL : null,
@@ -496,6 +516,48 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   );
 
   // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
+  // ── Reading scanned documents (plugins/drive/ocr.ts, plugins/knowledge/ocr_run.ts) ──
+  api.get(
+    '/ocr',
+    wrap(async (_req, res) => {
+      const s = ocrSettings();
+      // The models Ollama has on this computer, when the OCR is (or would be) Ollama here.
+      const base = s?.kind === 'model' && s.baseUrl ? s.baseUrl : 'http://localhost:11434/v1';
+      res.json({ waiting: ocrWaiting(), run: ocrRun(), installed: await ollamaModels(base), pull: pullState() });
+    }),
+  );
+  api.post(
+    '/ocr/run',
+    wrap(async (req, res) => {
+      const { limit } = z.object({ limit: z.number().int().min(1).max(100_000).optional() }).strict().parse(req.body ?? {});
+      res.json(startOcrRun({ limit }));
+    }),
+  );
+  api.post(
+    '/ocr/stop',
+    wrap(async (_req, res) => {
+      stopOcrRun();
+      res.json(ocrRun());
+    }),
+  );
+  api.post(
+    '/ocr/auto',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const { on } = z.object({ on: z.boolean() }).strict().parse(req.body);
+      if (on && !ocrIsLocal()) return refuse(res, 422, 'Reading every new scan by itself is offered only for an OCR on this computer.');
+      updateEnvFile(join(settingsDir(), '.env'), { OCR_AUTO: on ? 'true' : undefined });
+      change(res);
+    }),
+  );
+  api.post(
+    '/ocr/pull',
+    wrap(async (req, res) => {
+      const body = z.object({ model: modelName, baseUrl: webUrl(500).optional() }).strict().parse(req.body);
+      res.json(pullOllamaModel(body.baseUrl ?? 'http://localhost:11434/v1', body.model));
+    }),
+  );
+
   api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured() })));
   api.post(
     '/wiki',
@@ -615,6 +677,31 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           ...(body.apiKey ? { LLM_API_KEY: body.apiKey } : {}),
         });
         return change(res, { found: `${r.model} answered` });
+      }
+      if (id === 'ocr') {
+        const body = z
+          .discriminatedUnion('provider', [
+            z.object({ provider: z.literal('model'), baseUrl: webUrl(500), model: modelName, apiKey: visible(500).optional(), auto: z.boolean().optional() }).strict(),
+            z.object({ provider: z.literal('mathpix'), appId: visible(200).min(2), appKey: secret }).strict(),
+          ])
+          .parse(req.body);
+        if (body.provider === 'mathpix') {
+          updateEnvFile(envPath, { OCR_PROVIDER: 'mathpix', OCR_BASE_URL: undefined, OCR_MODEL: undefined, OCR_API_KEY: undefined, OCR_PROMPT: undefined, MATHPIX_APP_ID: body.appId, MATHPIX_APP_KEY: body.appKey });
+          return change(res, { found: 'Mathpix' });
+        }
+        const baseUrl = body.baseUrl.replace(/\/+$/, '');
+        // A key already saved is used again only for the address it was saved for.
+        const saved = process.env.OCR_BASE_URL?.replace(/\/+$/, '') === baseUrl ? process.env.OCR_API_KEY?.trim() || undefined : undefined;
+        const s: OcrSettings = { kind: 'model', baseUrl, model: body.model, apiKey: body.apiKey || saved, prompt: ocrPrompt(body.model) };
+        const r = await checkOcr(s);
+        updateEnvFile(envPath, {
+          OCR_PROVIDER: 'model',
+          OCR_BASE_URL: baseUrl,
+          OCR_MODEL: body.model,
+          ...(body.apiKey ? { OCR_API_KEY: body.apiKey } : saved ? {} : { OCR_API_KEY: undefined }),
+          OCR_AUTO: body.auto && ocrIsLocal(s) ? 'true' : undefined,
+        });
+        return change(res, { found: `${body.model} read the test page in ${r.seconds} s` });
       }
       if (id === 'embeddings') {
         const body = z

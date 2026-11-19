@@ -486,7 +486,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 임베딩 모델 바꾸기 | 새 모델을 정한 뒤 `knowledge-mcp knowledge reembed`를 실행합니다. 옛 벡터를 버리고 저장된 글로 새 벡터를 만듭니다. 그 전까지는 키워드로 답합니다. 두 모델의 벡터는 섞지 않습니다 |
 | 밖으로 나가는 것 | 키워드 검색은 아무것도 내보내지 않습니다. 임베딩 모델을 정하면 조각 글과 질문이 그 모델의 주소로 갑니다 |
 | 저장 위치 | `<데이터 폴더>/vectors.db`: 글, 키워드 색인, 벡터가 들어 있습니다. 조각 9만 개(파일 5천 개)로 잰 값은 키워드 검색 약 6ms, 뜻 검색 약 85ms입니다. 벡터는 조각마다 4바이트 × 차원 수만큼 메모리를 씁니다(1,024차원이면 370MB). 뜻 검색을 처음 할 때 읽습니다. 더 큰 색인이나 서버 여러 대는 `QDRANT_URL`을 정하고 다시 색인합니다 |
-| 스캔 파일 | 자동 실행은 유료 OCR을 쓰지 않습니다. Mathpix를 설정했다면 `knowledge-mcp drive reindex`가 Drive의 스캔 파일을 넣습니다. 로컬 폴더의 스캔 파일은 넣지 않습니다 |
+| 스캔 파일 | 폴더 훑기는 스캔을 직접 읽지 않고 개수만 셉니다. 읽기는 따로 실행합니다. 콘솔의 Documents → Scanned files에서 시작하고, 이 컴퓨터의 OCR이면 훑을 때마다 이어서 읽도록 켤 수 있습니다. 읽은 글은 보관해서, 파일이 바뀌지 않는 한 다시 읽지 않습니다. OCR이 설정돼 있으면 `knowledge-mcp drive reindex`가 Drive의 스캔 파일도 읽습니다(`--no-ocr`는 뺍니다) |
 | 정리 | `drive reindex` 전체 실행은 목록에서 빠진 Drive 문서를 지웁니다. 제외 폴더로 옮긴 파일이 여기에 해당합니다 |
 | 처음부터 다시 | `drive reindex --recreate`는 색인을 비우고 시작합니다. 로컬 폴더 문서도 비워지고, 다음 훑기 때 다시 색인됩니다. `--dry-run`은 조각 수만 세고 OCR을 건너뜁니다 |
 
@@ -498,7 +498,28 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | Google 문서, 슬라이드 | Drive 내보내기 |
 | Google 스프레드시트 | Drive에서 내보내 탭마다 한 절로 읽습니다 |
 | Word, PowerPoint, Excel, 글자가 든 PDF | 서버 안의 파서 |
-| 스캔 PDF, PNG, JPEG, WebP | Mathpix OCR. Drive 파일만, `MATHPIX_APP_ID`와 `MATHPIX_APP_KEY`가 있을 때만 |
+| 스캔 PDF, PNG, JPEG, WebP | OCR을 설정했을 때. 쪽마다 그림으로 그려 이미지를 읽는 모델에게 보냅니다(이 컴퓨터의 Ollama, Hugging Face Inference Providers, 이미지를 받는 OpenAI 호환 주소). Mathpix도 됩니다. 로컬 폴더의 이미지는 OCR이 설정됐을 때만 목록에 넣습니다 |
+
+**스캔 문서 읽기(OCR).** 콘솔의 Documents → Scanned files에서 무엇으로 읽을지 고릅니다.
+
+| 선택 | 내용 |
+| --- | --- |
+| This computer | Ollama의 이미지 읽는 모델. 모델은 콘솔이 받아 옵니다. 쪽이 컴퓨터 밖으로 나가지 않고 요금도 없습니다 |
+| Hugging Face | 토큰으로 쓰는 Inference Providers(`https://router.huggingface.co/v1`). 쪽이 Hugging Face와 모델을 돌리는 협력사로 갑니다 |
+| Another endpoint | 이미지를 받는 OpenAI 호환 chat completions 주소. OpenRouter, vLLM, LM Studio |
+| Mathpix | 전과 같습니다. `MATHPIX_APP_ID`, `MATHPIX_APP_KEY` |
+
+모델은 저장하기 전에 시험 쪽을 읽어 내야 합니다. 설정 이름은 `OCR_PROVIDER`(`model` 또는 `mathpix`), `OCR_BASE_URL`,
+`OCR_API_KEY`, `OCR_MODEL`, `OCR_PROMPT`입니다. glm-ocr와 deepseek-ocr는 모델 카드에 적힌 요청을 씁니다. 파일 하나에서
+읽는 쪽은 `OCR_MAX_PAGES`(200)까지입니다. 글자를 아는 한국어 PDF 16쪽을 Apple Silicon Mac의 Ollama로 읽혀 잰 값은
+다음과 같습니다.
+
+| 모델 | 틀린 글자(쪽마다 중앙값) | 쪽마다 초 |
+| --- | --- | --- |
+| `qwen3-vl:8b-instruct` | 100자에 1자 정도 | 15 |
+| `glm-ocr:q8_0` | 10자에 1자 정도 | 6 |
+| `deepseek-ocr:3b` | 100자에 4자 정도. 다만 16쪽 중 5쪽은 한 구절을 끝없이 되풀이했습니다 | 8 |
+
 
 `DRIVE_MAX_FILE_BYTES`(기본 50MB)보다 큰 파일은 읽거나 색인하지 않습니다. 로컬 폴더에서는 점으로 시작하는 파일,
 `node_modules`, `drive.excludeFolders`에 적은 폴더 이름, 심볼릭 링크를 건너뛰고, 폴더마다 2만 개까지 색인합니다
