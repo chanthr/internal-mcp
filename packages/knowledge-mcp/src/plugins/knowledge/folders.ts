@@ -202,6 +202,34 @@ export interface FolderScanResult {
 // Files that had no text at this modified time. Remembered for the life of the process so a timer does not parse
 // the same scanned PDF on every pass.
 const noText = new Map<string, string>();
+// Files the last pass could not open at all (a damaged file, a password): id → file name.
+const failed = new Map<string, string>();
+
+// ── What a pass is doing, for the console ──
+
+/** How far the pass of this process is in a folder: files looked at, of the files in it. */
+export interface FolderReading {
+  done: number;
+  total: number;
+}
+const reading = new Map<string, FolderReading>();
+let passes = 0;
+
+/**
+ * How far this process is in a folder, or null when it is not reading. A folder the pass has not come to yet
+ * reads 0 of 0. A folder of PDFs takes a while: without this a page that asks during the pass shows the few
+ * documents read so far as if they were all there is.
+ */
+export function folderReading(name: string): FolderReading | null {
+  return passes > 0 ? { ...(reading.get(name) ?? { done: 0, total: 0 }) } : null;
+}
+
+/** The files of a folder that are not in the index, as this process last saw them: nothing to read in them, or they would not open. */
+export function folderLeftOut(name: string): { noText: string[]; failed: string[] } {
+  const prefix = `${LOCAL_PREFIX}${name}/`;
+  const names = (ids: Iterable<string>) => [...ids].filter((id) => id.startsWith(prefix)).map((id) => id.slice(id.lastIndexOf('/') + 1)).sort();
+  return { noText: names(noText.keys()), failed: names(failed.keys()) };
+}
 
 /**
  * One pass over every configured folder. Returns null when another process is already scanning.
@@ -209,7 +237,43 @@ const noText = new Map<string, string>();
  * removed from the config are deleted.
  */
 export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Promise<FolderScanResult | null> {
-  const result = await withLock('folders-scan', async () => {
+  passes++; // before the first await: whoever started the pass can say "reading" in the same breath
+  let result: FolderScanResult | null;
+  try {
+    result = await readFolders(log);
+  } finally {
+    if (--passes === 0) reading.clear();
+  }
+  if (!result) return null;
+  // Vectors come after the pass, with the scan lock let go: making them for a large index takes long, and the next
+  // pass (a file that was just saved) must not wait for it.
+  try {
+    const problem = embeddingsConfigured() ? await vectorProblem() : null;
+    if (problem) log(`search by meaning is off: ${problem}`);
+    const filled = await backfillVectors();
+    if (filled > 0) log(`added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
+  } catch (e) {
+    log(`adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
+  }
+  return result;
+}
+
+/**
+ * Read the folders for files that were just put there. A pass that is already under way listed its files before
+ * they arrived and will not see them, so this waits for it to end and reads again. The folders count as being read
+ * for the whole of it.
+ */
+export async function scanFoldersSoon(log: (...a: unknown[]) => void = () => {}): Promise<void> {
+  passes++;
+  try {
+    for (let tries = 0; tries < 120 && !(await scanFolders(log)); tries++) await new Promise((r) => setTimeout(r, 1000));
+  } finally {
+    if (--passes === 0) reading.clear();
+  }
+}
+
+function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult | null> {
+  return withLock('folders-scan', async () => {
     await ensureCollection();
     const folders = localFolders();
     const indexed = await indexedLocalDocs();
@@ -242,7 +306,12 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
         keepPrefixes.push(`${LOCAL_PREFIX}${folder.name}/`);
         log(`folder ${folder.path} has more than ${MAX_FILES_PER_FOLDER} files; only the first ${MAX_FILES_PER_FOLDER} are indexed (KNOWLEDGE_MAX_FILES)`);
       }
-      for (const file of listing.files) {
+      const prefix = `${LOCAL_PREFIX}${folder.name}/`;
+      const at: FolderReading = { done: 0, total: listing.files.length };
+      reading.set(folder.name, at);
+      for (const id of failed.keys()) if (id.startsWith(prefix)) failed.delete(id);
+      for (const [n, file] of listing.files.entries()) {
+        at.done = n;
         r.files++;
         seen.add(file.id);
         const rel = inFolder(file.path);
@@ -268,10 +337,14 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
           links[rel] = await linksOfFile(file, known[rel]);
         } catch (e) {
           r.errored++;
+          failed.set(file.id, file.name);
           if (known[rel]) links[rel] = known[rel];
           log(`could not index ${file.path}: ${e instanceof Error ? e.message : e}`);
         }
       }
+      at.done = at.total;
+      // A file that is gone is not a file without text any more.
+      if (!listing.truncated) for (const id of noText.keys()) if (id.startsWith(prefix) && !seen.has(id)) noText.delete(id);
     }
     if (JSON.stringify(linksNow) !== JSON.stringify(linksBefore)) writeLinkMap(linksNow);
 
@@ -282,18 +355,6 @@ export async function scanFolders(log: (...a: unknown[]) => void = () => {}): Pr
     }
     return r;
   });
-  if (!result) return null;
-  // Vectors come after the pass, with the scan lock let go: making them for a large index takes long, and the next
-  // pass (a file that was just saved) must not wait for it.
-  try {
-    const problem = embeddingsConfigured() ? await vectorProblem() : null;
-    if (problem) log(`search by meaning is off: ${problem}`);
-    const filled = await backfillVectors();
-    if (filled > 0) log(`added vectors to ${filled} chunk(s) indexed before an embedding model was set`);
-  } catch (e) {
-    log(`adding vectors failed (keyword search is unaffected): ${e instanceof Error ? e.message : e}`);
-  }
-  return result;
 }
 
 let _timer: NodeJS.Timeout | null = null;

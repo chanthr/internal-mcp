@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { call, signIn, uploadFile, type Changed } from '../api';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { call, signIn, uploadFile, type Changed, type FolderView, type SomeFiles } from '../api';
 import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -20,22 +20,55 @@ export function Documents() {
   );
 }
 
+/** "a.pdf, b.pdf and 3 more" */
+const named = (files: SomeFiles) => `${files.names.join(', ')}${files.count > files.names.length ? ` and ${(files.count - files.names.length).toLocaleString()} more` : ''}`;
+
+/** What a folder's line says: how far the reading is while it is read, then what is in the index and what is not. */
+function folderHelp(f: FolderView): ReactNode {
+  if (f.documents === null) return 'This folder is not there any more.';
+  if (f.reading) {
+    return f.reading.total > 0
+      ? `Reading the files: ${f.reading.done.toLocaleString()} of ${f.reading.total.toLocaleString()}. The ones already read can be searched.`
+      : 'Reading the files.';
+  }
+  const files = (n: number) => `${n.toLocaleString()} file${n === 1 ? ' has' : 's have'}`;
+  return (
+    <>
+      {f.documents.toLocaleString()} document{f.documents === 1 ? '' : 's'}
+      {f.noText.count > 0 && <span className="row-note">{files(f.noText.count)} no text to read, like scanned pages: {named(f.noText)}</span>}
+      {f.failed.count > 0 && <span className="row-note">{files(f.failed.count)} not opened: {named(f.failed)}</span>}
+    </>
+  );
+}
+
 function Folders() {
-  const { state, apply } = useServer();
+  const { state, apply, refresh } = useServer();
   const add = useAction();
   const remove = useAction();
   const [path, setPath] = useState('');
+  // While a folder is read its numbers move: read them again every second or so, on this page only. Files that
+  // were just added are watched for a little while as well, for the moment before the server starts on them.
+  const reading = state.folders.some((f) => f.reading);
+  const [watchUntil, setWatchUntil] = useState(0);
+  useEffect(() => {
+    if (!reading && Date.now() > watchUntil) return;
+    const timer = setInterval(() => {
+      if (!reading && Date.now() > watchUntil) setWatchUntil(0);
+      else void refresh();
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [reading, watchUntil, refresh]);
   return (
     <Section title="Folders on this machine" text="Markdown, text, PDF, Word, PowerPoint and Excel files. No account and no key.">
       <div className="rows">
         {state.folders.map((f) => (
-          <Row key={f.path} title={f.path} help={f.documents === null ? 'This folder is not there any more.' : `${f.documents.toLocaleString()} documents`}>
+          <Row key={f.path} title={f.path} help={folderHelp(f)}>
             <Button size="sm" variant="ghost" disabled={remove.busy || !state.editable} onClick={() => void remove.run(() => apply(() => call<Changed>('DELETE', '/folders', { path: f.path })))}>
               Remove
             </Button>
           </Row>
         ))}
-        <Upload />
+        <Upload onAdded={() => setWatchUntil(Date.now() + 20_000)} />
         <form
           className="row-form"
           onSubmit={(e) => {
@@ -169,11 +202,13 @@ async function dropped(items: DataTransferItemList): Promise<Picked[]> {
   return out;
 }
 
-function Upload() {
+function Upload({ onAdded }: { onAdded: () => void }) {
   const { state, apply } = useServer();
   const [over, setOver] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  // Sent, and the server is taking them in (it may restart for the first ones).
+  const [saving, setSaving] = useState(false);
   const up = useAction();
   const files = useRef<HTMLInputElement>(null);
   const folder = useRef<HTMLInputElement>(null);
@@ -208,7 +243,13 @@ function Upload() {
       setProgress(null);
       const added = picked.length - refused;
       if (added === 0) throw new Error(why || 'The files could not be saved.');
-      await apply(() => call<Changed>('POST', '/uploads/done'));
+      setSaving(true);
+      try {
+        await apply(() => call<Changed>('POST', '/uploads/done'));
+      } finally {
+        setSaving(false);
+      }
+      onAdded();
       setResult(`${added.toLocaleString()} file${added === 1 ? '' : 's'} added.${refused ? ` ${refused.toLocaleString()} left out (another type, hidden, or over 50 MB).` : ''}`);
     });
   const fromInput = (list: FileList | null) => {
@@ -234,8 +275,8 @@ function Upload() {
         }}
       >
         <div>
-          <div className="drop-title">{progress ? `Uploading ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : up.busy ? 'Reading the files' : 'Drop files or folders here'}</div>
-          <div className="drop-help">Copied into uploads/ beside your settings, and searchable right away.</div>
+          <div className="drop-title">{progress ? `Uploading ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : saving ? 'Saving' : up.busy ? 'Looking at what was dropped' : 'Drop files or folders here'}</div>
+          <div className="drop-help">Copied into uploads/ beside your settings. The server then reads them, which takes a moment for many PDFs.</div>
         </div>
         <div className="actions">
           <Button size="sm" variant="secondary" disabled={busy} onClick={() => files.current?.click()}>Choose files</Button>

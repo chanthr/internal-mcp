@@ -36,6 +36,7 @@ import {
   type RailwayClient,
   type RailwayTokens,
 } from '../plugins/railway/login.js';
+import { railwayProjects } from '../plugins/railway/tools.js';
 import { backgroundExec, gcloudAccount, gcloudDefaultProject, gcloudProjects, ghToken, hasTool, type Exec, type GcloudProject } from '../setup/auto.js';
 import { readConfigFile } from '../setup/commands.js';
 import { readEnvValues, updateEnvFile } from '../setup/envfile.js';
@@ -152,8 +153,9 @@ async function json(url: string, init: RequestInit, what: string): Promise<{ sta
 export async function startRailwayLogin(origin: string): Promise<string> {
   const redirectUri = `${origin}/console/login/railway`;
   const saved = readRailwayLogin().client;
-  // The return address is part of the registration. Opened on another port, the server registers again.
-  const client = saved && saved.redirectUri === redirectUri ? saved : await registerRailwayClient(redirectUri);
+  // The return address and what is asked for are part of the registration. Opened on another port, or registered
+  // by a version that asked for less, the server registers again. The old one is deleted when the new one is saved.
+  const client = saved && saved.redirectUri === redirectUri && saved.scope === RAILWAY_SCOPE ? saved : await registerRailwayClient(redirectUri);
   const { state, challenge } = remember({ service: 'railway', redirectUri, railway: client });
   const query = new URLSearchParams({
     response_type: 'code',
@@ -168,18 +170,16 @@ export async function startRailwayLogin(origin: string): Promise<string> {
   return `${railwayEndpoints.issuer}/oauth/auth?${query}`;
 }
 
-/** Who signed in and what they can see, asked with the new token: the person reads it before it is saved. */
+/**
+ * Who signed in and what they shared, asked with the new token before anything is saved. A sign-in that shows no
+ * workspace is of no use and is not kept: this throws what to do about it, in words for the page.
+ */
 async function railwaySees(token: string): Promise<{ who: string; sees: string }> {
-  const ask = (query: string) =>
-    json(railwayEndpoints.api, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) }, 'Railway');
-  const me = (await ask('{ me { name email } }')).body;
-  const who = String(me.data?.me?.email ?? me.data?.me?.name ?? 'a Railway account');
-  const projects = (await ask('{ projects(first: 50) { edges { node { id } } } }')).body;
-  const edges = projects.data?.projects?.edges;
-  const sees = Array.isArray(edges)
-    ? `${edges.length} project${edges.length === 1 ? '' : 's'} visible`
-    : `projects could not be listed (${String(projects.errors?.[0]?.message ?? 'no answer').slice(0, 120)})`;
-  return { who, sees };
+  const me = (await json(`${railwayEndpoints.issuer}/oauth/me`, { headers: { Authorization: `Bearer ${token}` } }, 'Railway')).body;
+  const who = String(me.email ?? me.name ?? 'a Railway account');
+  const { projects, workspaces } = await railwayProjects({ token, api: railwayEndpoints.api, via: 'login' }, 'page');
+  const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  return { who, sees: `${count(workspaces?.length ?? 0, 'workspace')}, ${count(projects.length, 'project')} visible` };
 }
 
 async function railwayResult(p: Pending, code: string): Promise<Finished> {

@@ -44,7 +44,7 @@ Object.assign(process.env, {
 });
 
 const { extractLinks, buildGraph, getGraph, readLinkMap } = await import('../src/plugins/knowledge/graph.js');
-const { scanFolders } = await import('../src/plugins/knowledge/folders.js');
+const { scanFolders, folderReading } = await import('../src/plugins/knowledge/folders.js');
 const { handleLinkedDocuments } = await import('../src/plugins/knowledge/tools/linked_documents.js');
 const { handleSearchKnowledge } = await import('../src/plugins/knowledge/tools/search_knowledge.js');
 const { uploadParts } = await import('../src/admin/uploads.js');
@@ -140,7 +140,13 @@ test('a target finds its document the way a person would mean it', () => {
 });
 
 test('scanning the folders writes the links down, and the graph is the same for the tools and the page', async () => {
-  const first = await scanFolders();
+  // From the moment a pass is asked for until it ends, the folders count as being read: a page that asks in
+  // between must not take the documents read so far for all there is.
+  assert.equal(folderReading('vault'), null);
+  const pass = scanFolders();
+  assert.deepEqual(folderReading('vault'), { done: 0, total: 0 });
+  const first = await pass;
+  assert.equal(folderReading('vault'), null);
   assert.deepEqual([first!.indexed, first!.errored], [8, 0]);
   // Written per document as the targets were typed; matching happens when the graph is asked for.
   assert.deepEqual(readLinkMap().folders.vault['Home.md'].links.map((l) => l.to), ['Projects', 'people/Ann Lee', 'Missing Page']);
@@ -253,10 +259,22 @@ test('a dropped file goes into uploads/ and nowhere else, is searchable at once,
   assert.match(readFileSync(join(uploads, 'inbox/Idea.md'), 'utf8'), /zeppelin tour/);
   assert.equal((await upload('inbox/Idea.md', '# Idea\n\nA zeppelin tour, related to [[Home]].\n')).json.replaced, true);
   assert.equal((await upload('한글 메모.md', '# 한글 메모\n\n내용.\n')).json.path, '한글 메모.md');
+  assert.equal((await upload('inbox/blank.md', '  \n')).status, 200); // saved like the others, with nothing in it to read
 
-  // Done: the folder is one of this server's, so the files are read now.
+  // Done: the folder is one of this server's, so the files are read now. The answer does not wait for the reading
+  // (a folder of PDFs takes a while): the state says while it goes on, and afterwards what is there and what is not.
   const done = await api('POST', '/uploads/done');
-  assert.deepEqual([done.status, done.json.restarting, /2 read/.test(done.json.note)], [200, false, true], JSON.stringify(done.json));
+  assert.deepEqual([done.status, done.json.restarting, /reading them now/.test(done.json.note)], [200, false, true], JSON.stringify(done.json));
+  let folder: any;
+  for (let i = 0; i < 400; i++) {
+    folder = (await api('GET', '/state')).json.folders.find((f: any) => f.path === uploads);
+    if (!folder.reading) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.deepEqual(
+    [folder.reading, folder.documents, folder.noText, folder.failed],
+    [null, 2, { count: 1, names: ['blank.md'] }, { count: 0, names: [] }],
+  );
   assert.match(await search('zeppelin tour'), /ID: `local:uploads\/inbox\/Idea\.md`/);
   assert.deepEqual(outOf('local:uploads/inbox/Idea.md'), ['vault/Home.md']);
 

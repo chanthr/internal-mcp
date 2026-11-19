@@ -80,6 +80,8 @@ p { margin: 0; }
 .row-main { min-width: 0; }
 .row-title { font-weight: 500; overflow-wrap: anywhere; }
 .row-help { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+/* A second fact under the first, on a line of its own. */
+.row-note { display: block; margin-top: 2px; }
 .row-side { flex: none; display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .row-form { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-top: 1px solid var(--line); }
 .row-form:first-child { border-top: 0; }
