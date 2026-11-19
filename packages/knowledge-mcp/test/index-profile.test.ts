@@ -205,5 +205,5 @@ test('measuring asks the kept questions three ways; comparing cuts a sample each
 
 test('without questions and without a model to write them, measuring says what to do', async () => {
   rmSync(join(dataDir, 'search-measure.json'));
-  await assert.rejects(measure(), /Connect a model on the Agent page.*search-measure\.json/);
+  await assert.rejects(measure(), /Connect a language model on the Models page.*search-measure\.json/);
 });

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { call, signIn, type Changed, type State, type UpstreamView } from '../api';
-import { AskFirst, Choice, Page, Row, Section, useAction, useServer } from '../app';
+import { hostOf } from '../format';
+import { DataSections } from './data';
+import { AskFirst, Choice, LinkButton, Page, Row, Section, useAction, useServer } from '../app';
 import { CliStep } from '../cli-step';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -53,7 +55,16 @@ const CATALOG: Array<{ name: string; label: string; url: string; note?: string }
 ];
 const OTHER = 'another';
 
-export function Apps() {
+export function AppsAndData() {
+  return (
+    <Page title="Apps and data" text="Other places the assistant can look, and your own data it can ask.">
+      <AppSections />
+      <DataSections />
+    </Page>
+  );
+}
+
+function AppSections() {
   const { state } = useServer();
   const [open, setOpen] = useState<AppId | null>(null);
   const [adding, setAdding] = useState(false);
@@ -70,7 +81,7 @@ export function Apps() {
     setElsewhere(null);
   };
   return (
-    <Page title="Apps" text="Other places the assistant can look.">
+    <>
       {elsewhere && (
         <Dialog
           open
@@ -87,14 +98,14 @@ export function Apps() {
           {null}
         </Dialog>
       )}
-      <Section title="Built in" text="This server's own read-only tools. Sign in where the app allows it, or paste a token.">
+      <Section title="Apps" text="Slack, GitHub and Railway, read only. Sign in where the app allows it, or paste a token.">
         <div className="rows">
           {APPS.map((a) => <AppRow key={a.id} app={a} onConnect={() => setOpen(a.id)} />)}
         </div>
       </Section>
       <Section
-        title="More apps"
-        text="Apps with an MCP server of their own, such as Notion or Supabase. Their tools arrive under the app's name, behind your keys and permissions."
+        title="Apps with their own MCP server"
+        text="Such as Notion or Supabase. Their tools arrive under the app's name, behind your sign-in and permissions."
         action={<Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setAdding(true)}>Add an app</Button>}
       >
         <div className="rows">
@@ -102,9 +113,9 @@ export function Apps() {
           {state.upstreams.map((u) => <ServerRow key={u.name} server={u} />)}
         </div>
       </Section>
-      {app && <Connect app={app} signedIn={app.id === 'railway' && state.services.railway.via === 'login'} onClose={() => setOpen(null)} />}
+      {app && <ConnectApp app={app} signedIn={app.id === 'railway' && state.services.railway.via === 'login'} onClose={() => setOpen(null)} />}
       {adding && <AddServer taken={state.upstreams.map((u) => u.name)} onClose={() => setAdding(false)} />}
-    </Page>
+    </>
   );
 }
 
@@ -131,13 +142,6 @@ async function addServer(body: { name: string; url: string; token?: string }): P
   return r as Changed;
 }
 
-const hostOf = (url: string) => {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-};
 
 function ServerRow({ server: u }: { server: UpstreamView }) {
   const { state, apply } = useServer();
@@ -245,7 +249,7 @@ function AddServer({ taken, onClose }: { taken: string[]; onClose: () => void })
           <TextField label="Token" type="password" hint="Checked by listing the tools, then saved in .env on this machine." value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
         ) : (
           <p className="field-help">
-            <button type="button" className="link" onClick={() => setWithToken(true)}>The app gave me a token instead</button>
+            <LinkButton onClick={() => setWithToken(true)}>The app gave me a token instead</LinkButton>
           </p>
         )}
         {add.error && <p className="error" role="alert">{add.error}</p>}
@@ -279,7 +283,7 @@ function AppRow({ app, onConnect }: { app: App; onConnect: () => void }) {
   );
 }
 
-function Connect({ app, signedIn, onClose }: { app: App; signedIn: boolean; onClose: () => void }) {
+function ConnectApp({ app, signedIn, onClose }: { app: App; signedIn: boolean; onClose: () => void }) {
   const { apply } = useServer();
   const [token, setToken] = useState('');
   const save = useAction();

@@ -108,7 +108,7 @@ type Progress = Pick<MeasureRun, 'phase' | 'done' | 'total' | 'way'>;
 async function questions(fresh: boolean, signal: AbortSignal, at: Progress): Promise<EvalQuestion[]> {
   const kept = saved.read()?.questions ?? [];
   if (!fresh && kept.length >= FEWEST) return kept;
-  if (!llmConfigured()) throw new Error(`There are no questions to ask yet. Connect a model on the Agent page and it writes them from your documents, or write your own in ${saved.path()}.`);
+  if (!llmConfigured()) throw new Error(`There are no questions to ask yet. Connect a language model on the Models page and it writes them from your documents, or write your own in ${saved.path()}.`);
   Object.assign(at, { phase: 'questions', done: 0, total: 0 });
   // Not from the wiki: its pages are written by a model from the documents, and say the same things again.
   const docs = await sampleDocuments(QUESTIONS, [WIKI]);

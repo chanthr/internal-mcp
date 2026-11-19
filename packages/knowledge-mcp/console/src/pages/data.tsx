@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { call, type Changed, type ConnectionView, type DeclaredTool, type ParamSpec } from '../api';
-import { AskFirst, Page, Row, Section, useAction, useServer } from '../app';
+import { AskFirst, Row, Section, useAction, useServer } from '../app';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog } from '../ui/dialog';
@@ -13,15 +13,16 @@ import { TextField } from '../ui/text-field';
 
 const TYPE_LABEL: Record<ConnectionView['type'], string> = { postgres: 'Postgres', sqlite: 'SQLite', http: 'API' };
 
-export function Data() {
+/** Databases and APIs, and the tools written on them: the second half of the Apps and data page. */
+export function DataSections() {
   const { state, apply } = useServer();
   const [adding, setAdding] = useState(false);
   const [toolFor, setToolFor] = useState<string | null>(null);
   const remove = useAction();
 
   return (
-    <Page title="Databases and APIs" text="Connect your own data. The assistant asks it questions; it cannot change it unless you say so.">
-      <Section title="Connections" action={<Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setAdding(true)}>Add a connection</Button>}>
+    <>
+      <Section title="Databases and APIs" text="The assistant asks them questions. It cannot change anything unless you say so." action={<Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setAdding(true)}>Add a connection</Button>}>
         {state.connections.length === 0 ? (
           <EmptyState icon={null} title="Nothing connected yet" text="A Postgres database, a SQLite file or an HTTP API." action={<Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setAdding(true)}>Add a connection</Button>} />
         ) : (
@@ -51,7 +52,7 @@ export function Data() {
             ))}
           </div>
         )}
-        {remove.error && <p className="error" style={{ marginTop: 8 }}>{remove.error}</p>}
+        {remove.error && <p className="error below" role="alert">{remove.error}</p>}
       </Section>
 
       <Section
@@ -74,7 +75,7 @@ export function Data() {
 
       {adding && <AddConnection onClose={() => setAdding(false)} />}
       {toolFor && <NewTool connection={toolFor} connections={state.connections} onClose={() => setToolFor(null)} />}
-    </Page>
+    </>
   );
 }
 

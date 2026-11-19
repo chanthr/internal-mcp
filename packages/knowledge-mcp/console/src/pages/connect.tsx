@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { call } from '../api';
-import { Page, Row, Section, useAction, useServer } from '../app';
+import { LinkButton, Page, Row, Section, useAction, useServer } from '../app';
 import { CliStep } from '../cli-step';
 import { TextField } from '../ui/text-field';
 import { Badge } from '../ui/badge';
@@ -40,15 +40,15 @@ export function Connect() {
   useEffect(() => void load(), [load]);
 
   return (
-    <Page title="Connect a client" text="On this machine a client starts the server itself, so no key is needed.">
-      <Section title="This machine">
+    <Page title="Connect" text="Let an AI client use this server. On this computer a client starts it itself, with no key.">
+      <Section title="This computer" text="Claude Desktop, Claude Code, Cursor and others: add the server to them in one press.">
         <div className="rows">
           {failed && <Row title="The clients could not be listed" help={failed} />}
           {!data && !failed && <Row title={<span className="actions"><Spinner /> Looking for clients</span>} />}
           {data?.clients.map((c) => <ClientRow key={c.id} client={c} onChanged={load} />)}
         </div>
       </Section>
-      <Section title="Other people, Claude on the web, ChatGPT" text="They reach the server over the internet, with a key each.">
+      <Section title="Claude on the web, ChatGPT, other people" text="They reach the server over the internet: give it a public address, then a key to each.">
         <Tunnel http={data?.http ?? null} local={data?.url ?? null} />
         <div className="stack">
           <p className="muted">
@@ -234,7 +234,7 @@ function ClientRow({ client: c, onChanged }: { client: Client; onChanged: () => 
     <>
       <Row title={c.name} help={<span className={add.error ? 'error' : undefined}>{status}</span>}>
         {c.added && <Badge size="md" tone="success">Connected</Badge>}
-        <button type="button" className="link" aria-expanded={open} onClick={() => setOpen((o) => !o)}>{open ? 'Hide the entry' : 'Show the entry'}</button>
+        <LinkButton expanded={open} onClick={() => setOpen((o) => !o)}>{open ? 'Hide the entry' : 'Show the entry'}</LinkButton>
         {c.how === 'link' ? (
           // Cursor adds a server through its own link, and asks the person there.
           <Button size="sm" variant="secondary" disabled={!c.installed} onClick={() => c.link && (window.location.href = c.link)}>Open in Cursor</Button>

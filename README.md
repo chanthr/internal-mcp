@@ -102,18 +102,21 @@ npm run dev                    # in a generated project: the address is in the f
 
 ![The console: what is connected and whether it works](.github/assets/console-overview.png)
 
-| Page | What you do there |
-| --- | --- |
-| Documents | Drop files or folders on the page to copy them in, add a folder where it is (pick it in the computer's own folder chooser, or type its path), connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), turn on search by meaning. Pick the embedding model from what your endpoint has (a local Ollama, OpenAI, any compatible one), and change it later: new vectors are made from the stored text, with the progress on the page |
-| Graph | How your documents point at each other: the links people wrote, with the most linked documents, a view around any one document, and the loose ends (links to nowhere, documents nothing links to) |
-| Databases and APIs | Connect Postgres, SQLite or an HTTP API. Write a query once and save it as a tool: the page lists the tables and checks the query on the real database before it is saved |
-| Apps | Connect Slack, GitHub and Railway: by signing in where the app allows it, or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name |
-| Agent | Connect a language model for work the server does by itself: your ChatGPT Plus or Pro plan (Continue with ChatGPT, no key), Claude (Anthropic), OpenRouter, OpenAI, a model on this machine through Ollama, or any endpoint that speaks OpenAI's chat completions. The model is picked from the provider's own list and checked with one question before it is saved. Until a model is connected the server calls none |
-| Chat | Ask the model connected on the Agent page, and watch it answer with this server's tools: each call and what it returned, as it happens. It gets the tools that only read and the instructions every client gets. Nothing is saved |
-| Tools | Every tool an AI client can call. Fill in the form and run one to see what the client gets back |
-| Connect a client | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. The entry is there to copy as well |
-| People and keys | Create and revoke keys, and limit a person to some tools |
-| Activity | The latest tool calls: who, when, how long, and whether it worked |
+The menu follows the order a server is set up in: what it reads, the models it uses, how search finds, and who may
+ask it. An old address (`#/agent`, `#/data`, `#/graph`, `#/activity`) opens the page that has it now.
+
+| Menu | Page | What you do there |
+| --- | --- | --- |
+| | Overview | The steps of setting up, each marked when done, and a live check of everything connected |
+| Sources | Documents | Drop files or folders on the page to copy them in, add a folder where it is (pick it in the computer's own folder chooser, or type its path), connect Google Drive (sign in with Google, let gcloud make a service account, or paste a key), and read the scanned files waiting for OCR |
+| | Apps and data | Connect Slack, GitHub and Railway, by signing in where the app allows it or with a token. Add apps that have an MCP server of their own (Notion, Supabase, Linear, Sentry, …): you sign in at the app, and its read tools arrive under its name. Connect Postgres, SQLite or an HTTP API, and save a query as a tool: the page lists the tables and checks the query on the real database before it is saved |
+| AI | Models | The language model (your ChatGPT Plus or Pro plan with Continue with ChatGPT, Claude, OpenRouter, OpenAI, a model on this machine through Ollama, or any endpoint that speaks OpenAI's chat completions), the embedding model for search by meaning, and the model that reads scans. Each is picked from the provider's own list and checked once before it is saved. Until one is connected the server calls none |
+| | Chat | Ask the language model, and watch it answer with this server's tools: each call and what it returned, as it happens. It gets the tools that only read and the instructions every client gets. Nothing is saved |
+| | Wiki | Pages the language model writes from your documents (below) |
+| Search | Search | **Passages**: how documents are cut, and how well search finds them, measured on your documents. **Links between documents**: the links people wrote, the most linked documents, a view around any one, and the loose ends |
+| Share | Connect | One button adds this server to Claude Code, Claude Desktop, Cursor or VS Code, and shows which already have it. A public address through Cloudflare for Claude on the web, ChatGPT and other people |
+| | Tools | **Try a tool**: fill in the form and run one to see what a client gets back. **Recent calls**: who, when, how long, and whether it worked |
+| | People and keys | Create and revoke keys, and limit a person to some tools |
 
 ![The console: trying a tool](.github/assets/console-tools.png)
 
@@ -153,7 +156,7 @@ password. `KNOWLEDGE_CONSOLE=off` turns the console off.
 
 ### Your ChatGPT plan as the model
 
-On the Agent page, choose **ChatGPT account (Plus or Pro)** and press **Continue with ChatGPT**. OpenAI opens in a new
+On the Models page, choose **ChatGPT account (Plus or Pro)** and press **Continue with ChatGPT**. OpenAI opens in a new
 tab: sign in and allow Knowledge MCP. The models your plan includes are listed; pick one and save. No API key is
 needed, and nothing is billed apart from the plan.
 
@@ -165,12 +168,12 @@ needed, and nothing is billed apart from the plan.
 | Sign out | In the same dialog. The session is ended at OpenAI and the tokens are deleted here |
 
 A Claude Pro or Max plan cannot be used the same way: Anthropic does not allow other apps to use a Claude
-subscription's sign-in. Use Claude with an API key, or connect this server to Claude instead (Connect a client).
+subscription's sign-in. Use Claude with an API key, or connect this server to Claude instead (the Connect page).
 
 ### A wiki written from your documents
 
-Search finds passages again for every question. A wiki keeps what was understood. With a model connected on the
-Agent page, the server reads your documents and writes one, as plain Markdown in `wiki/` beside your settings:
+Search finds passages again for every question. A wiki keeps what was understood. With a language model connected
+on the Models page, the server reads your documents and writes one, as plain Markdown in `wiki/` beside your settings:
 
 ```
 wiki/
@@ -183,10 +186,10 @@ wiki/
 
 | | |
 | --- | --- |
-| Start | **Agent → Create the wiki**, then **Read documents**. A press reads up to 25 documents and says what it came to (questions asked, tokens in and out) before you read on |
+| Start | **Wiki → Create the wiki**, then **Read documents**. A press reads up to 25 documents and says what it came to (questions asked, tokens in and out) before you read on |
 | What it reads | The documents in your folders and in `uploads/`. They are never changed. A document is read again only when it has changed, and what a removed document said leaves the wiki with it |
 | What it costs | One question to the model per document (more for a long one, read in parts), and one per topic page that at least three facts speak of |
-| Where it shows up | The wiki is a folder of this server: `search_knowledge` and `read_document` find its pages, and the Graph page and `linked_documents` follow its links, from a topic to its documents and back |
+| Where it shows up | The wiki is a folder of this server: `search_knowledge` and `read_document` find its pages, and Search → Links between documents and `linked_documents` follow its links, from a topic to its documents and back |
 | Obsidian | Open `wiki/` as a vault: pages link with `[[…]]`, and file names are the titles |
 | Your own notes | Whatever you write under a `## Notes` heading on a page stays when the page is written again |
 | A small or local model | Works: the model is asked for labelled lines, not JSON. Set `WIKI_PART_CHARS` (default 24000) lower when the model's window is small. What a page says is as good as the model that read the document |
@@ -580,7 +583,7 @@ them. With Qdrant a passage prefix is never added by itself.
 | `knowledge-mcp knowledge measure` | Asks questions whose answer is known of the index as it is, and counts where the right document comes by keywords, by meaning and with both |
 | `knowledge-mcp knowledge compare` | Cuts up to 200 documents from the local folders each way, embeds them in memory and asks the same questions by meaning. The index is not changed |
 
-The questions are written by the model connected on the Agent page, one from each of 40 documents, and kept in
+The questions are written by the language model connected on the Models page, one from each of 40 documents, and kept in
 `<data dir>/search-measure.json`: every run asks the same ones, so results can be set side by side. Write your own
 there instead if you like (`{"questions":[{"question":"…","document":"a part of its path"}]}`); `--new` writes new
 ones. Measured on a wiki of 503 Markdown files with `qwen3-embedding:0.6b` and 84 questions: 250 to 800 tokens at
@@ -740,8 +743,8 @@ guide is [`OAUTH_SETUP.md`](OAUTH_SETUP.md).
 
 ### A public address from your own machine
 
-The server does not have to move anywhere to be reached from outside. **Connect a client → Other people** in the
-console gives it an https address through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/):
+The server does not have to move anywhere to be reached from outside. **Connect → Claude on the web, ChatGPT, other people** in
+the console gives it an https address through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/):
 cloudflared, Cloudflare's program, connects out from your machine, so there is nothing to open in a router and no
 certificate to make.
 
@@ -768,7 +771,7 @@ you delete it in the Cloudflare dashboard (My Profile, API Tokens).
 
 ## Connect a client
 
-The console's **Connect a client** page does this for you: one button per client, with the entry made for your
+The console's **Connect** page does this for you: one button per client, with the entry made for your
 folder and your server name. A desktop app does not have the PATH of your terminal, so the entry it writes names
 Node by its full path and the server starts there too.
 
@@ -808,7 +811,7 @@ Node by its full path and the server starts there too.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
-   A language model connected on the Agent page is sent the text of your documents while a job on that page runs, and at no other time. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
+   A language model connected on the Models page is sent the text of your documents while you chat or the wiki is written, and at no other time. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.

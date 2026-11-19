@@ -1,5 +1,5 @@
 /**
- * A wiki the server writes from the person's documents, with the model connected on the Agent page.
+ * A wiki the server writes from the person's documents, with the language model connected on the Models page.
  *
  * Search finds passages again for every question. A wiki keeps what was understood: one page per document that
  * says what is in it, and one page per topic that gathers what all the documents say about it, linked to each

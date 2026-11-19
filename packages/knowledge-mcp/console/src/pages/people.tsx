@@ -71,7 +71,7 @@ export function People() {
             ))}
           </div>
         )}
-        {act.error && <p className="error" style={{ marginTop: 8 }}>{act.error}</p>}
+        {act.error && <p className="error below" role="alert">{act.error}</p>}
       </Section>
 
       {newKey && <NewKey onClose={() => { setNewKey(false); void load(); }} />}

@@ -15,6 +15,7 @@ import { SegmentedControl } from '../ui/segmented-control';
 import { Select } from '../ui/select';
 import { Spinner } from '../ui/spinner';
 import { TextField } from '../ui/text-field';
+import { num } from '../format';
 
 type Profile = NonNullable<NonNullable<State['index']>['profile']>;
 type Cut = Profile['cut'];
@@ -68,7 +69,6 @@ const HEADERS: Array<{ value: Header; label: string }> = [
   { value: 'document', label: "The document's name and its headings" },
   { value: 'none', label: 'The passage alone' },
 ];
-const count = (n: number) => n.toLocaleString();
 const pct = (n: number, of: number) => (of ? `${Math.round((n / of) * 100)}%` : '');
 
 export function Passages() {
@@ -98,8 +98,8 @@ export function Passages() {
   const start = (what: 'measure' | 'compare', fresh = false) => void act.run(async () => setM(await call<MeasureView>('POST', '/index/measure', { what, fresh })));
 
   const status = cutting
-    ? `Cutting ${count(i.recut ?? 0)} document${i.recut === 1 ? '' : 's'} the new way. Search works meanwhile.`
-    : `${count(i.chunks)} passages from ${count(i.documents)} documents.`;
+    ? `Cutting ${num(i.recut ?? 0)} document${i.recut === 1 ? '' : 's'} the new way. Search works meanwhile.`
+    : `${num(i.chunks)} passages from ${num(i.documents)} documents.`;
   const reads = p.header === 'heading' ? 'The embedding model also reads the headings above each passage.' : p.header === 'document' ? "The embedding model also reads the document's name and the headings above each passage." : 'The embedding model reads each passage alone.';
   const prefix =
     p.prefixFrom === 'model'
@@ -130,7 +130,7 @@ export function Passages() {
           {i.behind && !i.job?.running && (
             <AlertDialog
               trigger={<Button size="sm">Make new vectors</Button>}
-              title={`Make new vectors for ${count(i.chunks)} passages?`}
+              title={`Make new vectors for ${num(i.chunks)} passages?`}
               description={`The text of every passage is sent to ${e.model ?? 'the embedding model'}. No document is read again, and search works by keywords meanwhile.`}
               confirmLabel="Make new vectors"
               onConfirm={() => remake.run(async () => void (await call('POST', '/index/reembed'), await refresh()))}
@@ -170,15 +170,15 @@ function Measure({
   const ready = m.questions >= 5 || m.canWrite;
   const progress = run?.running
     ? run.phase === 'questions'
-      ? `Writing questions from your documents: ${count(run.done)} of ${count(run.total)}.`
+      ? `Writing questions from your documents: ${num(run.done)} of ${num(run.total)}.`
       : run.phase === 'embedding'
-        ? `Embedding the sample cut ${run.way ? wayName(parseMark(run.way)?.cut ?? 'sections', parseMark(run.way)?.maxTokens ?? 0).toLowerCase() : ''}: ${count(run.done)} of ${count(run.total)} passages.`
-        : `Asking ${count(run.total)} questions: ${count(run.done)} done.`
+        ? `Embedding the sample cut ${run.way ? wayName(parseMark(run.way)?.cut ?? 'sections', parseMark(run.way)?.maxTokens ?? 0).toLowerCase() : ''}: ${num(run.done)} of ${num(run.total)} passages.`
+        : `Asking ${num(run.total)} questions: ${num(run.done)} done.`
     : null;
   const help = !ready
-    ? `Measuring asks questions whose answer is known. Connect a model on the Agent page and it writes them from your documents, or write your own in ${m.file}.`
+    ? `Measuring asks questions whose answer is known. Connect a language model on the Models page and it writes them from your documents, or write your own in ${m.file}.`
     : m.questions >= 5
-      ? `${count(m.questions)} questions, each with the document that answers it. The same ones are asked every time, so results can be set side by side.`
+      ? `${num(m.questions)} questions, each with the document that answers it. The same ones are asked every time, so results can be set side by side.`
       : 'The connected model first writes about 40 questions from your documents. The same ones are then asked every time.';
   const last = m.measured[0] ?? null;
   const prev = m.measured[1] ?? null;
@@ -209,8 +209,8 @@ function Measure({
       {last && (
         <div className="row-form">
           <p className="field-help">
-            Search as it is, {new Date(last.at).toLocaleString()}: the right document among the first three for {count(last.modes.both?.top3 ?? 0)} of {count(last.questions)} questions
-            {prev && both(prev) && both(last) ? ` (before: ${count(both(prev)!.top3)}, ${parseMark(prev.cut) ? wayName(parseMark(prev.cut)!.cut, parseMark(prev.cut)!.maxTokens).toLowerCase() : prev.cut})` : ''}.
+            Search as it is, {new Date(last.at).toLocaleString()}: the right document among the first three for {num(last.modes.both?.top3 ?? 0)} of {num(last.questions)} questions
+            {prev && both(prev) && both(last) ? ` (before: ${num(both(prev)!.top3)}, ${parseMark(prev.cut) ? wayName(parseMark(prev.cut)!.cut, parseMark(prev.cut)!.maxTokens).toLowerCase() : prev.cut})` : ''}.
             {last.note ? ` Meaning was not measured: ${last.note}.` : ''}
           </p>
           <table className="table">
@@ -228,9 +228,9 @@ function Measure({
                 return (
                   <tr key={k}>
                     <td>{k === 'both' ? 'Both, as search does' : k === 'keyword' ? 'Keywords' : 'Meaning'}</td>
-                    <td className="muted">{s ? `${count(s.first)} (${pct(s.first, last.questions)})` : 'Not measured'}</td>
-                    <td className="muted">{s ? `${count(s.top3)} (${pct(s.top3, last.questions)})` : ''}</td>
-                    <td className="muted">{s ? `${count(s.top10)} (${pct(s.top10, last.questions)})` : ''}</td>
+                    <td className="muted">{s ? `${num(s.first)} (${pct(s.first, last.questions)})` : 'Not measured'}</td>
+                    <td className="muted">{s ? `${num(s.top3)} (${pct(s.top3, last.questions)})` : ''}</td>
+                    <td className="muted">{s ? `${num(s.top10)} (${pct(s.top10, last.questions)})` : ''}</td>
                   </tr>
                 );
               })}
@@ -241,7 +241,7 @@ function Measure({
       {m.compared && (
         <div className="row-form">
           <p className="field-help">
-            Ways compared on {count(m.compared.documents)} of your documents with {m.compared.model}, by meaning, {new Date(m.compared.at).toLocaleString()}. Out of {count(m.compared.questions)} questions:
+            Ways compared on {num(m.compared.documents)} of your documents with {m.compared.model}, by meaning, {new Date(m.compared.at).toLocaleString()}. Out of {num(m.compared.questions)} questions:
           </p>
           <table className="table">
             <thead>
@@ -261,10 +261,10 @@ function Measure({
                 return (
                   <tr key={w.cut}>
                     <td>{way ? wayName(way.cut, way.maxTokens) : w.cut}</td>
-                    <td className="muted">{count(w.passages)}</td>
-                    <td className="muted">{count(w.score.first)}</td>
-                    <td className="muted">{count(w.score.top3)}</td>
-                    <td className="muted">{count(w.score.top10)}</td>
+                    <td className="muted">{num(w.passages)}</td>
+                    <td className="muted">{num(w.score.first)}</td>
+                    <td className="muted">{num(w.score.top3)}</td>
+                    <td className="muted">{num(w.score.top10)}</td>
                     <td>
                       {inUse ? (
                         <Badge size="md" tone="success">In use</Badge>

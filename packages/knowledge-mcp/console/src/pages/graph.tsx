@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { call } from '../api';
-import { Page, Row, Section, useServer } from '../app';
+import { LinkButton, ListItem, Row, Section, useServer } from '../app';
+import { num } from '../format';
 import { Spinner } from '../ui/spinner';
 import { TextField } from '../ui/text-field';
 
@@ -31,9 +32,7 @@ interface Around {
 
 /** How many documents are drawn on each side. The rest are counted. */
 const SHOWN = 12;
-const n = (x: number) => x.toLocaleString('en-US');
-
-export function Graph() {
+export function GraphView() {
   const { go } = useServer();
   const [summary, setSummary] = useState<Summary | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
@@ -70,20 +69,19 @@ export function Graph() {
     };
   }, [q]);
 
-  if (failed) return <Page title="Graph" text="How your documents point at each other."><p className="error" role="alert">{failed}</p></Page>;
-  if (!summary) return <Page title="Graph" text="How your documents point at each other."><Spinner label="Reading the links" /></Page>;
+  if (failed) return <p className="error" role="alert">{failed}</p>;
+  if (!summary) return <Spinner label="Reading the links" />;
   if (summary.documents === 0) {
     return (
-      <Page title="Graph" text="How your documents point at each other.">
-        <div className="rows">
-          <Row title="No documents yet" help="Add a folder of Markdown files, or drop files, under Documents. [[Wiki links]], [text](file.md) and header fields such as related become the links." onClick={() => go('documents')} />
-        </div>
-      </Page>
+      <div className="rows">
+        <Row title="No documents yet" help="Add a folder of Markdown files, or drop files, under Documents. [[Wiki links]], [text](file.md) and header fields such as related become the links." onClick={() => go('documents')} />
+      </div>
     );
   }
   const list = found ?? summary.top;
   return (
-    <Page title="Graph" text="How your documents point at each other. Read from the links people wrote: [[wiki links]], Markdown links and header fields such as related.">
+    <>
+      <p className="muted tab-intro">How your documents point at each other, read from the links people wrote: [[wiki links]], Markdown links and header fields such as related.</p>
       <div className="facts">
         <Fact value={summary.documents} label="documents" />
         <Fact value={summary.links} label="links" />
@@ -98,10 +96,10 @@ export function Graph() {
             <div className="list graph-list">
               <div className="list-group">{found ? (found.length ? 'Found' : 'Nothing by that name') : 'Most linked to'}</div>
               {list.map((d) => (
-                <button key={d.id} type="button" className="list-item" aria-current={d.id === picked} onClick={() => setPicked(d.id)} title={d.path}>
+                <ListItem key={d.id} current={d.id === picked} onClick={() => setPicked(d.id)} title={d.path}>
                   <span className="graph-name">{d.title}</span>
-                  <span className="graph-count">{n(d.in)} in · {n(d.out)} out</span>
-                </button>
+                  <span className="graph-count">{num(d.in)} in, {num(d.out)} out</span>
+                </ListItem>
               ))}
             </div>
           </div>
@@ -114,27 +112,27 @@ export function Graph() {
           <div className="rows">
             {summary.brokenLinks.length > 0 && (
               <Row
-                title={`${n(summary.broken)} link${summary.broken === 1 ? '' : 's'} to a document that is not there`}
+                title={`${num(summary.broken)} link${summary.broken === 1 ? '' : 's'} to a document that is not there`}
                 help={<LooseEnds items={summary.brokenLinks.map((b) => ({ key: `${b.from.id}→${b.target}`, text: `${b.from.title} → ${b.target}`, id: b.from.id }))} total={summary.broken} onPick={setPicked} />}
               />
             )}
             {summary.alone.length > 0 && (
               <Row
-                title={`${n(summary.unlinked)} document${summary.unlinked === 1 ? '' : 's'} nothing links to, and that link to nothing`}
+                title={`${num(summary.unlinked)} document${summary.unlinked === 1 ? '' : 's'} nothing links to, and that link to nothing`}
                 help={<LooseEnds items={summary.alone.map((d) => ({ key: d.id, text: d.title, id: d.id }))} total={summary.unlinked} onPick={setPicked} />}
               />
             )}
           </div>
         </Section>
       )}
-    </Page>
+    </>
   );
 }
 
 function Fact({ value, label }: { value: number; label: string }) {
   return (
     <div className="fact">
-      <b>{n(value)}</b>
+      <b>{num(value)}</b>
       {label}
     </div>
   );
@@ -144,9 +142,9 @@ function LooseEnds({ items, total, onPick }: { items: Array<{ key: string; text:
   return (
     <span className="loose">
       {items.map((it) => (
-        <button key={it.key} type="button" className="link" onClick={() => onPick(it.id)}>{it.text}</button>
+        <LinkButton key={it.key} onClick={() => onPick(it.id)}>{it.text}</LinkButton>
       ))}
-      {total > items.length && <span>and {n(total - items.length)} more</span>}
+      {total > items.length && <span>and {num(total - items.length)} more</span>}
     </span>
   );
 }
@@ -189,13 +187,13 @@ function Neighbours({ data, onPick }: { data: Around; onPick: (id: string) => vo
 
   const side = (which: 'in' | 'out', docs: Doc[]) => (
     <div className="around-col" data-col={which}>
-      <div className="around-head">{which === 'in' ? `Linked from ${n(docs.length)}` : `Links to ${n(docs.length)}`}</div>
+      <div className="around-head">{which === 'in' ? `Linked from ${num(docs.length)}` : `Links to ${num(docs.length)}`}</div>
       {docs.slice(0, SHOWN).map((d) => (
         <button key={d.id} type="button" className="around-node" data-side={which} data-meta={d.meta || undefined} onClick={() => onPick(d.id)} title={d.meta ? `${d.path} (named in a header field)` : d.path}>
           {d.title}
         </button>
       ))}
-      {docs.length > SHOWN && <div className="around-more">and {n(docs.length - SHOWN)} more</div>}
+      {docs.length > SHOWN && <div className="around-more">and {num(docs.length - SHOWN)} more</div>}
       {docs.length === 0 && <div className="around-more">{which === 'in' ? 'Nothing links here' : 'Links to nothing'}</div>}
     </div>
   );
@@ -216,7 +214,7 @@ function Neighbours({ data, onPick }: { data: Around; onPick: (id: string) => vo
       {data.broken.length > 0 && (
         <p className="field-help around-note">
           Links to a document that is not there: {data.broken.slice(0, 8).join(', ')}
-          {data.broken.length > 8 ? ` and ${n(data.broken.length - 8)} more` : ''}
+          {data.broken.length > 8 ? ` and ${num(data.broken.length - 8)} more` : ''}
         </p>
       )}
     </div>
