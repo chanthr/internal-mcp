@@ -183,16 +183,52 @@ p { margin: 0; }
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
 
-/* Chat: the conversation, and the box to write in, kept at the bottom of the page */
-.chat { display: flex; flex-direction: column; gap: 20px; }
-.chat-turns { display: flex; flex-direction: column; gap: 20px; }
-.chat-user { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 14px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; }
-.chat-answer { display: flex; flex-direction: column; gap: 10px; }
-.chat-text { overflow-wrap: anywhere; line-height: 1.6; }
+/* Chat: a bar with the model and its tools, the conversation, and the box to write in at the bottom of the window */
+.chat { display: flex; flex-direction: column; gap: 20px; min-height: calc(100vh - 220px); }
+.chat-bar { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+.chat-bar-gap { flex: 1; }
+.chat-model { font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 3px 8px; border-radius: 6px; background: var(--hover); }
+.chat-tools-toggle { appearance: none; border: 0; background: none; padding: 0; font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+.chat-tools-toggle:hover { color: var(--text); }
+.chat-tools { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--sheet); }
+.chat-tools-group { display: grid; grid-template-columns: 140px 1fr; gap: 12px; font-size: 13px; }
+.chat-tools-label { color: var(--muted); }
+.chat-tools-names { font-family: var(--mono); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.chat-tools-note { margin: 4px 0 0; font-size: 12px; color: var(--faint); }
+.chat-empty { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 32px 0 8px; }
+.chat-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.chat-suggestion { appearance: none; font: inherit; font-size: 13px; padding: 8px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--sheet); color: var(--text); cursor: pointer; }
+.chat-suggestion:hover { background: var(--hover); }
+.chat-turns { display: flex; flex-direction: column; gap: 28px; }
+.chat-user { align-self: flex-end; max-width: 80%; padding: 10px 14px; border-radius: 16px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.chat-answer { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+/* The tool cards draw their edge with a shadow, and the group clips its list: room on every side keeps the edge */
+.chat-calls .ui-tclc-group__list { padding: 6px 3px 4px; }
+.chat-text { overflow-wrap: anywhere; line-height: 1.65; }
+.chat-meta { display: flex; align-items: center; gap: 10px; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* The actions bar measures itself (container query), so it gets its width here: one button */
+.chat-meta > .ui-mac { flex: none; width: 30px; }
+.chat-meta > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.md .md-ref { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.chat-end { height: 1px; scroll-margin-bottom: 150px; }
+.chat-composer { position: sticky; bottom: 0; margin-top: auto; padding: 24px 0 16px; background: linear-gradient(to bottom, transparent, var(--sheet) 22px); }
+.chat-box { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 4px; border: 1px solid var(--line); border-radius: 18px; background: var(--sheet); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.06); }
+.chat-box:focus-within { border-color: var(--faint); }
+.chat-box > :first-child { flex: 1; min-width: 0; }
+/* The text area's own frame gives way to the composer's: one box, not a box in a box */
+.chat-box .ui-tac__box, .chat-box .ui-tac__box:hover, .chat-box .ui-tac__box:focus-within { box-shadow: none; background: transparent; }
+.chat-box textarea { resize: none; }
+.chat-send { flex: none; display: inline-grid; place-items: center; width: 32px; height: 32px; margin-bottom: 2px; border: 0; border-radius: 50%; background: var(--text); color: var(--sheet); cursor: pointer; }
+.chat-send svg { width: 16px; height: 16px; stroke: currentColor; fill: currentColor; }
+.chat-send:not([data-stop]) svg { fill: none; }
+.chat-send:disabled { opacity: 0.3; cursor: default; }
+.chat-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--faint); }
 .md > * + * { margin-top: 10px; }
 .md p, .md ul, .md ol, .md pre { margin: 0; }
 .md ul, .md ol { padding-left: 22px; }
 .md li + li { margin-top: 4px; }
+.md li > ul, .md li > ol { margin-top: 4px; }
 .md .md-h { font-weight: 600; }
 .md code { font-family: var(--mono); font-size: 0.92em; padding: 1px 4px; border-radius: 4px; background: var(--hover); }
 .md pre { padding: 10px 12px; border-radius: 8px; background: var(--hover); overflow-x: auto; }
