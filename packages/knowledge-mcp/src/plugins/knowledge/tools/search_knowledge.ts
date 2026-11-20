@@ -13,11 +13,9 @@
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
 import { getAuth } from '../../../core/context.js';
-import { getConfig } from '../../../core/config.js';
-import { allowedDriveFolders, isPathInScope } from '../../../core/scope.js';
+import { allowedDriveFolders } from '../../../core/scope.js';
 import { getGraph } from '../graph.js';
 import { graphVisibility, linkCounts } from './linked_documents.js';
-import { isExcludedPath } from '../../drive/exclude.js';
 import { sourceLabels } from '../../drive/settings.js';
 import { driveConfigured } from '../../drive/index.js';
 import type { ChunkPayload } from '../../drive/qdrant.js';
@@ -25,21 +23,13 @@ import { DRIVE_COLLECTION, getLocalIndex } from '../../drive/qdrant.js';
 import { joinChunks } from '../../drive/chunk_join.js';
 import { queryTerms, tokenize } from '../../drive/tokens.js';
 import { isLocalId, localFolders } from '../folders.js';
-import { searchIndex, type Must } from '../hybrid.js';
-
-const RANK_RULES = getConfig().drive.rank;
-
-/** First rank rule whose prefix the path starts with. */
-function rankRule(path: string): { label: string; weight: number } | null {
-  const p = path.replace(/^\/+/, '');
-  return RANK_RULES.find((r) => p.startsWith(r.prefix.replace(/^\/+/, ''))) ?? null;
-}
+import { RANK_RULES, searchIndex, visibleHits, type Must } from '../hybrid.js';
 
 /**
  * Every `source` label a chunk can carry: the local folders, and Drive roots and shared documents when Drive is
  * connected. (Without Drive its labels name nothing, and a model told about them filters by them and finds nothing.)
  */
-function allSources(): string[] {
+export function allSources(): string[] {
   return [...new Set([...(driveConfigured() ? sourceLabels() : []), ...localFolders().map((f) => f.source)])];
 }
 
@@ -150,22 +140,8 @@ async function search(args: z.infer<typeof inputSchema>) {
   };
   if (found.hits.length === 0) return await noResults();
 
-  // Rerank: drive.rank rules by path, then demote superseded and parked documents (frontmatter status).
-  const reranked = found.hits
-    .map((h) => {
-      const p = h.payload;
-      const rule = rankRule(p.file_path ?? '');
-      let boost = rule?.weight ?? 1;
-      if (p.doc_status === 'superseded') boost *= 0.8;
-      else if (p.doc_status === 'parked') boost *= 0.92;
-      return { h, p, label: rule?.label ?? null, adj: h.score * boost };
-    })
-    .sort((a, b) => b.adj - a.adj);
-
-  // Re-check excluded folders (chunks indexed before a folder was excluded) and the caller's folder scope.
-  const allowed = reranked
-    .filter((x) => !isExcludedPath(x.p.file_path ?? ''))
-    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope));
+  // Rank rules and document status, then excluded folders and the caller's folder scope (hybrid.ts).
+  const allowed = visibleHits(found.hits, folderScope);
 
   if (allowed.length === 0) return await noResults();
 

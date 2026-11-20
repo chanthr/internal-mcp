@@ -20,7 +20,7 @@ const { consoleToken } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
-const { ask, checkLlm, listLlmModels, llmSettings, anthropicEndpoint, LlmError } = await import('../src/core/llm.js');
+const { ask, checkLlm, listLlmModels, llmSettings, searchLlmSettings, anthropicEndpoint, LlmError } = await import('../src/core/llm.js');
 
 const server = await runHttp(new Registry(builtinPlugins));
 const base = `http://localhost:${server.port}`;
@@ -174,4 +174,39 @@ test('the console connects a model: the provider\'s own list, a live check, and 
   assert.equal((await api('DELETE', '/services/llm')).status, 200);
   assert.ok(!/^LLM_(PROVIDER|MODEL|API_KEY|BASE_URL)=/m.test(envFile()), envFile());
   for (const k of ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL']) delete process.env[k];
+});
+
+test('the search assistant can have a model of its own, and a saved key goes only where it was given', async () => {
+  const or = await openrouter();
+  assert.equal((await api('POST', '/services/llm', { provider: 'openai', baseUrl: or.base, apiKey: 'or-key-000000', model: 'zeta/large' })).status, 200);
+  Object.assign(process.env, { LLM_PROVIDER: 'openai', LLM_BASE_URL: or.base, LLM_API_KEY: 'or-key-000000', LLM_MODEL: 'zeta/large' });
+  assert.deepEqual(searchLlmSettings(), llmSettings(), 'without one of its own, the search assistant uses the language model');
+  assert.equal((await api('GET', '/state')).json.services.searchLlm.set, false);
+
+  // Its own model on the same provider and address: the language model's key is used, and not saved twice.
+  assert.equal((await api('POST', '/llm/models', { provider: 'openai', baseUrl: or.base, for: 'search-llm' })).status, 200);
+  const own = await api('POST', '/services/search-llm', { provider: 'openai', baseUrl: or.base, model: 'acme/small:free', for: 'search-llm' });
+  assert.deepEqual([own.status, own.json.found], [200, 'acme/small:free answered'], own.text);
+  assert.match(envFile(), /^SEARCH_LLM_MODEL=acme\/small:free$/m);
+  assert.ok(!/^SEARCH_LLM_API_KEY=/m.test(envFile()), envFile());
+  Object.assign(process.env, { SEARCH_LLM_PROVIDER: 'openai', SEARCH_LLM_BASE_URL: or.base, SEARCH_LLM_MODEL: 'acme/small:free' });
+  assert.deepEqual(searchLlmSettings(), { kind: 'openai', baseUrl: or.base, apiKey: 'or-key-000000', model: 'acme/small:free' });
+  assert.deepEqual((await api('GET', '/state')).json.services.searchLlm, { set: true, provider: 'openai', model: 'acme/small:free', baseUrl: or.base, keySet: false });
+
+  // A model on this machine for search: the OpenRouter key does not go there.
+  const local = await fake((r) => (r.url === '/v1/models' ? { json: { data: [{ id: 'small' }] } } : { json: { model: 'small', choices: [{ message: { content: 'ready' }, finish_reason: 'stop' }] } }));
+  Object.assign(process.env, { SEARCH_LLM_BASE_URL: `${local.url}/v1`, SEARCH_LLM_MODEL: 'small' });
+  assert.equal(searchLlmSettings()?.apiKey, undefined);
+
+  // The language model moved to an address that needs no key: the old key is not kept for it.
+  const moved = await api('POST', '/services/llm', { provider: 'openai', baseUrl: `${local.url}/v1`, model: 'small' });
+  assert.equal(moved.status, 200, moved.text);
+  assert.ok(!/^LLM_API_KEY=/m.test(envFile()), 'the OpenRouter key is not kept for another address');
+  assert.ok(local.seen.every((r) => !r.headers.authorization), 'no key was sent to this machine');
+
+  // Back to the language model.
+  assert.equal((await api('DELETE', '/services/search-llm')).status, 200);
+  assert.ok(!/^SEARCH_LLM_(PROVIDER|MODEL|BASE_URL|API_KEY)=/m.test(envFile()), envFile());
+  assert.equal((await api('DELETE', '/services/llm')).status, 200);
+  for (const k of ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_API_KEY', 'LLM_MODEL', 'SEARCH_LLM_PROVIDER', 'SEARCH_LLM_BASE_URL', 'SEARCH_LLM_MODEL']) delete process.env[k];
 });

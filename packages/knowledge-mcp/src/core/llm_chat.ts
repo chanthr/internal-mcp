@@ -51,6 +51,24 @@ export interface ChatRequest {
   signal: AbortSignal;
   /** Rounds of tool calls before the model is stopped. */
   maxSteps?: number;
+  /**
+   * Most tokens one answer of the model may have (Claude and OpenAI-compatible endpoints). A model that writes on
+   * and on is cut there instead of running until the time limit.
+   */
+  maxTokens?: number;
+  /**
+   * A tool that ends the conversation: once it has run without error, the model is not asked again. (A search
+   * assistant hands in its result through a tool; asking it once more would only cost a turn.) In the last round
+   * maxSteps allows it is the only tool offered, so that the work ends with it rather than being cut off.
+   */
+  endsWith?: string;
+  /** Told when a round of tool calls starts, with its number (1, 2, …): a tool can say how many are left. */
+  onRound?: (round: number) => void;
+  /**
+   * With endsWith: said to the model once when it stops without calling that tool, so that it does. A model that
+   * writes its result as text instead of handing it in gets one more turn.
+   */
+  nudge?: string;
 }
 export interface ChatEnd {
   model: string;
@@ -62,6 +80,8 @@ export interface ChatEnd {
 const STEPS = 12;
 /** A tool result goes back to the model shortened to this: a search returns a few thousand characters. */
 const RESULT_CHARS = 30_000;
+/** The tools offered for the next round: only the ending one in the last round there is. */
+const lastRound = (req: ChatRequest, steps: number): boolean => !!req.endsWith && steps === (req.maxSteps ?? STEPS) - 1;
 const shorten = (text: string): string => (text.length > RESULT_CHARS ? `${text.slice(0, RESULT_CHARS)}\n… [${text.length - RESULT_CHARS} more characters left out]` : text);
 const objectOf = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
 /** A JSON Schema as both APIs take it: an object schema, without the draft marker. */
@@ -89,14 +109,15 @@ async function chatClaude(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
   const usage: ChatUsage = { input: 0, output: 0, cached: 0, steps: 0 };
   let model = s.model;
   let unreadable = 0;
+  let nudged = false;
   for (;;) {
     if (usage.steps >= (req.maxSteps ?? STEPS)) return { model, usage, note: `Stopped after ${usage.steps} rounds of tool calls.` };
     const body = {
       model: s.model,
-      max_tokens: 16_000,
+      max_tokens: req.maxTokens ?? 16_000,
       // The same from message to message: kept by the provider and read again at a tenth of the price.
       system: [{ type: 'text' as const, text: req.system, cache_control: { type: 'ephemeral' as const } }],
-      tools,
+      tools: lastRound(req, usage.steps) ? tools.filter((t) => t.name === req.endsWith) : tools,
       messages,
     };
     const options = { signal: req.signal, timeout: CALL_TIMEOUT_MS };
@@ -134,14 +155,25 @@ async function chatClaude(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
     const uses = message.content.filter((b): b is Anthropic.ToolUseBlock => b.type === 'tool_use');
     // A tool input cut off at the length limit may still read as an object: it is not run.
     if (message.stop_reason === 'max_tokens') return { model, usage, note: 'The answer was cut off at the length limit.' };
+    if (uses.length === 0 && req.nudge && !nudged) {
+      nudged = true;
+      // An empty answer is not sent back as one (an assistant turn needs content): the reminder follows on its own.
+      if (message.content.length) messages.push({ role: 'assistant', content: message.content });
+      messages.push({ role: 'user', content: req.nudge });
+      continue;
+    }
     if (uses.length === 0) return { model, usage, note: null };
     usage.steps++;
+    req.onRound?.(usage.steps);
     messages.push({ role: 'assistant', content: message.content });
     const results: Anthropic.ToolResultBlockParam[] = [];
+    let ended = false;
     for (const u of uses) {
       const r = await callTool(req, u.id, u.name, objectOf(u.input));
+      if (r.ok && u.name === req.endsWith) ended = true;
       results.push({ type: 'tool_result', tool_use_id: u.id, content: r.text, ...(r.ok ? {} : { is_error: true }) });
     }
+    if (ended) return { model, usage, note: null };
     messages.push({ role: 'user', content: results });
   }
 }
@@ -213,15 +245,24 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
   const usage: ChatUsage = { input: 0, output: 0, cached: 0, steps: 0 };
   let model = s.model;
   let withUsage = true;
+  let nudged = false;
   for (;;) {
     if (usage.steps >= (req.maxSteps ?? STEPS)) return { model, usage, note: `Stopped after ${usage.steps} rounds of tool calls.` };
     const limit = AbortSignal.timeout(CALL_TIMEOUT_MS);
     let res: Response;
+    const offered = lastRound(req, usage.steps) ? tools.filter((t) => t.function.name === req.endsWith) : tools;
     try {
       res = await fetch(`${s.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(s.apiKey ? { Authorization: `Bearer ${s.apiKey}` } : {}) },
-        body: JSON.stringify({ model: s.model, messages, ...(tools.length ? { tools } : {}), stream: true, ...(withUsage ? { stream_options: { include_usage: true } } : {}) }),
+        body: JSON.stringify({
+          model: s.model,
+          messages,
+          ...(offered.length ? { tools: offered } : {}),
+          ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
+          stream: true,
+          ...(withUsage ? { stream_options: { include_usage: true } } : {}),
+        }),
         signal: AbortSignal.any([req.signal, limit]),
       });
     } catch (e) {
@@ -282,9 +323,18 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
     if (finish === 'content_filter') throw new LlmError('The model declined this request.');
     const asked = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([n, c]) => ({ ...c, id: c.id || `call_${usage.steps}_${n}` }));
     if (finish === 'length') return { model, usage, note: 'The answer was cut off at the length limit.' };
+    if (asked.length === 0 && req.nudge && !nudged) {
+      nudged = true;
+      // Without tool calls an assistant turn needs text: an endpoint refuses null there (Ollama answers 400).
+      if (rest) messages.push({ role: 'assistant', content: rest });
+      messages.push({ role: 'user', content: req.nudge });
+      continue;
+    }
     if (asked.length === 0) return { model, usage, note: null };
     usage.steps++;
+    req.onRound?.(usage.steps);
     messages.push({ role: 'assistant', content: rest || null, tool_calls: asked.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.args || '{}' } })) });
+    let ended = false;
     for (const c of asked) {
       let input: Record<string, unknown> | null = null;
       try {
@@ -295,8 +345,10 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
       const r = input
         ? await callTool(req, c.id, c.name, input)
         : (req.emit({ type: 'tool', id: c.id, name: c.name, input: c.args }), req.emit({ type: 'result', id: c.id, ok: false, text: 'The arguments were not valid JSON.', ms: 0 }), { ok: false, text: 'The arguments were not valid JSON. Call the tool again with a JSON object.' });
+      if (r.ok && c.name === req.endsWith) ended = true;
       messages.push({ role: 'tool', tool_call_id: c.id, content: r.ok ? r.text : `Error: ${r.text}` });
     }
+    if (ended) return { model, usage, note: null };
   }
 }
 
@@ -306,18 +358,23 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
 const NAMESPACE = 'knowledge_mcp';
 
 async function chatChatgpt(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
-  const tools = req.tools.length
-    ? [{ type: 'namespace', name: NAMESPACE, description: "This server's tools: documents, connected apps and data.", tools: req.tools.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: schemaOf(t.inputSchema), strict: false })) }]
-    : [];
+  const toolsOf = (list: ChatTool[]) =>
+    list.length
+      ? [{ type: 'namespace', name: NAMESPACE, description: "This server's tools: documents, connected apps and data.", tools: list.map((t) => ({ type: 'function', name: t.name, description: t.description, parameters: schemaOf(t.inputSchema), strict: false })) }]
+      : [];
+  const all = toolsOf(req.tools);
+  const ending = toolsOf(req.tools.filter((t) => t.name === req.endsWith));
   // Nothing is kept at OpenAI (store: false): every request carries the conversation so far.
   const input: Array<Record<string, unknown>> = [...req.history.map((h) => ({ role: h.role, content: h.text })), { role: 'user', content: req.message }];
   const usage: ChatUsage = { input: 0, output: 0, cached: 0, steps: 0 };
   let model = s.model;
+  let nudged = false;
   for (;;) {
     if (usage.steps >= (req.maxSteps ?? STEPS)) return { model, usage, note: `Stopped after ${usage.steps} rounds of tool calls.` };
     let text = '';
     const calls: Array<Record<string, unknown>> = [];
     try {
+      const tools = lastRound(req, usage.steps) ? ending : all;
       for await (const e of chatgptResponses({ model: s.model, instructions: req.system, input, ...(tools.length ? { tools } : {}) }, req.signal)) {
         if (e.type === 'response.output_text.delta' && typeof e.delta === 'string') {
           text += e.delta;
@@ -337,9 +394,17 @@ async function chatChatgpt(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
       if (req.signal.aborted) throw e;
       throw asLlmError(e);
     }
+    if (calls.length === 0 && req.nudge && !nudged) {
+      nudged = true;
+      if (text) input.push({ role: 'assistant', content: text });
+      input.push({ role: 'user', content: req.nudge });
+      continue;
+    }
     if (calls.length === 0) return { model, usage, note: null };
     usage.steps++;
+    req.onRound?.(usage.steps);
     if (text) input.push({ role: 'assistant', content: text });
+    let ended = false;
     for (const c of calls) {
       // The call goes back as it came, without its item ID: without stored reasoning, an ID would ask for it.
       const { id: _id, status: _status, ...call } = c;
@@ -353,8 +418,10 @@ async function chatChatgpt(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
         /* answered below */
       }
       const r = args ? await callTool(req, callId, name, args) : { ok: false, text: 'The arguments were not valid JSON. Call the tool again with a JSON object.' };
+      if (r.ok && name === req.endsWith) ended = true;
       input.push({ type: 'function_call_output', call_id: callId, output: r.ok ? r.text : `Error: ${r.text}` });
     }
+    if (ended) return { model, usage, note: null };
   }
 }
 

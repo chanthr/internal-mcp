@@ -18,6 +18,10 @@
  *   LLM_MODEL      the model, as the provider names it. It is picked from the provider's own list: no model
  *                  name is made up here.
  *
+ * The search assistant (plugins/knowledge/agent_search.ts) may use another model than the rest, set the same way
+ * under SEARCH_LLM_PROVIDER, SEARCH_LLM_API_KEY, SEARCH_LLM_BASE_URL and SEARCH_LLM_MODEL: a small fast one on
+ * this machine while the chat uses a large one, for instance. Unset, it uses the model above.
+ *
  * What is sent: the text handed to `ask`, which for the wiki is the text of the person's documents. That is said
  * where a model is connected, and nothing is sent by merely connecting one (one short question checks the key).
  */
@@ -39,18 +43,29 @@ export const anthropicEndpoint: { baseURL?: string } = {};
 
 const clean = (v: string | undefined): string | undefined => v?.trim() || undefined;
 
-/** The connected model, or null. */
-export function llmSettings(env: NodeJS.ProcessEnv = process.env): LlmSettings | null {
-  const model = clean(env.LLM_MODEL);
-  const kind = clean(env.LLM_PROVIDER);
+/** The connected model, or null. `prefix`: the settings of another use (SEARCH_LLM_ for the search assistant). */
+export function llmSettings(env: NodeJS.ProcessEnv = process.env, prefix = 'LLM_'): LlmSettings | null {
+  const model = clean(env[`${prefix}MODEL`]);
+  const kind = clean(env[`${prefix}PROVIDER`]);
   if (!model || (kind !== 'anthropic' && kind !== 'openai' && kind !== 'chatgpt')) return null;
   // The plan is used through the sign-in kept by chatgpt.ts: the setting holds only the model.
   if (kind === 'chatgpt') return chatgptSignedIn() ? { kind, model } : null;
-  if (kind === 'anthropic') return clean(env.LLM_API_KEY) ? { kind, apiKey: clean(env.LLM_API_KEY), model } : null;
-  const baseUrl = clean(env.LLM_BASE_URL)?.replace(/\/+$/, '');
-  return baseUrl ? { kind, baseUrl, apiKey: clean(env.LLM_API_KEY), model } : null;
+  const baseUrl = kind === 'openai' ? clean(env[`${prefix}BASE_URL`])?.replace(/\/+$/, '') : undefined;
+  // The search assistant on the same provider and address as the language model uses its key: the key goes to the
+  // address it was given for, and is kept once.
+  const sameAsMain = prefix !== 'LLM_' && clean(env.LLM_PROVIDER) === kind && (kind === 'anthropic' || clean(env.LLM_BASE_URL)?.replace(/\/+$/, '') === baseUrl);
+  const apiKey = clean(env[`${prefix}API_KEY`]) ?? (sameAsMain ? clean(env.LLM_API_KEY) : undefined);
+  if (kind === 'anthropic') return apiKey ? { kind, apiKey, model } : null;
+  return baseUrl ? { kind, baseUrl, apiKey, model } : null;
 }
 export const llmConfigured = (): boolean => llmSettings() !== null;
+
+/** The model the search assistant uses: its own when one is set, otherwise the language model. */
+export function searchLlmSettings(env: NodeJS.ProcessEnv = process.env): LlmSettings | null {
+  return llmSettings(env, 'SEARCH_LLM_') ?? llmSettings(env);
+}
+/** A model of its own is set for the search assistant (and works). */
+export const searchLlmOwn = (env: NodeJS.ProcessEnv = process.env): boolean => llmSettings(env, 'SEARCH_LLM_') !== null;
 
 /** Something a person can act on, said in a sentence. `retry`: trying again later may work. */
 export class LlmError extends Error {

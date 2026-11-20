@@ -1,7 +1,7 @@
 /**
- * Models: the language model (Chat, the wiki), the embedding model (search by meaning) and the model that reads
- * scans. Each is picked from what its provider lists, and asked once before it is saved. Until one is connected the
- * server calls no model.
+ * Models: the language model (Chat, the wiki, the search assistant unless it has its own), the embedding model
+ * (search by meaning) and the model that reads scans. Each is picked from what its provider lists, and asked once
+ * before it is saved. Until one is connected the server calls no model.
  */
 import { useEffect, useState } from 'react';
 import { call, type Changed } from '../api';
@@ -61,12 +61,17 @@ export function Models() {
   );
 }
 
+/** Which model a dialog connects: the language model, or the search assistant's own. */
+type Target = 'llm' | 'search-llm';
+
 /** The language model: answers in Chat, writes the wiki, writes questions to measure search with. */
 function LanguageModel() {
   const { state, apply } = useServer();
   const llm = state.services.llm;
-  const [open, setOpen] = useState(false);
+  const search = state.services.searchLlm;
+  const [open, setOpen] = useState<Target | null>(null);
   const saved = providerOf(llm.provider, llm.baseUrl);
+  const savedSearch = providerOf(search.provider, search.baseUrl);
   return (
     <>
       <Section title="Language model" text="Answers in Chat and writes the wiki.">
@@ -79,7 +84,7 @@ function LanguageModel() {
                 : 'Your ChatGPT plan, Claude, OpenRouter, OpenAI, a model on this machine, or any endpoint that speaks the OpenAI API.'
             }
           >
-            <Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setOpen(true)}>{llm.set ? 'Change' : 'Connect'}</Button>
+            <Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setOpen('llm')}>{llm.set ? 'Change' : 'Connect'}</Button>
             {llm.set && (
               <AskFirst
                 label="Disconnect"
@@ -91,16 +96,36 @@ function LanguageModel() {
               />
             )}
           </Row>
+          <Row
+            title={search.set ? `Search assistant: ${search.model}` : 'Search assistant'}
+            help={
+              search.set
+                ? `${savedSearch.id === 'other' ? search.baseUrl : savedSearch.label}. Searches several times for a question and hands the documents it finds to Chat and to connected assistants.`
+                : llm.set
+                  ? `Uses ${llm.model}. Searches several times for a question and hands the documents it finds to Chat and to connected assistants. A small fast model is enough, and one on this machine keeps your documents here.`
+                  : 'Searches several times for a question with a model: connect one above, or a model of its own.'
+            }
+          >
+            <Button size="sm" variant="secondary" disabled={!state.editable} onClick={() => setOpen('search-llm')}>{search.set ? 'Change' : 'Use another model'}</Button>
+            {search.set && (
+              <Button size="sm" variant="ghost" disabled={!state.editable} onClick={() => void apply(() => call<Changed>('DELETE', '/services/search-llm'))}>
+                {llm.set ? 'Use the language model' : 'Disconnect'}
+              </Button>
+            )}
+          </Row>
         </div>
       </Section>
-      {open && <ConnectModel onClose={() => setOpen(false)} />}
+      {open && <ConnectModel target={open} onClose={() => setOpen(null)} />}
     </>
   );
 }
 
-function ConnectModel({ onClose }: { onClose: () => void }) {
+function ConnectModel({ target, onClose }: { target: Target; onClose: () => void }) {
   const { state, apply } = useServer();
-  const llm = state.services.llm;
+  const main = state.services.llm;
+  const own = state.services.searchLlm;
+  // The search assistant's dialog starts from its own model, or from the language model's provider.
+  const llm = target === 'llm' ? main : own.provider ? own : { ...main, keySet: false, model: null };
   const [provider, setProvider] = useState<Provider>(providerOf(llm.provider, llm.baseUrl));
   const [address, setAddress] = useState(llm.provider === 'openai' && providerOf(llm.provider, llm.baseUrl).id === 'other' ? llm.baseUrl ?? '' : '');
   const [apiKey, setApiKey] = useState('');
@@ -135,9 +160,14 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
     });
 
   const baseUrl = provider.kind === 'openai' ? (provider.baseUrl ?? address.trim()) : '';
-  // A key saved for this very provider can be used again without typing it.
-  const keySaved = llm.keySet && llm.provider === provider.kind && (provider.kind === 'anthropic' || llm.baseUrl === baseUrl);
-  const body = provider.kind === 'chatgpt' ? { provider: 'chatgpt' } : { provider: provider.kind, baseUrl: baseUrl || undefined, apiKey: apiKey.trim() || undefined };
+  // A key saved for this very provider can be used again without typing it. The search assistant can use the
+  // language model's key on the same provider and address.
+  const savedFor = (v: typeof main) => v.keySet && v.provider === provider.kind && (provider.kind === 'anthropic' || v.baseUrl === baseUrl);
+  const keySaved = savedFor(llm) || (target === 'search-llm' && savedFor(main));
+  const body =
+    provider.kind === 'chatgpt'
+      ? { provider: 'chatgpt', for: target }
+      : { provider: provider.kind, baseUrl: baseUrl || undefined, apiKey: apiKey.trim() || undefined, for: target };
   const ready =
     provider.kind === 'chatgpt'
       ? !!gpt?.signedIn && gpt.planUsage
@@ -167,11 +197,13 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
     <Dialog
       open
       onOpenChange={(o) => !o && onClose()}
-      title="Connect a model"
+      title={target === 'llm' ? 'Connect a model' : 'A model for the search assistant'}
       description={
-        provider.kind === 'chatgpt'
-          ? 'The sign-in is kept on this machine, readable only by you. Text of your documents goes to OpenAI only while you chat or the wiki is written.'
-          : 'The key is saved in .env on this machine. Text of your documents goes to this provider only while you chat or the wiki is written.'
+        target === 'search-llm'
+          ? 'Excerpts of your documents go to this model while it searches. A small fast model is enough.'
+          : provider.kind === 'chatgpt'
+            ? 'The sign-in is kept on this machine, readable only by you. Text of your documents goes to OpenAI only while you chat or the wiki is written.'
+            : 'The key is saved in .env on this machine. Text of your documents goes to this provider only while you chat or the wiki is written.'
       }
       footer={
         <>
@@ -181,7 +213,7 @@ function ConnectModel({ onClose }: { onClose: () => void }) {
             disabled={!ready || !model}
             onClick={() =>
               void save.run(async () => {
-                await apply(() => call<Changed>('POST', '/services/llm', { ...body, model }));
+                await apply(() => call<Changed>('POST', `/services/${target}`, { ...body, model }));
                 onClose();
               })
             }

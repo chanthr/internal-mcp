@@ -138,7 +138,8 @@ test('an OpenAI-style endpoint: the model searches, the result goes back to it, 
     assert.deepEqual(first.body.messages.map((m: any) => m.role), ['system', 'user', 'assistant', 'user']);
     assert.match(first.body.messages[0].content, /owner tries how its tools work/);
     const names = first.body.tools.map((t: any) => t.function.name).sort();
-    assert.deepEqual(names, ['linked_documents', 'read_document', 'search_knowledge']);
+    // With a model connected, the search assistant is one of the tools too.
+    assert.deepEqual(names, ['find_documents', 'linked_documents', 'read_document', 'search_knowledge']);
     assert.ok(first.body.tools.every((t: any) => !('$schema' in t.function.parameters) && t.function.parameters.type === 'object'));
     const turn = second.body.messages.slice(-2);
     assert.deepEqual(turn[0].tool_calls, [{ id: 'call_a', type: 'function', function: { name: 'search_knowledge', arguments: '{"query": "deploys main branch"}' } }]);

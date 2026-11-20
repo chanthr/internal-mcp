@@ -160,13 +160,29 @@ wiki/
 
 | | |
 | --- | --- |
-| 시작 | **Agent → Create the wiki**, 이어서 **Read documents**. 한 번에 문서를 25개까지 읽고, 더 읽기 전에 얼마나 들었는지(질문 수, 들어간 토큰과 나온 토큰) 보여 줍니다 |
+| 시작 | **Wiki → Create the wiki**, 이어서 **Read documents**. 한 번에 문서를 25개까지 읽고, 더 읽기 전에 얼마나 들었는지(질문 수, 들어간 토큰과 나온 토큰) 보여 줍니다 |
 | 읽는 대상 | 폴더와 `uploads/`에 있는 문서. 문서는 바꾸지 않습니다. 바뀐 문서만 다시 읽고, 지워진 문서가 말한 것은 위키에서도 빠집니다 |
 | 드는 것 | 문서마다 모델에 질문 한 번(긴 문서는 나눠 읽어 더 듭니다), 사실이 셋 이상 모인 주제 페이지마다 한 번 |
 | 어디에 나타나나 | 위키는 이 서버의 폴더입니다. `search_knowledge`와 `read_document`가 그 페이지를 찾고, Graph 화면과 `linked_documents`가 주제에서 문서로, 문서에서 주제로 링크를 따라갑니다 |
 | 옵시디언 | `wiki/`를 볼트로 열면 됩니다. 페이지는 `[[…]]`로 연결되고 파일 이름이 제목입니다 |
 | 내 메모 | 페이지의 `## Notes` 제목 아래에 적은 것은 페이지를 다시 쓸 때도 남습니다 |
 | 작은 모델이나 로컬 모델 | 됩니다. 모델에게 JSON이 아니라 이름표가 붙은 줄로 답하게 합니다. 모델의 창이 작으면 `WIKI_PART_CHARS`(기본 24000)를 낮추십시오. 페이지의 정확도는 문서를 읽은 모델만큼입니다 |
+
+### 검색 도우미
+
+`search_knowledge`는 검색 한 번에 답합니다. 여러 부분으로 된 질문이나 문서와 다른 말로 한 질문은 검색이 여러 번
+필요할 때가 많습니다. `find_documents`는 이런 질문을 검색 도우미에게 넘깁니다. 검색 도우미는 여러 번 검색하고,
+발췌로 모자라면 문서를 읽은 뒤, 답이 든 문서를 순서대로 돌려줍니다. 문서마다 무엇이 들었는지 한 줄을 붙입니다.
+답은 쓰지 않습니다. 물어본 모델이 그 문서를 읽고 답합니다. 찾는 모델과 답하는 모델을 나누는 에이전트 검색 모델과
+같은 구조입니다.
+
+| | |
+| --- | --- |
+| 모델 | 언어 모델을 그대로 쓰거나, **Models → Search assistant**에서 검색용 모델을 따로 정합니다. 채팅은 상용 모델로, 검색은 이 컴퓨터의 모델로 돌리는 식입니다. 위의 제공자 모두 됩니다 |
+| 보는 것 | 문서의 발췌와 일부. `search_knowledge`와 `read_document`의 점검을 그대로 거칩니다. 제외한 폴더는 빠지고, 물어본 사람이 볼 수 있는 폴더만 봅니다 |
+| 노력 단계 | `low`: 검색 3회차. `medium`(기본): 6회차. `high`: 질문을 부분으로 나눠 부분마다 도우미가 동시에 찾고, 결과를 순위로 합칩니다 |
+| 비용 | 부르는 사람이 누구든 서버의 모델을 씁니다. 한 사람은 동시에 2개, 한 시간에 60개까지 묻습니다. 도우미 하나는 한 회차에 6번까지 호출하고 8만 자까지 읽습니다. 질문 하나는 5분이 지나면 멈춥니다 |
+| 재 보기 | **Search → Passages → Measure with it**은 측정 질문을 키워드, 뜻 검색과 함께 검색 도우미에게도 묻고, 걸린 시간과 토큰을 보여 줍니다. 터미널에서는 `knowledge measure --agent` |
 
 ## 동작 방식
 
@@ -381,6 +397,8 @@ npm run setup -- check                                                # 접속�
 | `state` | `get(key)`, `set(key, value)`, `delete(key)`. 플러그인별로 저장소에 남아 재시작해도 유지됩니다 |
 | `config` | `mcp.config.json`의 `plugins.<id>` 부분 |
 | `log(...)` | 플러그인 이름을 붙여 stderr에 씁니다. 비밀값은 가려집니다. stdio에서는 `console.log`를 쓰지 않습니다 |
+| `signal` | 클라이언트가 호출을 취소하면 중단 신호가 옵니다. 오래 걸리는 도구는 그때 일을 멈춥니다. MCP 호출 밖에서는 없습니다 |
+| `progress(done, message?)` | 오래 걸리는 호출이 얼마나 갔는지 클라이언트에 알립니다. 클라이언트가 요청했을 때만 보내고, 아니면 아무것도 하지 않습니다 |
 | `auth` | 전체 인증 정보. Slack 채널과 Drive 폴더 제한도 들어 있습니다 |
 
 </details>
@@ -441,7 +459,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 플러그인 | 도구 | 필요한 것 |
 | --- | --- | --- |
-| `knowledge` | `search_knowledge`, `read_document`, `linked_documents` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다 |
+| `knowledge` | `search_knowledge`, `read_document`, `linked_documents`, `find_documents` | 로컬 폴더(설정의 `folders`)나 Google Drive 가운데 하나. 그 밖에는 필요 없습니다. 색인은 로컬 파일이고 키워드로 검색합니다. 임베딩 모델(`OPENAI_API_KEY`, 또는 `EMBEDDING_BASE_URL`로 다른 제공자)을 넣으면 뜻으로도 찾습니다. `QDRANT_URL`을 정하면 벡터를 Qdrant에 두고, 그때는 임베딩 모델이 꼭 있어야 합니다. `find_documents`는 언어 모델을 연결했을 때 보입니다 |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | 콘솔에서 한 구글 로그인(본인 Drive를 읽습니다)이나 Google 서비스 계정. 서비스 계정은 폴더나 문서를 그 계정에 공유하면 검색됩니다. 환경변수의 OAuth refresh token도 됩니다 |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN`(`xoxb-`). 봇은 초대받은 채널만 봅니다 |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN`(`xoxp-`)도 필요합니다. 결과는 봇이 들어간 채널로 거릅니다 |
@@ -470,6 +488,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `search_knowledge` | 조각을 `topK`개까지(기본 5, 문서마다 최대 2) 돌려줍니다. 조각마다 문서, 날짜, ID, 제목 경로, 질문의 낱말 가운데 몇 개가 들어 있는지를 붙입니다. 한 문서에서 이웃한 두 조각은 한 덩어리로 보여 줍니다. 질문 낱말의 절반도 든 조각이 없으면 일치가 약하다고 알립니다. 필터에 맞는 것이 없으면 그 항목이 가진 값을 알려 줍니다 |
 | `read_document` | `part`(검색 결과에 나온 번호)를 주면 그 조각과 앞뒤 조각을 돌려줍니다(`around`, 기본 1). 수천 자 정도입니다. 주지 않으면 문서를 처음부터 `maxChars`(기본 20,000)까지 돌려주고, 이어 읽을 `offset`을 알려 줍니다. JSON이 아니라 일반 글입니다 |
 | `linked_documents` | 문서 ID를 주면 그 문서가 가리키는 문서와 그 문서를 가리키는 문서를 제목과 ID로 돌려줍니다. 주지 않으면 문서 수와 링크 수, 가장 많이 가리켜지는 문서를 돌려줍니다. 연결이 있는 검색 결과에는 `Links: to 2 · from 3`이 붙습니다 |
+| `find_documents` | 검색 도우미가 찾은, 질문에 답이 든 문서. `limit`개까지(기본 8) 순서대로 돌려주고, 문서마다 ID, 먼저 읽을 부분, 무엇이 들었는지 한 줄을 붙입니다. 본문 조각은 주지 않습니다. 물어본 모델이 `read_document`로 필요한 만큼 읽습니다 |
 | 데이터베이스 도구 | 행을 압축한 표로 돌려줍니다. `{"rowCount":2,"columns":["id","total"],"rows":[[1,10.5],[2,20]]}` 모양이고 한 줄에 한 행입니다. 열 이름은 한 번만 씁니다 |
 
 **지식 그래프.** 로컬 폴더의 문서는 작성자가 적은 링크 그대로 연결됩니다. 모델을 거치지 않습니다. 옵시디언이
@@ -775,7 +794,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 2. 데이터 파일에는 키 해시와 OAuth 클라이언트 비밀값이 있습니다. 소유자만 읽게 만들어지니 볼륨도 비공개로 둡니다.
 3. 기본 플러그인은 Drive, Slack, GitHub, Railway를 바꾸지 않습니다. 게이트웨이는 `expose`를 바꿀 때만 원격 쓰기 도구를 엽니다.
 4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
-   Agent 화면에서 연결한 언어 모델에는 그 화면의 작업이 도는 동안에만 문서의 글이 전달됩니다. 연결할 때는 키를 확인하는 짧은 질문 하나만 보냅니다. 키는 `.env`에 있고(`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) 화면으로 다시 보내지 않습니다.
+   Models 화면에서 연결한 언어 모델에는 채팅하거나 위키를 쓰는 동안에만 문서의 글이 전달됩니다. 연결할 때는 키를 확인하는 짧은 질문 하나만 보냅니다. 키는 `.env`에 있고(`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) 화면으로 다시 보내지 않습니다. 검색 도우미의 모델에는 찾는 동안(`find_documents`, 또는 그것을 재는 동안) 문서의 발췌와 일부가 전달됩니다. 검색용으로 따로 정한 모델은 `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL`, `SEARCH_LLM_MODEL`에 있습니다. 저장한 키는 그 키를 받은 제공자와 주소로만 보냅니다.
 5. 서비스 계정 주소를 아는 사람은 누구나 그 계정에 문서를 공유할 수 있습니다. Drive는 받는 쪽에 묻지 않습니다. 그래서 root 밖 공유 문서는 공유된 맨 위 항목의 소유자가 `drive.trustedOwners`에 있을 때만 보여 줍니다. 이 목록에는 자기 조직만 넣고 `*`는 쓰지 마십시오. 신뢰하는 소유자가 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.
 6. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.
 7. 데이터베이스 연결은 그 데이터베이스 사용자가 읽을 수 있는 것을 모두 읽습니다. 읽기만 되는 전용 사용자를 만드십시오. superuser와 애플리케이션이 쓰는 사용자는 쓰지 마십시오. `explore`를 켤 때는 허용된 사람 모두가 봐도 되는 것만 읽는 사용자를 쓰십시오. tools 목록이 없는 member는 모든 연결을 쓸 수 있습니다.

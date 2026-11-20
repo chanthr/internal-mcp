@@ -26,7 +26,10 @@ interface ModeScore {
   top3: number;
   top10: number;
   mrr: number;
+  ndcg?: number;
+  recall?: number;
 }
+type Effort = 'low' | 'medium' | 'high';
 interface Measured {
   at: string;
   cut: string;
@@ -34,7 +37,9 @@ interface Measured {
   documents: number;
   passages: number;
   questions: number;
-  modes: { keyword: ModeScore | null; meaning: ModeScore | null; both: ModeScore | null };
+  modes: { keyword?: ModeScore | null; meaning?: ModeScore | null; both?: ModeScore | null; agent?: ModeScore | null };
+  /** What the search assistant took per question, when it was measured. */
+  agent?: { model: string; effort: Effort; seconds: number; tokens: number; searches: number } | null;
   note: string | null;
 }
 interface Compared {
@@ -47,9 +52,11 @@ interface Compared {
 interface MeasureView {
   questions: number;
   canWrite: boolean;
+  /** The model the search assistant uses, or null when none is connected. */
+  agentModel: string | null;
   measured: Measured[];
   compared: Compared | null;
-  run: { running: boolean; what: 'measure' | 'compare'; phase: 'questions' | 'asking' | 'embedding'; done: number; total: number; way: string | null; error: string | null } | null;
+  run: { running: boolean; what: 'measure' | 'compare'; phase: 'questions' | 'asking' | 'embedding'; done: number; total: number; way: string | null; error: string | null; agent: Effort | null } | null;
   file: string;
   ways: Array<{ cut: Cut; maxTokens: number }>;
 }
@@ -95,7 +102,7 @@ export function Passages() {
 
   if (!i?.profile) return null;
   const p = i.profile;
-  const start = (what: 'measure' | 'compare', fresh = false) => void act.run(async () => setM(await call<MeasureView>('POST', '/index/measure', { what, fresh })));
+  const start = (what: 'measure' | 'compare', fresh = false, agent?: Effort) => void act.run(async () => setM(await call<MeasureView>('POST', '/index/measure', { what, fresh, ...(agent ? { agent } : {}) })));
 
   const status = cutting
     ? `Cutting ${num(i.recut ?? 0)} document${i.recut === 1 ? '' : 's'} the new way. Search works meanwhile.`
@@ -159,7 +166,7 @@ function Measure({
   e: State['services']['embeddings'];
   p: Profile;
   running: boolean;
-  start: (what: 'measure' | 'compare', fresh?: boolean) => void;
+  start: (what: 'measure' | 'compare', fresh?: boolean, agent?: Effort) => void;
   stop: () => void;
   busy: boolean;
   error: string | null;
@@ -173,7 +180,7 @@ function Measure({
       ? `Writing questions from your documents: ${num(run.done)} of ${num(run.total)}.`
       : run.phase === 'embedding'
         ? `Embedding the sample cut ${run.way ? wayName(parseMark(run.way)?.cut ?? 'sections', parseMark(run.way)?.maxTokens ?? 0).toLowerCase() : ''}: ${num(run.done)} of ${num(run.total)} passages.`
-        : `Asking ${num(run.total)} questions: ${num(run.done)} done.`
+        : `Asking ${num(run.total)} questions${run.agent ? ', the search assistant too' : ''}: ${num(run.done)} done.`
     : null;
   const help = !ready
     ? `Measuring asks questions whose answer is known. Connect a language model on the Models page and it writes them from your documents, or write your own in ${m.file}.`
@@ -204,6 +211,14 @@ function Measure({
           </>
         )}
       </Row>
+      {m.agentModel && (
+        <Row
+          title="With the search assistant"
+          help={`${m.agentModel} searches each question several times, as find_documents does. Slower, and it uses the model.`}
+        >
+          {!running && <Button size="sm" variant="secondary" loading={busy} disabled={!ready} onClick={() => start('measure', false, 'medium')}>Measure with it</Button>}
+        </Row>
+      )}
       {error && <p className="error" role="alert">{error}</p>}
       {use.error && <p className="error" role="alert">{use.error}</p>}
       {last && (
@@ -223,11 +238,11 @@ function Measure({
               </tr>
             </thead>
             <tbody>
-              {(['both', 'keyword', 'meaning'] as const).map((k) => {
+              {(['both', 'keyword', 'meaning', ...(last.modes.agent ? (['agent'] as const) : [])] as const).map((k) => {
                 const s = last.modes[k];
                 return (
                   <tr key={k}>
-                    <td>{k === 'both' ? 'Both, as search does' : k === 'keyword' ? 'Keywords' : 'Meaning'}</td>
+                    <td>{k === 'both' ? 'Both, as search does' : k === 'keyword' ? 'Keywords' : k === 'meaning' ? 'Meaning' : 'The search assistant'}</td>
                     <td className="muted">{s ? `${num(s.first)} (${pct(s.first, last.questions)})` : 'Not measured'}</td>
                     <td className="muted">{s ? `${num(s.top3)} (${pct(s.top3, last.questions)})` : ''}</td>
                     <td className="muted">{s ? `${num(s.top10)} (${pct(s.top10, last.questions)})` : ''}</td>
@@ -236,6 +251,11 @@ function Measure({
               })}
             </tbody>
           </table>
+          {last.agent && (
+            <p className="field-help">
+              The search assistant ({last.agent.model}) took {last.agent.seconds.toLocaleString()} s, {num(last.agent.tokens)} tokens and {last.agent.searches.toLocaleString()} searches per question on average.
+            </p>
+          )}
         </div>
       )}
       {m.compared && (
