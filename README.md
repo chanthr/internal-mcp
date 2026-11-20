@@ -225,10 +225,15 @@ Obsidian:
 | Folder | What goes there |
 | --- | --- |
 | `notes/` | What the console's chat saves. Yours to edit as well |
-| `inbox/<who>/` | What other assistants save with `save_note` (Claude, ChatGPT, Cursor), and what programs send to `POST /inbox` |
+| `inbox/<who>/` | What other assistants save with `save_note` (Claude, ChatGPT, Cursor), and what programs send to `POST /inbox`. `<who>` is the account of the key that sent it, whatever the note says it is from |
 
-A note is never written over another file, and `save_note` can replace only a note in these folders: your documents
-are not changed. Viewers may not save. The chat offers `save_note` and the tools that only read.
+A note is never written over another file, and `save_note` can replace only a note in the caller's own folder: your
+documents are not changed, and nothing is written through a link. What a replaced note said before is kept in a
+hidden `.versions/` folder beside it. Viewers may not save. The chat offers `save_note` and the tools that only read.
+`inbox/` is searched but not read into the wiki: what other programs send is not written up as if your documents said
+it. When the settings folder cannot be written (a container with its configuration mounted read-only), both folders
+are in the data directory instead. The names `notes` and `inbox` are kept for these folders: a configured folder
+with one of those names is numbered (`notes-2`).
 
 A program that does not speak MCP, such as a browser agent's scheduled routine (Aside, for example) or a script,
 sends a note with a key of a member or an admin:
@@ -239,8 +244,9 @@ curl -X POST https://<your address>/inbox \
   -d '{"title": "Course page, week 4", "content": "Assignment 2 is due on Friday.", "from": "aside", "url": "https://school.example/week-4"}'
 ```
 
-It answers `201 {"saved": "inbox/aside/2026-11-20 Course page, week 4.md"}`. Fields: `title`, `content` (Markdown, up
-to 200,000 characters), and optionally `from` (the folder under `inbox/`), `url` and `tags`. In an Aside routine,
+It answers `201 {"saved": "inbox/<who>/2026-11-20 Course page, week 4.md"}`, `<who>` being the key's account. Fields:
+`title`, `content` (Markdown, up to 200,000 characters), and optionally `from` (kept as `via` in the note), `url` and
+`tags`. In an Aside routine,
 end the task with this step: *"Send what you found to Knowledge MCP: POST it to https://<your address>/inbox with
 the header Authorization: Bearer <key>, as JSON with title, content (Markdown) and from: "aside"."*
 

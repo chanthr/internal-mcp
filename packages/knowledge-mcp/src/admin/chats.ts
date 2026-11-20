@@ -61,10 +61,17 @@ const fileOf = (id: string): string => {
   return join(dir(), `${id}.json`);
 };
 
+/** When this server started: an answer that was being written before then was cut off by a restart. */
+const STARTED = new Date().toISOString();
+
 export function readChat(id: string): Chat | null {
   try {
     const f = fileOf(id);
-    return existsSync(f) ? (JSON.parse(readFileSync(f, 'utf8')) as Chat) : null;
+    if (!existsSync(f)) return null;
+    const chat = JSON.parse(readFileSync(f, 'utf8')) as Chat;
+    // Still marked as answering from before this server started: nothing is writing it any more.
+    if (chat.answering && chat.updated < STARTED) chat.answering = false;
+    return chat;
   } catch {
     return null;
   }

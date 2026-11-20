@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -20,11 +20,13 @@ writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ orgId: 'acme', fold
 
 /** A model that streams one answer and keeps what it was sent. */
 const seen: Array<{ messages: Array<{ role: string; content: string | null }>; tools?: Array<{ function: { name: string } }> }> = [];
+const slow = { ms: 0 };
 const llm = createServer((req: IncomingMessage, res: ServerResponse) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
-  req.on('end', () => {
+  req.on('end', async () => {
     seen.push(JSON.parse(raw));
+    if (slow.ms) await new Promise((r) => setTimeout(r, slow.ms));
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     res.write(`data: ${JSON.stringify({ model: 'fake', choices: [{ index: 0, delta: { content: `Answer ${seen.length}.` }, finish_reason: null }] })}\n\n`);
     res.write(`data: ${JSON.stringify({ model: 'fake', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } })}\n\n`);
@@ -50,6 +52,7 @@ Object.assign(process.env, {
 const { getStore } = await import('../src/store/index.js');
 const store = await getStore();
 await store.upsertUser({ email: 'member@acme.com', role: 'member' });
+await store.upsertUser({ email: 'other@acme.com', role: 'member' });
 const memberKey = (await store.createKey({ email: 'member@acme.com', orgId: 'acme' })).key;
 const viewerKey = (await store.createKey({ email: 'stranger@acme.com', orgId: 'acme' })).key;
 
@@ -98,10 +101,19 @@ test('the console saves notes into notes/: never over another file, replaced onl
   const replaced = await run('save_note', { title: 'Lecture 3: photosynthesis', content: '# Mine\n\nRewritten.', path: name });
   assert.match(replaced.text, /^Replaced: notes\//);
   assert.match(readFileSync(file, 'utf8'), /\n# Mine\n\nRewritten\.\n$/);
+  // What it said before is kept, out of sight of search.
+  const versions = readdirSync(join(dir, 'notes', '.versions'));
+  assert.equal(versions.length, 1);
+  assert.match(readFileSync(join(dir, 'notes', '.versions', versions[0]), 'utf8'), /Light becomes chemical energy/);
+  // A link in notes/ leads elsewhere (here: to the documents): nothing is written through it.
+  symlinkSync(docs, join(dir, 'notes', 'vault'));
+  const linked = await run('save_note', { title: 'x', content: 'Overwritten', path: 'vault/lecture-3.md' });
+  assert.deepEqual([linked.ok, /vault is a link/.test(linked.text)], [false, true], linked.text);
+  assert.ok(!readFileSync(join(docs, 'lecture-3.md'), 'utf8').includes('Overwritten'));
   for (const path of ['../docs/lecture-3.md', '/etc/hosts', 'nothing-here.md', `../notes/${name}`.replace('notes', 'docs')]) {
     const refused = await run('save_note', { title: 'x', content: 'x', path });
     assert.equal(refused.ok, false, path);
-    assert.match(refused.text, /There is no note at .* in notes\/ to replace/);
+    assert.match(refused.text, /There is no note of yours at .* in notes\/ to replace/);
   }
   assert.equal(readFileSync(join(docs, 'lecture-3.md'), 'utf8').includes('Rewritten'), false, 'the documents are not changed');
 
@@ -117,6 +129,16 @@ test('another caller saves into inbox/<who>/, and a viewer may not save', async 
   const r = await registry.call('save_note', { title: 'From Claude', content: 'Found on the web.' }, member);
   assert.match(String((r.content[0] as unknown as { text: string }).text), new RegExp(`^Saved: inbox/member/${today} From Claude\\.md`));
   assert.ok(existsSync(join(dir, 'inbox', 'member', `${today} From Claude.md`)));
+  // Another caller cannot replace it: a path is inside the caller's own folder.
+  const other = { ok: true, org_id: 'acme', role: 'member' as const, email: 'other@acme.com' };
+  for (const path of [`member/${today} From Claude.md`, `../member/${today} From Claude.md`]) {
+    const r2 = await registry.call('save_note', { title: 'x', content: 'Taken over', path }, other);
+    assert.equal(r2.isError, true, path);
+  }
+  assert.ok(!readFileSync(join(dir, 'inbox', 'member', `${today} From Claude.md`), 'utf8').includes('Taken over'));
+  // inbox/ is searched, but not written up in the wiki as if the person's documents said it.
+  const { wikiDocuments } = await import('../src/plugins/knowledge/wiki.js');
+  assert.ok(!(await wikiDocuments(dir)).some((d) => d.id.startsWith('local:inbox/')));
   const viewer = await registry.call('save_note', { title: 'x', content: 'x' }, { ok: true, org_id: 'acme', role: 'viewer', email: 'v@acme.com' });
   assert.deepEqual([viewer.isError, (viewer.content[0] as unknown as { text: string }).text], [true, '[error] A viewer may not save notes.']);
 });
@@ -131,8 +153,13 @@ test('POST /inbox takes a note from a program with a key: a member, not a viewer
   assert.equal(bad.status, 400);
   const ok = await send(memberKey, note);
   assert.equal(ok.status, 201);
-  assert.deepEqual(await ok.json(), { saved: `inbox/aside/${today} Course page, week 4.md` });
-  assert.match(readFileSync(join(dir, 'inbox', 'aside', `${today} Course page, week 4.md`), 'utf8'), /from: "aside"\nsource: "https:\/\/school\.example\/course\/week-4"\n---/);
+  // The folder is who sent it (the key's owner); what the note says it is from is kept as `via`.
+  assert.deepEqual(await ok.json(), { saved: `inbox/member/${today} Course page, week 4.md` });
+  assert.match(readFileSync(join(dir, 'inbox', 'member', `${today} Course page, week 4.md`), 'utf8'), /from: "member"\nvia: "Aside"\nsource: "https:\/\/school\.example\/course\/week-4"\n---/);
+  // A failure on the server says nothing of where its files are.
+  const broken = await send(memberKey, { title: 'bad\u0000name', content: 'x' });
+  assert.equal(broken.status, 500);
+  assert.deepEqual(await broken.json(), { error: 'The note could not be saved on the server.' });
 });
 
 test('conversations are kept, picked up again with what was said, and removed', async () => {
@@ -167,8 +194,23 @@ test('conversations are kept, picked up again with what was said, and removed', 
   assert.deepEqual([h.history.length, h.left], [2, 2]);
   delete process.env.CHAT_HISTORY_CHARS;
 
-  assert.equal((await api('GET', '/chats/..%2F..%2Fetc')).status, 404);
+  // Marked as answering before this server started (a restart in the middle): it is not, and can be gone on with.
+  writeChat({ ...readChat(id)!, answering: true, updated: '2000-01-01T00:00:00.000Z' });
+  assert.equal((await api('GET', `/chats/${id}`)).json.answering, false);
+
+  // Deleted while an answer is written: it stays deleted.
+  slow.ms = 300;
+  const going = api('POST', '/chat', { message: 'Slowly', chatId: id });
+  await new Promise((r) => setTimeout(r, 100));
   assert.equal((await api('DELETE', `/chats/${id}`)).status, 200);
+  await going;
+  slow.ms = 0;
+  assert.equal((await api('GET', `/chats/${id}`)).status, 404);
+  const again = await ask({ message: 'A new one' });
+  const fresh = again[0].id as string;
+
+  assert.equal((await api('GET', '/chats/..%2F..%2Fetc')).status, 404);
+  assert.equal((await api('DELETE', `/chats/${fresh}`)).status, 200);
   assert.deepEqual((await api('GET', '/chats')).json.chats, []);
   assert.equal(readdirSync(join(dir, 'data', 'chats')).filter((f) => f.endsWith('.json')).length, 0);
 });

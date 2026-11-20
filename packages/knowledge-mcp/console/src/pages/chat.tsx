@@ -6,8 +6,9 @@
  * and the instructions this server gives every client. Each tool call and what it returned is shown as it happens.
  *
  * Conversations are kept on this machine by the server (admin/chats.ts): the question when it is sent, the answer
- * when it is done. Leaving the page does not stop an answer: it is written on, and is there when the conversation
- * is opened again. The address names the conversation (#/chat?c=<id>).
+ * when it is done. Going to another page of the console does not stop an answer: it is written on, and is there
+ * when the conversation is opened again. Closing or reloading the tab does stop it (the request ends), and what was
+ * written so far is kept. The address names the conversation (#/chat?c=<id>).
  *
  * Layout: the conversation, and below it a composer that stays at the bottom of the window. While an answer is
  * written the page follows it, unless the person scrolled up to read: then it stays where they are.
@@ -115,8 +116,11 @@ export function Chat() {
 
   useEffect(() => void call<{ tools: string[] }>('GET', '/chat').then((r) => setTools(r.tools), () => setTools([])), [state.tools.length]);
 
+  /** Which opening is the latest: an answer for one asked before it is dropped. */
+  const opening = useRef(0);
   const loadList = useCallback(() => call<{ chats: ChatSummary[] }>('GET', '/chats').then((r) => (setChats(r.chats), r.chats), () => [] as ChatSummary[]), []);
   const open = useCallback(async (id: string | null) => {
+    const mine = ++opening.current;
     setChatId(id);
     nameInAddress(id);
     if (!id) {
@@ -126,9 +130,11 @@ export function Chat() {
     }
     try {
       const c = await call<StoredChat>('GET', `/chats/${id}`);
+      if (mine !== opening.current) return;
       setTurns(c.turns.map(turnOf));
       setElsewhere(c.answering);
     } catch {
+      if (mine !== opening.current) return;
       setTurns([]);
       setElsewhere(false);
     }

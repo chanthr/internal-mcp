@@ -197,10 +197,14 @@ Markdown 파일로 저장되고, 다른 폴더처럼 검색되고 위키로 읽�
 | 폴더 | 들어가는 것 |
 | --- | --- |
 | `notes/` | 콘솔 채팅이 저장한 것. 직접 고쳐도 됩니다 |
-| `inbox/<보낸 곳>/` | 다른 AI 클라이언트(Claude, ChatGPT, Cursor)가 `save_note`로 저장한 것, 프로그램이 `POST /inbox`로 보낸 것 |
+| `inbox/<보낸 계정>/` | 다른 AI 클라이언트(Claude, ChatGPT, Cursor)가 `save_note`로 저장한 것, 프로그램이 `POST /inbox`로 보낸 것. 폴더는 노트가 스스로 밝힌 출처가 아니라, 보낸 키의 계정으로 정해집니다 |
 
-노트는 다른 파일을 덮어쓰지 않고, `save_note`가 바꿀 수 있는 것은 이 두 폴더의 노트뿐입니다. 사용자의 문서는 바뀌지
-않습니다. viewer는 저장할 수 없습니다. 채팅은 읽기 도구와 `save_note`만 씁니다.
+노트는 다른 파일을 덮어쓰지 않고, `save_note`가 바꿀 수 있는 것은 부른 쪽 자기 폴더의 노트뿐입니다. 사용자의 문서는
+바뀌지 않고, 링크를 따라 쓰지도 않습니다. 바뀐 노트의 이전 내용은 옆의 숨김 폴더 `.versions/`에 남습니다. viewer는
+저장할 수 없습니다. 채팅은 읽기 도구와 `save_note`만 씁니다. `inbox/`는 검색되지만 위키에는 넣지 않습니다. 다른
+프로그램이 보낸 내용을 사용자의 문서가 말한 것처럼 정리하지 않기 위해서입니다. 설정 폴더에 쓸 수 없으면(설정을 읽기
+전용으로 붙인 컨테이너) 두 폴더는 데이터 폴더에 둡니다. `notes`, `inbox`라는 이름은 이 폴더 몫이라, 같은 이름으로
+설정한 폴더에는 번호가 붙습니다(`notes-2`).
 
 MCP를 쓰지 않는 프로그램(브라우저 에이전트 Aside의 예약 루틴, 스크립트 등)은 member나 admin의 키로 보냅니다.
 
@@ -210,8 +214,8 @@ curl -X POST https://<내 주소>/inbox \
   -d '{"title": "강의 페이지 4주차", "content": "과제 2는 금요일까지.", "from": "aside", "url": "https://school.example/week-4"}'
 ```
 
-`201 {"saved": "inbox/aside/2026-11-20 강의 페이지 4주차.md"}`로 답합니다. 항목은 `title`, `content`(Markdown, 20만 자까지),
-그리고 선택으로 `from`(`inbox/` 아래 폴더 이름), `url`, `tags`입니다. Aside 루틴에서는 작업 끝에 이렇게 적습니다.
+`201 {"saved": "inbox/<보낸 계정>/2026-11-20 강의 페이지 4주차.md"}`로 답합니다. 항목은 `title`, `content`(Markdown,
+20만 자까지), 그리고 선택으로 `from`(노트에 `via`로 남음), `url`, `tags`입니다. Aside 루틴에서는 작업 끝에 이렇게 적습니다.
 *"찾은 내용을 Knowledge MCP로 보내. https://<내 주소>/inbox 에 Authorization: Bearer <키> 헤더를 붙여 POST하고,
 title, content(Markdown), from: "aside"를 JSON으로 보내."*
 
