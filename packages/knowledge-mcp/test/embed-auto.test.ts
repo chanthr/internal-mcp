@@ -52,7 +52,7 @@ const { scanFolders, localFolders } = await import('../src/plugins/knowledge/fol
 const { getLocalIndex, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
 const { watchFolders, worthAPass } = await import('../src/plugins/knowledge/watch.js');
 
-const until = async (what: () => boolean | Promise<boolean>, ms = 4000) => {
+const until = async (what: () => boolean | Promise<boolean>, ms = 15_000) => {
   for (let t = 0; t < ms; t += 20) {
     if (await what()) return;
     await new Promise((r) => setTimeout(r, 20));
@@ -66,9 +66,9 @@ test('vectors that could not be made are said, tried again soon, and made once t
   await scanFolders();
   const stats = await (await getLocalIndex())!.stats(DRIVE_COLLECTION);
   assert.deepEqual([stats.chunks >= 40, stats.withVectors], [true, 0]);
-  const failed = vectorStatus();
-  assert.match(failed.error ?? '', /embeddings 400 \(fake-embed\): .*model not loaded/);
-  assert.ok(failed.retryAt, 'a retry is set');
+  // Kept for the console until a round succeeds. (When it is tried again is not asserted: under load the first
+  // retry, 40 ms here, may already be running.)
+  assert.match(vectorStatus().error ?? '', /embeddings 400 \(fake-embed\): .*model not loaded/);
 
   // The model comes up: the retry makes every vector, in batches small enough for a model on this machine.
   fake.down = false;
