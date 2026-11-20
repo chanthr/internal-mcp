@@ -157,7 +157,9 @@ async function chatClaude(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
     if (message.stop_reason === 'max_tokens') return { model, usage, note: 'The answer was cut off at the length limit.' };
     if (uses.length === 0 && req.nudge && !nudged) {
       nudged = true;
-      messages.push({ role: 'assistant', content: message.content }, { role: 'user', content: req.nudge });
+      // An empty answer is not sent back as one (an assistant turn needs content): the reminder follows on its own.
+      if (message.content.length) messages.push({ role: 'assistant', content: message.content });
+      messages.push({ role: 'user', content: req.nudge });
       continue;
     }
     if (uses.length === 0) return { model, usage, note: null };
@@ -323,7 +325,9 @@ async function chatOpenai(s: LlmSettings, req: ChatRequest): Promise<ChatEnd> {
     if (finish === 'length') return { model, usage, note: 'The answer was cut off at the length limit.' };
     if (asked.length === 0 && req.nudge && !nudged) {
       nudged = true;
-      messages.push({ role: 'assistant', content: rest || null }, { role: 'user', content: req.nudge });
+      // Without tool calls an assistant turn needs text: an endpoint refuses null there (Ollama answers 400).
+      if (rest) messages.push({ role: 'assistant', content: rest });
+      messages.push({ role: 'user', content: req.nudge });
       continue;
     }
     if (asked.length === 0) return { model, usage, note: null };

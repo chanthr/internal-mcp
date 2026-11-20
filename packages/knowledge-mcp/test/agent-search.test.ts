@@ -149,6 +149,18 @@ test('a report of documents no search showed is refused, and an assistant that s
   assert.match(String(m.seen[3].messages.at(-1)?.content), /^Hand in your result with the report tool/);
 });
 
+test('a model that answers nothing is reminded without an empty turn', async () => {
+  const m = await model((b) => {
+    if (toolResults(b).length === 0 && !b.messages.some((x) => String(x.content ?? '').startsWith('Hand in'))) return { text: '' };
+    return { calls: [{ name: 'report', args: { documents: [] } }] };
+  });
+  const r = await asOwner(() => agentSearch('Where do production deploys come from?'));
+  assert.equal(m.seen.length, 2);
+  // The reminder follows the question directly: no assistant turn without content (Ollama refuses it).
+  assert.deepEqual(m.seen[1].messages.map((x) => [x.role, x.content === null ? null : typeof x.content]), [['system', 'string'], ['user', 'string'], ['user', 'string']]);
+  assert.equal(r.note, null);
+});
+
 test('a model that fails after it searched leaves what its searches found', async () => {
   await model((b) => (toolResults(b).length === 0 ? { calls: [{ name: 'search', args: { query: 'previous image registry' } }] } : { fail: true }));
   const r = await asOwner(() => agentSearch('What do we do when a release breaks?'));
