@@ -651,6 +651,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       if (!mustEdit(res)) return;
       const { on, perDay } = z.object({ on: z.boolean(), perDay: z.number().int().min(1).max(500).optional() }).strict().parse(req.body);
+      if (on && !wikiExists(settingsDir())) return refuse(res, 409, 'There is no wiki yet. Create it first.');
       const view = await setAuto(on, perDay, settingsDir());
       // Turned on: whatever came since the last pass is looked at now, not at the next pass.
       if (on) void maybeRunWiki(settingsDir()).catch(() => undefined);

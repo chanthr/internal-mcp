@@ -22,9 +22,10 @@
  * restarts in the middle (a watcher that restarts it on every change of the code does) loses nothing. Pages that
  * are in what is kept but not on disk are written again before every run (repairWiki), without asking the model.
  *
- * A model that fails for a while (a limit, a timeout, a provider that is down: LlmError with retry) is asked again
- * after a pause, twice. What still fails is kept with the reason; a document that failed three times is left for
- * the person (wiki_auto.ts does not try it again until it changes).
+ * A model that fails for a moment is asked again by ask() (core/llm.ts). What still fails is kept with the reason,
+ * and the run goes on with the next document; only a failure every call would hit (a refused key, no credit) stops
+ * it. A document that failed three times is left for the person (wiki_auto.ts does not try it again until it
+ * changes). A folder that cannot be listed whole right now does not count as gone: its pages stay.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -90,14 +91,32 @@ export const readWikiState = (): WikiState => stateFile.read() ?? { version: 1, 
 const nfc = (s: string): string => s.normalize('NFC');
 /** A title as a file name: what a file system or a [[link]] cannot hold is taken out. */
 export function pageName(title: string): string {
-  const name = nfc(title)
-    .replace(/[\\/:*?"<>|#^[\]]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/^\.+/, '')
-    .slice(0, 100)
-    .trim();
+  const name = cutBytes(
+    nfc(title)
+      .replace(/[\\/:*?"<>|#^[\]]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^\.+/, '')
+      .slice(0, 100),
+    PAGE_NAME_BYTES,
+  ).trim();
   return name || 'Untitled';
+}
+/**
+ * The most bytes of a page name: a file name is 255 bytes on Linux (the Docker image), and a Hangul character is 3
+ * of them, so 100 characters could not be written there. Room is left for " (2)" and ".md".
+ */
+const PAGE_NAME_BYTES = 180;
+/** The longest start of `s` that is at most `bytes` long in UTF-8, without cutting a character. */
+function cutBytes(s: string, bytes: number): string {
+  let out = '';
+  let n = 0;
+  for (const ch of s) {
+    n += Buffer.byteLength(ch);
+    if (n > bytes) break;
+    out += ch;
+  }
+  return out;
 }
 /** Two titles that differ only in case, spacing or a dash are one topic ("Client SDK", "client-sdk"). */
 export const topicKey = (title: string): string => pageName(title).toLowerCase().replace(/[-_\s]+/g, ' ').trim();
@@ -337,20 +356,36 @@ export function repairWiki(dir: string, state: WikiState = readWikiState()): num
   for (const [id, s] of Object.entries(state.sources)) if (!existsSync(join(root, 'sources', `${s.page}.md`))) touched.sources.add(id);
   for (const [key, t] of Object.entries(state.topics)) if (!existsSync(join(root, 'topics', `${pageName(t.title)}.md`))) touched.topics.add(key);
   const n = touched.sources.size + touched.topics.size;
-  if (n > 0) {
+  if (n === 0) return 0;
+  try {
     mkdirSync(join(root, 'sources'), { recursive: true });
     mkdirSync(join(root, 'topics'), { recursive: true });
-    writeWiki(dir, state, touched);
+  } catch {
+    return 0;
   }
-  return n;
+  return n - writeWiki(dir, state, touched);
 }
 
-/** Write every page from what is kept, and take away the pages of what is gone. */
-export function writeWiki(dir: string, state: WikiState, touched?: { sources: Set<string>; topics: Set<string> }): void {
+/**
+ * Write every page from what is kept, and take away the pages of what is gone. A page that cannot be written (a
+ * name the file system refuses, a folder that is read-only) is passed over and said on the server's log, so it
+ * does not keep every other page and every later run from being written. Returns how many could not be.
+ */
+export function writeWiki(dir: string, state: WikiState, touched?: { sources: Set<string>; topics: Set<string> }): number {
   const root = wikiDir(dir);
-  for (const [id, s] of Object.entries(state.sources)) if (!touched || touched.sources.has(id)) writePage(join(root, 'sources', `${s.page}.md`), sourceText(id, s, state));
-  for (const [key, t] of Object.entries(state.topics)) if (!touched || touched.topics.has(key)) writePage(join(root, 'topics', `${pageName(t.title)}.md`), topicText(key, t, state));
-  writeFileSync(join(root, 'index.md'), indexText(state));
+  let failed = 0;
+  const attempt = (path: string, body: () => string) => {
+    try {
+      writePage(path, body());
+    } catch (e) {
+      failed++;
+      console.error(`[knowledge] wiki: could not write ${path}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
+  for (const [id, s] of Object.entries(state.sources)) if (!touched || touched.sources.has(id)) attempt(join(root, 'sources', `${s.page}.md`), () => sourceText(id, s, state));
+  for (const [key, t] of Object.entries(state.topics)) if (!touched || touched.topics.has(key)) attempt(join(root, 'topics', `${pageName(t.title)}.md`), () => topicText(key, t, state));
+  attempt(join(root, 'index.md'), () => indexText(state));
+  return failed;
 }
 
 // ── Reading ──
@@ -462,23 +497,38 @@ export interface WikiDoc extends LocalFile {
 }
 /** Every document in the folders of this server, except the wiki's own. */
 export async function wikiDocuments(dir: string): Promise<WikiDoc[]> {
+  return (await wikiListing(dir)).docs;
+}
+/**
+ * The documents, and the folders that could not be listed whole right now (unreadable, not mounted, more files
+ * than are listed): what was read from those is not gone, only not seen.
+ */
+export async function wikiListing(dir: string): Promise<{ docs: WikiDoc[]; unsure: string[] }> {
   const own = wikiDir(dir);
-  const out: WikiDoc[] = [];
+  const docs: WikiDoc[] = [];
+  const unsure: string[] = [];
   for (const folder of localFolders()) {
     if (resolve(folder.path) === own) continue;
     try {
-      for (const file of (await listLocalFiles(folder)).files) out.push({ ...file, folder: folder.name });
+      const listed = await listLocalFiles(folder);
+      for (const file of listed.files) docs.push({ ...file, folder: folder.name });
+      if (listed.truncated) unsure.push(folder.name);
     } catch {
-      /* a folder that cannot be read now is read another time */
+      // A folder that cannot be read now is read another time.
+      unsure.push(folder.name);
     }
   }
-  return out;
+  return { docs, unsure };
 }
 
-/** Which documents are new or changed since they were read, and which that were read are gone. */
-export function wikiWaiting(docs: WikiDoc[], state: WikiState): { toRead: WikiDoc[]; gone: string[] } {
+/**
+ * Which documents are new or changed since they were read, and which that were read are gone. A document of a
+ * folder that was not listed whole (`unsure`) is not gone.
+ */
+export function wikiWaiting(docs: WikiDoc[], state: WikiState, unsure: string[] = []): { toRead: WikiDoc[]; gone: string[] } {
   const here = new Set(docs.map((d) => d.id));
-  return { toRead: docs.filter((d) => state.sources[d.id]?.modified !== d.modifiedTime), gone: Object.keys(state.sources).filter((id) => !here.has(id)) };
+  const maybe = (id: string) => unsure.some((name) => id.startsWith(`local:${name}/`));
+  return { toRead: docs.filter((d) => state.sources[d.id]?.modified !== d.modifiedTime), gone: Object.keys(state.sources).filter((id) => !here.has(id) && !maybe(id)) };
 }
 
 // ── A run ──
@@ -502,6 +552,8 @@ export interface WikiRun {
   auto: boolean;
   /** Pages that were in what is kept but missing on disk, written again before reading. */
   repaired: number;
+  /** Documents it began to read: what it cost, whether or not they were read. */
+  attempted: number;
 }
 let run: (WikiRun & { abort: AbortController }) | null = null;
 export const wikiRun = (): WikiRun | null => {
@@ -515,17 +567,6 @@ export function stopWikiRun(): void {
     run.abort.abort();
   }
 }
-
-/** Pauses before a document is asked for again after a passing failure (ms). Shorter in tests. */
-const retryPauses = (): number[] => {
-  const base = Number(process.env.WIKI_RETRY_MS) || 5_000;
-  return [base, base * 4];
-};
-const pause = (ms: number, signal: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
-  });
 
 /**
  * Read up to `limit` documents that are new or changed, write their pages, and write the opening of the topic
@@ -552,6 +593,7 @@ export function startWikiRun(
     finishedAt: null,
     auto: !!opts.auto,
     repaired: 0,
+    attempted: 0,
     abort,
   };
   run = mine;
@@ -561,7 +603,8 @@ export function startWikiRun(
     mine.repaired = repairWiki(dir, state);
     const rules = readFileSync(join(root, 'AGENTS.md'), 'utf8');
     const limits = wikiLimits();
-    const { toRead, gone } = wikiWaiting(await wikiDocuments(dir), state);
+    const listing = await wikiListing(dir);
+    const { toRead, gone } = wikiWaiting(listing.docs, state, listing.unsure);
     const touched = { sources: new Set<string>(), topics: new Set<string>() };
     // One line per document, written as it is read. Lines of the log follow each other; the first after the head
     // of the file has a blank line before it.
@@ -587,24 +630,13 @@ export function startWikiRun(
     for (const doc of batch) {
       if (abort.signal.aborted) break;
       mine.current = doc.path;
+      mine.attempted++;
       try {
         const { text, needsOcr } = await extractLocalFile(doc.abs, doc.mimeType);
         if (needsOcr || !text.trim()) throw new LlmError('There is no text in it to read.');
         const known = Object.values(state.topics).map((t) => t.title);
-        // A failure that passes (a limit, a timeout) is waited out and asked again, twice.
-        let got: Awaited<ReturnType<typeof readDocument>> | null = null;
-        for (const wait of [0, ...retryPauses()]) {
-          if (wait) await pause(wait, abort.signal);
-          if (abort.signal.aborted) break;
-          try {
-            got = await readDocument(doc.path, text, rules, known, limits, mine.usage, abort.signal);
-            break;
-          } catch (e) {
-            if (!(e instanceof LlmError && e.retry) || wait === retryPauses().at(-1)) throw e;
-          }
-        }
-        if (!got) break;
-        const { read, partial } = got;
+        // A model that fails for a moment was asked again already (ask() in core/llm.ts).
+        const { read, partial } = await readDocument(doc.path, text, rules, known, limits, mine.usage, abort.signal);
         // This document's pages are written now: the topics it fed before and the ones it feeds now.
         const mineTopics = new Set<string>();
         forget(state, doc.id, mineTopics);
@@ -621,6 +653,12 @@ export function startWikiRun(
         }
         state.sources[doc.id] = { modified: doc.modifiedTime, title: oneLine(read.title) || doc.name, page: sourcePage(doc.path), summary: read.summary, points: read.points, topics: [...new Set(keys)], ...(partial ? { partial: true } : {}) };
         delete state.failed?.[doc.id];
+        // An opening written from facts that have just changed is not shown as if it still held: it is written
+        // again at the end of the run, and a run cut short leaves none rather than a wrong one.
+        for (const key of mineTopics) {
+          const t = state.topics[key];
+          if (t?.summary && t.summaryOf !== factsMark(t)) delete t.summary;
+        }
         touched.sources.add(doc.id);
         for (const key of mineTopics) touched.topics.add(key);
         stateFile.write(state);
@@ -635,8 +673,9 @@ export function startWikiRun(
         const was = state.failed?.[doc.id];
         state.failed = { ...state.failed, [doc.id]: { modified: doc.modifiedTime, why: why.slice(0, 300), tries: was && was.modified === doc.modifiedTime ? was.tries + 1 : 1, at: new Date().toISOString() } };
         stateFile.write(state);
-        // The key, the model, the credit: the next document would fail the same way. Stop and say why.
-        if (e instanceof LlmError && !/no text in it|shape asked for|declined/.test(why)) {
+        // The key, the model, the credit: the next document would fail the same way. Stop and say why. A failure
+        // that passes (a limit, a timeout) was asked again already; this document waits, the next is tried.
+        if (e instanceof LlmError && !e.retry && !/no text in it|shape asked for|declined/.test(why)) {
           mine.stopped = why;
           break;
         }
@@ -716,10 +755,12 @@ export async function wikiStatus(dir: string): Promise<{
   run: WikiRun | null;
   failed: Array<{ document: string; why: string; tries: number; at: string }>;
 }> {
-  const state = readWikiState();
   const exists = wikiExists(dir);
-  const docs = exists ? await wikiDocuments(dir) : [];
-  const { toRead, gone } = exists ? wikiWaiting(docs, state) : { toRead: [], gone: [] };
+  const listing = exists ? await wikiListing(dir) : { docs: [], unsure: [] };
+  // Read after the listing: a run that ended meanwhile has its last failures in it.
+  const state = readWikiState();
+  const docs = listing.docs;
+  const { toRead, gone } = exists ? wikiWaiting(docs, state, listing.unsure) : { toRead: [], gone: [] };
   // Only failures of documents that are still there and still as they were when they failed.
   const now = new Map(docs.map((d) => [d.id, d.modifiedTime]));
   const failed = Object.entries(state.failed ?? {})

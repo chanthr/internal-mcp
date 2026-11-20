@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -131,6 +131,10 @@ test('what the model answers is read whatever it is wrapped in', () => {
 });
 
 test('the wiki is made as a folder of this server, and read into only with a model connected', async () => {
+  // Keeping it up to date needs a wiki first: what waits is known only then.
+  assert.equal((await api('POST', '/wiki/auto', { on: true })).status, 409);
+  // A page name fits a Linux file name (255 bytes) even in Hangul, where each character is three bytes.
+  assert.ok(Buffer.byteLength(pageName('가'.repeat(150))) <= 180);
   assert.deepEqual((await api('GET', '/wiki')).json, { exists: false, path: wiki, documents: 0, topics: 0, waiting: 0, gone: 0, run: null, model: false, failed: [], auto: { on: false, since: null, perDay: 50, readToday: 0, backlog: 0, pausedUntil: null, last: null } });
   assert.equal((await api('POST', '/wiki/run', {})).status, 409);
 
@@ -271,8 +275,8 @@ test('pages that were read but never written are written again, without asking t
   assert.ok(model.calls.slice(asked).every((c) => c.prompt.includes('BROKEN')), 'no page was written by asking the model');
 });
 
-test('a provider that is busy is waited out, and a document that keeps failing is kept with why', async () => {
-  Object.assign(process.env, { WIKI_RETRY_MS: '5', LLM_RETRY_MS: '5' });
+test('a provider that is busy is asked again, and a document that keeps failing is kept with why', async () => {
+  Object.assign(process.env, { LLM_RETRY_MS: '5' });
   put('d.md', '# D\n\nDelta: Four.\n', new Date('2026-03-04T00:00:00Z'));
   // Busy once: the document it was asking about is asked for again after a pause.
   model.failNext = 1;
@@ -284,14 +288,12 @@ test('a provider that is busy is waited out, and a document that keeps failing i
   const broken = r.failed.find((f: any) => f.document === 'docs/z-broken.md');
   assert.ok(broken && /shape asked for/.test(broken.why) && broken.tries >= 2, JSON.stringify(r.failed));
 
-  // Busy every time: the request is retried twice, the document asked for three times, then the run stops and says why.
+  // Busy every time it is asked about one document: that one waits with why, and the run goes on with the next.
   put('e.md', '# E\n\nEpsilon: Five.\n', new Date('2026-03-05T00:00:00Z'));
-  model.failNext = 9;
+  model.failNext = 3;
   const busy = await runWiki({});
-  assert.match(busy.run.stopped ?? '', /answered 503: overloaded/);
-  assert.equal(model.failNext, 0);
-  assert.ok(busy.failed.some((f: any) => /503/.test(f.why)), JSON.stringify(busy.failed));
-  delete process.env.WIKI_RETRY_MS;
+  assert.deepEqual([busy.run.stopped, model.failNext, busy.run.attempted], [null, 0, 2], JSON.stringify(busy.run));
+  assert.ok(busy.failed.some((f: any) => f.document === 'docs/e.md' && /503/.test(f.why)), JSON.stringify(busy.failed));
   delete process.env.LLM_RETRY_MS;
 });
 
@@ -333,4 +335,59 @@ test('kept up to date: what comes after it is turned on is read by itself, up to
   const off = await api('POST', '/wiki/auto', { on: false });
   assert.deepEqual([off.json.on, off.json.backlog, off.json.pausedUntil], [false, 0, null]);
   assert.equal(await maybeRunWiki(dir), null);
+});
+
+test('Stop means stop, off stops what it started, an unreadable folder keeps its pages, and failures count toward the day', async () => {
+  connect();
+  const startAuto = async (perDay: number) => {
+    await api('POST', '/wiki/auto', { on: false });
+    assert.equal((await api('POST', '/wiki/auto', { on: true, perDay })).status, 200);
+    await new Promise((r) => setTimeout(r, 50));
+    await settled();
+  };
+  // Pressed Stop while it reads by itself: it does not start again at the next scan.
+  await startAuto(50);
+  model.delay = 120;
+  for (const n of [1, 2, 3]) put(`s${n}.md`, `# S${n}\n\nSigma ${n}: Fact ${n}.\n`, new Date(`2026-04-0${n}T00:00:00Z`));
+  assert.ok(await maybeRunWiki(dir));
+  await new Promise((r) => setTimeout(r, 60));
+  await api('POST', '/wiki/stop');
+  const stopped = await settled();
+  model.delay = 0;
+  assert.match(stopped.run.stopped, /^Stopped\./);
+  assert.ok(stopped.auto.pausedUntil, 'paused after Stop');
+  assert.equal(await maybeRunWiki(dir), null);
+
+  // Turned off while it reads: what it started stops.
+  await startAuto(50);
+  model.delay = 120;
+  put('s4.md', '# S4\n\nSigma 4: Fact 4.\n', new Date('2026-04-04T00:00:00Z'));
+  assert.ok(await maybeRunWiki(dir));
+  await new Promise((r) => setTimeout(r, 30));
+  await api('POST', '/wiki/auto', { on: false });
+  const off = await settled();
+  model.delay = 0;
+  assert.match(off.run.stopped, /^Stopped\./);
+
+  // A folder that cannot be listed right now: what was read from it is not gone.
+  const pages = readdirSync(join(wiki, 'sources')).length;
+  chmodSync(docs, 0o000);
+  try {
+    const r = await runWiki({});
+    assert.equal(r.gone, 0);
+    assert.equal(readdirSync(join(wiki, 'sources')).length, pages);
+  } finally {
+    chmodSync(docs, 0o755);
+  }
+
+  // Two new documents the model cannot read, one slot left today: both are counted, read or not.
+  const before = (await api('GET', '/wiki')).json.auto.readToday;
+  await startAuto(before + 2);
+  put('t1.md', '# T1\n\nBROKEN\n', new Date('2026-04-11T00:00:00Z'));
+  put('t2.md', '# T2\n\nBROKEN\n', new Date('2026-04-12T00:00:00Z'));
+  assert.ok(await maybeRunWiki(dir));
+  const counted = await settled();
+  assert.deepEqual([counted.run.attempted, counted.auto.readToday], [2, before + 2], JSON.stringify(counted.auto));
+  assert.equal(await maybeRunWiki(dir), null, 'no room left today');
+  await api('POST', '/wiki/auto', { on: false });
 });

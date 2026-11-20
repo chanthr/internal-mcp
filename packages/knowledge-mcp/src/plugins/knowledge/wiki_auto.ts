@@ -6,9 +6,11 @@
  * costs (the usage of a plan, or an API's money): the person reads those with the button, in batches whose cost
  * they see. A waiting document that changes later counts as changed and is read.
  *
- * A document that failed MOST_TRIES times is left until it changes (the button still reads it). A run that stopped
- * on something every further call would hit too (a limit, a refused key) pauses this for an hour, so a model that
- * is out of usage is not asked again every few minutes.
+ * A document that failed MOST_TRIES times is left until it changes (the button still reads it). Every document a
+ * run begins counts toward the day, read or not: a run's share is counted when it starts, so a restart in the
+ * middle cannot hand out more. A run that stopped, whether on something every further call would hit (a limit, a
+ * refused key) or because the person pressed Stop, pauses this for an hour: Stop means stop, not "start again at
+ * the next scan". Turning it off stops a run it started.
  *
  * Kept in the data directory (wiki-auto.json), not in .env: it is switched on the Wiki page and takes effect at
  * once, and the waiting list is state, not a setting.
@@ -17,7 +19,7 @@ import { dataFile } from '../../core/data_file.js';
 import { settingsDir } from '../../core/config.js';
 import { llmConfigured } from '../../core/llm.js';
 import { scanFoldersSoon } from './folders.js';
-import { MOST_TRIES, readWikiState, startWikiRun, wikiDocuments, wikiExists, wikiRun, wikiWaiting, type WikiDoc, type WikiRun, type WikiState } from './wiki.js';
+import { MOST_TRIES, readWikiState, startWikiRun, stopWikiRun, wikiExists, wikiListing, wikiRun, wikiWaiting, type WikiDoc, type WikiRun, type WikiState } from './wiki.js';
 
 interface AutoState {
   on: boolean;
@@ -76,8 +78,11 @@ const due = (s: AutoState) => (d: WikiDoc, state: WikiState) => {
 /** Turn it on (what waits now is left for the button) or off. */
 export async function setAuto(on: boolean, perDay?: number, dir: string = settingsDir()): Promise<AutoView> {
   const s = read();
+  // What waits is known only once there is a wiki: turned on before, everything would count as new.
+  if (on && !wikiExists(dir)) throw new Error('There is no wiki yet. Create it first.');
   if (on && !s.on) {
-    const { toRead } = wikiExists(dir) ? wikiWaiting(await wikiDocuments(dir), readWikiState()) : { toRead: [] };
+    const listing = await wikiListing(dir);
+    const { toRead } = wikiWaiting(listing.docs, readWikiState(), listing.unsure);
     s.backlog = Object.fromEntries(toRead.map((d) => [d.id, d.modifiedTime]));
     s.since = new Date().toISOString();
     s.pausedUntil = null;
@@ -86,6 +91,7 @@ export async function setAuto(on: boolean, perDay?: number, dir: string = settin
     s.backlog = {};
     s.since = null;
     s.pausedUntil = null;
+    if (wikiRun()?.running && wikiRun()?.auto) stopWikiRun();
   }
   s.on = on;
   if (perDay) s.perDay = perDay;
@@ -99,8 +105,12 @@ export async function setAuto(on: boolean, perDay?: number, dir: string = settin
  */
 export async function maybeRunWiki(dir: string = settingsDir(), log: (...a: unknown[]) => void = () => {}): Promise<WikiRun | null> {
   const s = read();
-  if (!s.on || !wikiExists(dir) || !llmConfigured() || wikiRun()?.running) return null;
+  const last = wikiRun();
+  if (!s.on || !wikiExists(dir) || !llmConfigured() || last?.running) return null;
   if (s.pausedUntil && Date.parse(s.pausedUntil) > Date.now()) return null;
+  // The person stopped a run (theirs or this one's) a while ago: not started again behind their back, unless they
+  // turned this on again since.
+  if (last?.stopped?.startsWith('Stopped.') && last.finishedAt && Date.now() - Date.parse(last.finishedAt) < PAUSE_MS && Date.parse(last.finishedAt) > Date.parse(s.since ?? '')) return null;
   if (s.day !== today()) {
     s.day = today();
     s.readToday = 0;
@@ -108,13 +118,20 @@ export async function maybeRunWiki(dir: string = settingsDir(), log: (...a: unkn
   }
   const room = s.perDay - s.readToday;
   if (room <= 0) return null;
+  const listing = await wikiListing(dir);
   const state = readWikiState();
   const pick = due(s);
-  const ready = wikiWaiting(await wikiDocuments(dir), state).toRead.filter((d) => pick(d, state));
-  if (ready.length === 0) return null;
-  log(`wiki: reading ${Math.min(ready.length, room, AT_ONCE)} new or changed document(s)`);
+  const ready = wikiWaiting(listing.docs, state, listing.unsure).toRead.filter((d) => pick(d, state));
+  if (ready.length === 0 || wikiRun()?.running) return null;
+  const share = Math.min(room, AT_ONCE, ready.length);
+  // Counted now, and set right when the run ends: a run cut short by a restart cannot hand out more than its share.
+  s.readToday += share;
+  file.write(s);
+  log(`wiki: reading ${share} new or changed document(s)`);
   return startWikiRun(dir, {
-    limit: Math.min(room, AT_ONCE),
+    limit: share,
+    // Topic openings cost a question each: no more of them than documents.
+    summaries: share,
     only: pick,
     auto: true,
     // The pages go into the index; the pass that does it starts the next run while documents wait.
@@ -122,14 +139,11 @@ export async function maybeRunWiki(dir: string = settingsDir(), log: (...a: unkn
     onEnd: (r) => {
       const now = read();
       const read_ = Math.max(0, r.done - r.failed.filter((f) => !f.document.startsWith('topic: ')).length);
-      if (now.day !== today()) {
-        now.day = today();
-        now.readToday = 0;
-      }
-      now.readToday += read_;
+      // The share counted at the start becomes what was begun, read or failed.
+      if (now.day === today()) now.readToday = Math.max(0, now.readToday - share + r.attempted);
       now.last = { at: r.finishedAt ?? new Date().toISOString(), read: read_, failed: r.failed.length, stopped: r.stopped };
-      // Stopped on something every call would hit (not by the person): wait before asking again.
-      if (r.stopped && !/^Stopped\./.test(r.stopped)) now.pausedUntil = new Date(Date.now() + PAUSE_MS).toISOString();
+      // Stopped, by the person or by something every call would hit: wait before reading by itself again.
+      if (r.stopped) now.pausedUntil = new Date(Date.now() + PAUSE_MS).toISOString();
       file.write(now);
       if (r.stopped) log(`wiki: stopped: ${r.stopped}`);
     },
