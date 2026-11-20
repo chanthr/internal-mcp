@@ -331,6 +331,23 @@ export const reach: { health: (hostname: string) => Promise<string | null> } = {
   },
 };
 
+/**
+ * How many connectors run a tunnel right now, as Cloudflare lists them (tunnel info). 0 when none, and when the list
+ * cannot be read: the key fetch that follows says what is wrong then.
+ */
+async function connectorsOf(exec: Exec, name: string): Promise<number> {
+  const r = await exec('cloudflared', ['tunnel', ...own(), 'info', '--output', 'json', name]);
+  if (r.status !== 0) return 0;
+  try {
+    // cloudflared's Info: `conns` are the connectors, each with its own `conns` to Cloudflare. A connector counts when
+    // one of them is up (not waiting to reconnect); one whose connections are not listed counts too.
+    const info = JSON.parse(r.stdout) as { conns?: Array<{ conns?: Array<{ is_pending_reconnect?: boolean }> | null }> | null };
+    return (info.conns ?? []).filter((c) => !Array.isArray(c.conns) || c.conns.some((x) => !x.is_pending_reconnect)).length;
+  } catch {
+    return 0;
+  }
+}
+
 /** Is the address answering yet? Asked a few times: a new record takes a moment to be served. */
 async function answers(hostname: string, ms: number): Promise<string | null> {
   const end = Date.now() + ms;
@@ -346,7 +363,9 @@ async function answers(hostname: string, ms: number): Promise<string | null> {
 /**
  * An address of the person's own. Checks the address against the sign-in first, makes the tunnel in their account
  * (once per address and account), points the address at it, starts it, and says whether it answers from outside.
- * A DNS record that already exists under that name is not written over: the person is told.
+ * A tunnel of that name made before (by another copy of this server, or an earlier version) is taken over: its key
+ * is fetched from Cloudflare, unless it is running somewhere right now. A DNS record that already exists under that
+ * name for something else is not written over: the person is told.
  */
 export async function startNamedTunnel(port: number, rawHostname: string, exec: Exec = backgroundExec, opts: { waitMs?: number } = {}): Promise<TunnelView> {
   if (!cloudflaredSignedIn()) throw new Error('This server is not signed in to Cloudflare yet. Sign in first, and pick the domain of the address.');
@@ -372,8 +391,17 @@ export async function startNamedTunnel(port: number, rawHostname: string, exec: 
     rmSync(pending, { force: true });
     const made = await exec('cloudflared', ['tunnel', ...own(), 'create', '--credentials-file', pending, name]);
     if (made.status !== 0) {
-      if (/already exists/i.test(`${made.stderr}${made.stdout}`)) throw new Error(`Your Cloudflare account already has a tunnel named ${name}, made elsewhere. Delete it in the Cloudflare dashboard (Networks, Tunnels), or choose another address.`);
-      throw new Error(`Cloudflare did not make the tunnel (${said(made)}).`);
+      if (!/already exists/i.test(`${made.stderr}${made.stdout}`)) throw new Error(`Cloudflare did not make the tunnel (${said(made)}).`);
+      // Made before, for this address: used again. Two computers on one tunnel would share its requests between
+      // two servers, so one that is running somewhere now is left to the person to stop first.
+      const running = await connectorsOf(exec, name);
+      if (running > 0) {
+        throw new Error(`The tunnel ${name} for this address is running somewhere else now (${running} connector${running === 1 ? '' : 's'}). Stop cloudflared there, then try again here: two computers on one tunnel would split its requests.`);
+      }
+      const fetched = await exec('cloudflared', ['tunnel', ...own(), 'token', '--cred-file', pending, name]);
+      if (fetched.status !== 0 || !existsSync(pending)) {
+        throw new Error(`Your Cloudflare account has a tunnel named ${name} already, and its key could not be fetched (${said(fetched)}). Delete it in the Cloudflare dashboard (Networks, Tunnels), or choose another address.`);
+      }
     }
     try {
       id = String((JSON.parse(readFileSync(pending, 'utf8')) as { TunnelID?: string }).TunnelID ?? '');

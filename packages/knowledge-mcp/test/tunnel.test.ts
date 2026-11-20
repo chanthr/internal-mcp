@@ -19,6 +19,7 @@ const bin = join(dir, 'bin');
 mkdirSync(bin);
 const calls = join(bin, 'calls');
 const ID = '11111111-2222-3333-4444-555555555555';
+const ID2 = '66666666-7777-8888-9999-000000000000';
 const ZONE = 'example.com';
 // What `cloudflared tunnel login` stores: a JSON token in a PEM block, as the real one does.
 const cert = (zone: string) => `-----BEGIN ARGO TUNNEL TOKEN-----\n${Buffer.from(JSON.stringify({ zoneID: `zone-${zone}`, accountID: 'acct-1', apiToken: 'cf-token-test' })).toString('base64')}\n-----END ARGO TUNNEL TOKEN-----\n`;
@@ -42,6 +43,8 @@ writeFileSync(
     '    echo "2026-01-01T00:00:01Z INF |  https://calm-river-demo.trycloudflare.com  |" >&2; while true; do sleep 1; done;;',
     '  *" create --credentials-file "*) [ -f "$here/name-taken" ] && { echo "failed to create tunnel: tunnel with name already exists" >&2; exit 1; }',
     `    for a in "$@"; do prev2="$prev"; prev="$a"; [ "$prev2" = "--credentials-file" ] && echo '{"AccountTag":"acct-1","TunnelSecret":"s","TunnelID":"${ID}"}' > "$a"; done; echo "Created tunnel";;`,
+    '  *" info --output json "*) if [ -f "$here/tunnel-busy" ]; then echo \'{"id":"t","name":"n","conns":[{"id":"c1","conns":[{"colo_name":"icn01"}]}]}\'; else echo \'{"id":"t","name":"n","conns":[]}\'; fi;;',
+    `  *" token --cred-file "*) for a in "$@"; do prev2="$prev"; prev="$a"; [ "$prev2" = "--cred-file" ] && echo '{"AccountTag":"acct-1","TunnelSecret":"s2","TunnelID":"${ID2}"}' > "$a"; done; echo "Token written";;`,
     '  *" route dns "*) [ -f "$here/dns-taken" ] && { echo "Failed to add route: code: 1003, reason: An A, AAAA, or CNAME record with that host already exists." >&2; exit 1; }',
     '    for a in "$@"; do last="$a"; done',
     '    case "$last" in *".$zone") name="$last";; *) name="$last.$zone";; esac',
@@ -231,6 +234,33 @@ test('an address of one\'s own: the server signs in for itself, checks the domai
   await api('DELETE', '/tunnel');
   await resumeTunnel(server.port);
   assert.equal((await tunnelView()).running, false);
+});
+
+test('a tunnel made before for the address is taken over, unless it runs somewhere now', async () => {
+  writeFileSync(join(bin, 'name-taken'), '');
+  try {
+    // Running on another computer: not joined, and the person is told why.
+    writeFileSync(join(bin, 'tunnel-busy'), '');
+    const busy = await api('POST', '/tunnel', { mode: 'named', hostname: 'docs.example.com' });
+    assert.deepEqual([busy.status, /running somewhere else now \(1 connector\)\. Stop cloudflared there/.test(busy.json.error)], [422, true], busy.text);
+    assert.ok(!said().some((l) => l.includes(' token ')), 'no key is fetched for a tunnel in use');
+    rmSync(join(bin, 'tunnel-busy'));
+
+    // Not running: its key is fetched from Cloudflare into this server's data, and it is run here.
+    const on = await api('POST', '/tunnel', { mode: 'named', hostname: 'docs.example.com' });
+    assert.deepEqual([on.status, on.json.running, on.json.url], [200, true, 'https://docs.example.com'], on.text);
+    const own = `--origincert ${certPath()} --config ${config}`;
+    const lines = said();
+    assert.ok(lines.some((l) => l.startsWith(`tunnel ${own} info --output json knowledge-mcp-docs-example-com`)), lines.join('\n'));
+    assert.ok(lines.some((l) => l.startsWith(`tunnel ${own} token --cred-file `) && l.endsWith(' knowledge-mcp-docs-example-com')), lines.join('\n'));
+    assert.ok(lines.includes(`tunnel ${own} route dns ${ID2} docs.example.com`), lines.join('\n'));
+    assert.ok(existsSync(join(data, `cloudflared-${ID2}.json`)));
+    assert.match(readFileSync(config, 'utf8'), new RegExp(`tunnel: ${ID2}\\n`));
+    await api('DELETE', '/tunnel');
+  } finally {
+    rmSync(join(bin, 'name-taken'), { force: true });
+    rmSync(join(bin, 'tunnel-busy'), { force: true });
+  }
 });
 
 test('a sign-in whose domain Cloudflare does not say: the record cloudflared reports is checked, and a wrong one is named', async () => {
