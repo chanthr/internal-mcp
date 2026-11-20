@@ -58,6 +58,21 @@ async function loadFont(f: FontFile, loaded: Set<string>): Promise<void> {
   loaded.add(f.family);
 }
 
+/**
+ * Print the open note alone: the elements that hold it are marked, and the print style takes everything else out of
+ * the page (not only out of sight, so nothing after the note becomes blank pages).
+ */
+function printNote() {
+  const note = document.querySelector('.note-print');
+  const marked: Element[] = [];
+  for (let at = note?.parentElement; at && at !== document.body; at = at.parentElement) {
+    at.classList.add('print-path');
+    marked.push(at);
+  }
+  window.print();
+  for (const el of marked) el.classList.remove('print-path');
+}
+
 export function Notes() {
   const { state } = useServer();
   const [notes, setNotes] = useState<NoteEntry[] | null>(null);
@@ -115,7 +130,7 @@ export function Notes() {
                   options={[{ value: 'system', label: 'The console font' }, ...fonts.map((f) => ({ value: f.family, label: f.family }))]}
                 />
               </div>
-              <Button size="sm" variant="secondary" onClick={() => window.print()}>Print or save as PDF</Button>
+              <Button size="sm" variant="secondary" onClick={printNote}>Print or save as PDF</Button>
               <Button size="sm" variant="ghost" onClick={() => setOpen(null)}>Close</Button>
             </div>
           }

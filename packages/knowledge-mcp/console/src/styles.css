@@ -293,17 +293,33 @@ p { margin: 0; }
   overflow: auto;
 }
 @media print {
+  /* Everything but the note and what holds it is out of the page (printNote marks what holds it). */
   body * {
-    visibility: hidden !important;
+    display: none !important;
   }
+  .print-path,
   .note-print,
   .note-print * {
-    visibility: visible !important;
+    display: revert !important;
   }
-  .note-print {
-    position: absolute;
-    inset: 0 auto auto 0;
-    width: 100%;
-    padding: 0;
+  html,
+  body,
+  .print-path {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    max-width: none !important;
+    min-height: 0 !important;
+    height: auto !important;
+    background: #fff !important;
+  }
+  /* Code and tables are printed whole, not cut at a scroll box. */
+  .note-print * {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .note-print pre {
+    white-space: pre-wrap !important;
   }
 }

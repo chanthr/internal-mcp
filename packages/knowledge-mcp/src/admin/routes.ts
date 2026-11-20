@@ -11,7 +11,7 @@
  *
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
-import { createSkill, installFromFolder, installFromGithub, listSkills, readSkill, removeSkill } from '../plugins/knowledge/skills.js';
+import { createSkill, installFromFolder, installFromGithub, listSkills, oneLine as skillLine, readSkill, removeSkill } from '../plugins/knowledge/skills.js';
 import { INBOX, listNotes, NOTES, readNote } from '../plugins/knowledge/notes.js';
 import { listFonts, MAX_FONT_BYTES, readFont, removeFont, saveFont } from './fonts.js';
 import { deleteChat, historyOf, listChats, newChat, readChat, writeChat, type StoredTurn } from './chats.js';
@@ -1364,9 +1364,13 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> }));
   /** The skills there are, by name and what each is for: the model reads one with use_skill when a task calls for it. */
   const skillsLine = (): string => {
+    // One short line each, and not more than SKILL_LINES of them: a skill costs little until it is read.
     const skills = listSkills();
-    return skills.length ? `\n\nSkills installed here (read one with use_skill when the task is the kind it is for):\n${skills.map((s) => `- ${s.name}: ${s.description}`).join('\n')}` : '';
+    const shown = skills.slice(0, SKILL_LINES).map((s) => `- ${s.name}: ${skillLine(s.description, 200)}`);
+    const more = skills.length > SKILL_LINES ? `\n(${skills.length - SKILL_LINES} more: use_skill without a name lists them all.)` : '';
+    return skills.length ? `\n\nSkills installed here (read one with use_skill when the task is the kind it is for):\n${shown.join('\n')}${more}` : '';
   };
+  const SKILL_LINES = 50;
   const CHAT_RULES = [
     'You are answering in the console of this MCP server, where its owner tries how its tools work for an AI assistant.',
     'Use the tools to find the answer, as an assistant connected to this server would. Say which documents or sources the answer comes from.',

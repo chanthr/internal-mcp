@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 import { defineTool } from '../../../plugin/define.js';
-import { listSkills, readSkill } from '../skills.js';
+import { listSkills, oneLine, readSkill } from '../skills.js';
 
 const DESCRIPTION =
   'Read a skill: instructions installed on this server for a kind of task (a note format, a report, a way of studying). ' +
@@ -28,7 +28,7 @@ export const useSkillTool = defineTool({
     try {
       if (!args.name) {
         const skills = listSkills();
-        return { content: [{ type: 'text' as const, text: `${skills.length} skill${skills.length === 1 ? '' : 's'}:\n${skills.map((s) => `- ${s.name}: ${s.description}`).join('\n')}` }] };
+        return { content: [{ type: 'text' as const, text: `${skills.length} skill${skills.length === 1 ? '' : 's'}:\n${skills.map((s) => `- ${s.name}: ${oneLine(s.description, 300)}`).join('\n')}` }] };
       }
       const skill = listSkills().find((s) => s.name === args.name);
       const text = readSkill(args.name, args.file);
