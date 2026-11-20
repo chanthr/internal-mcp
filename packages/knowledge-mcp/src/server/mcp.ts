@@ -26,7 +26,7 @@ export function createMcpServer(registry: Registry): Server {
     return { tools: tools.filter((t) => isToolAllowed(auth, t.name, registry.groupOf(t.name))) };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
     const t0 = Date.now();
     const auth = getAuthMaybe();
@@ -43,7 +43,14 @@ export function createMcpServer(registry: Registry): Server {
           return errorResult(name, e);
         }
       }
-      return registry.call(name, args, auth);
+      // Progress goes back only when the client asked for it with a token.
+      const token = request.params._meta?.progressToken;
+      const progress =
+        token === undefined
+          ? undefined
+          : (done: number, message?: string) =>
+              void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: done, ...(message ? { message } : {}) } }).catch(() => undefined);
+      return registry.call(name, args, auth, { signal: extra.signal, progress });
     })();
 
     const r = result as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };

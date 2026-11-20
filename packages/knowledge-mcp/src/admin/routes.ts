@@ -138,6 +138,8 @@ const SERVICE_ENV: Record<string, string[]> = {
   railway: ['RAILWAY_TOKEN'],
   // A model the server uses for its own work (core/llm.ts).
   llm: ['LLM_PROVIDER', 'LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL'],
+  // Another model for the search assistant (plugins/knowledge/agent_search.ts). Without it, the one above.
+  'search-llm': ['SEARCH_LLM_PROVIDER', 'SEARCH_LLM_API_KEY', 'SEARCH_LLM_BASE_URL', 'SEARCH_LLM_MODEL'],
   // Reading scanned documents (plugins/drive/ocr.ts). The Mathpix keys go with it: turning OCR off turns them off.
   ocr: ['OCR_PROVIDER', 'OCR_BASE_URL', 'OCR_API_KEY', 'OCR_MODEL', 'OCR_PROMPT', 'OCR_AUTO', 'MATHPIX_APP_ID', 'MATHPIX_APP_KEY'],
 };
@@ -215,15 +217,16 @@ function connectorsView(): { on: boolean; address: string | null; google: boolea
   return { on, address: on ? OAUTH_ISSUER_URL : process.env.MCP_OAUTH_ISSUER?.trim() || null, google: on && oauthSignIns().google, googleMissing: oauthGoogleProblems() };
 }
 
-function llmView(): { set: boolean; provider: LlmKind | null; model: string | null; baseUrl: string | null; keySet: boolean } {
-  const s = llmSettings();
-  const provider = process.env.LLM_PROVIDER?.trim();
+/** A model that is set, for the page: the language model (LLM_) or the search assistant's own (SEARCH_LLM_). */
+function llmView(prefix = 'LLM_'): { set: boolean; provider: LlmKind | null; model: string | null; baseUrl: string | null; keySet: boolean } {
+  const s = llmSettings(process.env, prefix);
+  const provider = process.env[`${prefix}PROVIDER`]?.trim();
   return {
     set: !!s,
     provider: s?.kind ?? (provider === 'anthropic' || provider === 'openai' || provider === 'chatgpt' ? provider : null),
     model: s?.model ?? null,
-    baseUrl: s?.baseUrl ?? (process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') || null),
-    keySet: !!process.env.LLM_API_KEY?.trim(),
+    baseUrl: s?.baseUrl ?? (process.env[`${prefix}BASE_URL`]?.trim().replace(/\/+$/, '') || null),
+    keySet: !!process.env[`${prefix}API_KEY`]?.trim(),
   };
 }
 
@@ -345,19 +348,31 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   };
 
   // A model for the server's own work (core/llm.ts): what the page sends to list a provider's models and to save.
-  const llmBody = z.object({ provider: z.enum(['anthropic', 'openai', 'chatgpt']), baseUrl: webUrl(500).optional().or(z.literal('')), apiKey: visible(500).optional() });
+  // `for`: the language model (llm), or the search assistant's own (search-llm).
+  const llmBody = z.object({
+    provider: z.enum(['anthropic', 'openai', 'chatgpt']),
+    baseUrl: webUrl(500).optional().or(z.literal('')),
+    apiKey: visible(500).optional(),
+    for: z.enum(['llm', 'search-llm']).optional(),
+  });
+  const llmPrefixOf = (id: 'llm' | 'search-llm' | undefined) => (id === 'search-llm' ? 'SEARCH_LLM_' : 'LLM_');
+  /** The key saved under `prefix`, when it was saved for this provider and address. */
+  const savedKeyFor = (prefix: string, kind: LlmKind, baseUrl: string | undefined): string | undefined => {
+    const same = process.env[`${prefix}PROVIDER`]?.trim() === kind && (kind === 'anthropic' || process.env[`${prefix}BASE_URL`]?.trim().replace(/\/+$/, '') === baseUrl);
+    return same ? process.env[`${prefix}API_KEY`]?.trim() || undefined : undefined;
+  };
   /**
    * The connection the page describes. A key that is already saved is used for the provider and address it was
-   * saved for and for no other: a key is never sent to an address it was not given for.
+   * saved for and for no other: a key is never sent to an address it was not given for. The search assistant on
+   * the language model's provider and address uses the language model's key.
    */
-  const llmFrom = (body: z.infer<typeof llmBody>): { kind: LlmKind; baseUrl?: string; apiKey?: string } => {
+  const llmFrom = (body: z.infer<typeof llmBody>, prefix: string): { kind: LlmKind; baseUrl?: string; apiKey?: string } => {
     const kind = body.provider;
     // A ChatGPT plan is used through its sign-in (core/chatgpt.ts): no address, no key.
     if (kind === 'chatgpt') return { kind };
     const baseUrl = kind === 'openai' ? body.baseUrl?.replace(/\/+$/, '') || undefined : undefined;
     if (kind === 'openai' && !baseUrl) throw new Error('The address of the API is needed (it usually ends in /v1).');
-    const savedFor = process.env.LLM_PROVIDER?.trim() === kind && (kind === 'anthropic' || process.env.LLM_BASE_URL?.trim().replace(/\/+$/, '') === baseUrl);
-    const apiKey = body.apiKey || (savedFor ? process.env.LLM_API_KEY?.trim() || undefined : undefined);
+    const apiKey = body.apiKey || savedKeyFor(prefix, kind, baseUrl) || (prefix !== 'LLM_' ? savedKeyFor('LLM_', kind, baseUrl) : undefined);
     if (kind === 'anthropic' && !apiKey) throw new Error('Claude needs an API key.');
     return { kind, baseUrl, apiKey };
   };
@@ -440,6 +455,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           github: { set: isSet(SERVICE_ENV.github) },
           railway: railwayVia(),
           llm: llmView(),
+          searchLlm: llmView('SEARCH_LLM_'),
           ocr: ocrView(),
           embeddings: {
             set: embeddingsConfigured(),
@@ -740,17 +756,19 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         if (railwaySignedIn()) await signOutRailway();
         return change(res, { found: r.who });
       }
-      if (id === 'llm') {
+      if (id === 'llm' || id === 'search-llm') {
+        const prefix = llmPrefixOf(id);
         const body = llmBody.extend({ model: modelName }).parse(req.body);
-        const settings = llmFrom(body);
+        const settings = llmFrom(body, prefix);
         const r = await checkLlm({ ...settings, model: body.model });
+        // The saved key stays only for the provider and address it was given for. Another provider's key is not
+        // kept, so that it is never sent to this one (a ChatGPT plan has none at all).
+        const keep = settings.kind !== 'chatgpt' && savedKeyFor(prefix, settings.kind, settings.baseUrl) !== undefined;
         updateEnvFile(envPath, {
-          LLM_PROVIDER: settings.kind,
-          LLM_BASE_URL: settings.kind === 'openai' ? settings.baseUrl : undefined,
-          // The key of another provider is not kept for a ChatGPT plan, which has none.
-          ...(settings.kind === 'chatgpt' ? { LLM_API_KEY: undefined } : {}),
-          LLM_MODEL: r.model,
-          ...(body.apiKey ? { LLM_API_KEY: body.apiKey } : {}),
+          [`${prefix}PROVIDER`]: settings.kind,
+          [`${prefix}BASE_URL`]: settings.kind === 'openai' ? settings.baseUrl : undefined,
+          [`${prefix}MODEL`]: r.model,
+          ...(body.apiKey ? { [`${prefix}API_KEY`]: body.apiKey } : keep ? {} : { [`${prefix}API_KEY`]: undefined }),
         });
         return change(res, { found: `${r.model} answered` });
       }
@@ -975,7 +993,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   api.post(
     '/llm/models',
     wrap(async (req, res) => {
-      res.json({ models: await listLlmModels(llmFrom(llmBody.parse(req.body))) });
+      const body = llmBody.parse(req.body);
+      res.json({ models: await listLlmModels(llmFrom(body, llmPrefixOf(body.for))) });
     }),
   );
   // ── Sign-in for connectors: Claude and ChatGPT add the server by its address and sign in with a key ──
@@ -1022,8 +1041,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       if (!mustEdit(res)) return;
       await signOutChatgpt();
       // Signed out of the model in use: the model setting goes too, so nothing tries to use it.
-      if (process.env.LLM_PROVIDER?.trim() === 'chatgpt') {
-        updateEnvFile(join(settingsDir(), '.env'), { LLM_PROVIDER: undefined, LLM_MODEL: undefined });
+      const gone = {
+        ...(process.env.LLM_PROVIDER?.trim() === 'chatgpt' ? { LLM_PROVIDER: undefined, LLM_MODEL: undefined } : {}),
+        ...(process.env.SEARCH_LLM_PROVIDER?.trim() === 'chatgpt' ? { SEARCH_LLM_PROVIDER: undefined, SEARCH_LLM_MODEL: undefined } : {}),
+      };
+      if (Object.keys(gone).length) {
+        updateEnvFile(join(settingsDir(), '.env'), gone);
         return change(res, { ...chatgptView() });
       }
       res.json({ ok: true, restarting: false, restartNeeded: false, ...chatgptView() });
@@ -1097,8 +1120,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   api.post(
     '/index/measure',
     wrap(async (req, res) => {
-      const body = z.object({ what: z.enum(['measure', 'compare']), fresh: z.boolean().optional() }).strict().parse(req.body);
-      startMeasure(body.what, body.fresh === true);
+      const body = z.object({ what: z.enum(['measure', 'compare']), fresh: z.boolean().optional(), agent: z.enum(['low', 'medium', 'high']).optional() }).strict().parse(req.body);
+      startMeasure(body.what, body.fresh === true, body.agent ?? null);
       res.json({ ...measureView(), ways: WAYS });
     }),
   );

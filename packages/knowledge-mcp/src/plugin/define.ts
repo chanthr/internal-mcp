@@ -56,6 +56,13 @@ export interface ToolContext {
   state: PluginState;
   /** Log to stderr with the plugin prefix. Secrets are masked. Never use console.log in stdio mode. */
   log: (...args: unknown[]) => void;
+  /** Aborted when the caller cancels the call. A long tool stops its work then. Absent outside an MCP call. */
+  signal?: AbortSignal;
+  /**
+   * Tell the caller how far a long call is (MCP progress), when it asked to be told; otherwise nothing happens.
+   * A client that waits for a slow tool may keep waiting while progress comes.
+   */
+  progress?: (done: number, message?: string) => void;
 }
 
 export interface ToolSpec<S extends AnySchema = AnySchema> {

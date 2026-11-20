@@ -11,19 +11,23 @@
  *
  * The questions are written once by the connected model, one per sampled document, and kept: every measurement
  * asks the same ones, or the numbers could not be compared. They can be replaced by one's own in the same file
- * (`<data>/search-measure.json`, "questions": [{ "question": "…", "document": "a part of its path" }]).
+ * (`<data>/search-measure.json`, "questions": [{ "question": "…", "document": "a part of its path" }], with
+ * "documents": [ … ] for a question that more documents answer).
+ *
+ * Measuring can also ask the search assistant (agent_search.ts) each question: slower, and it uses the model.
  *
  * Comparing reads the documents from the folders on this machine. Documents in Drive are not part of it.
  */
 import { dataFile } from '../../core/data_file.js';
-import { llmConfigured } from '../../core/llm.js';
+import { llmConfigured, searchLlmSettings } from '../../core/llm.js';
 import { chunkMarkdown } from '../drive/chunker.js';
 import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from '../drive/embeddings.js';
 import { extractLocalFile } from '../drive/extract_text.js';
 import { cutMark, indexProfile, type IndexProfile } from '../drive/index_profile.js';
 import { embedInputForChunk } from '../drive/indexer.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
-import { makeQuestions, sampleDocuments, scoreOf, scoreQuestions, type EvalMode, type EvalQuestion, type ModeScore } from './eval.js';
+import type { Effort } from './agent_search.js';
+import { makeQuestions, sampleDocuments, scoreOf, scoreQuestions, type AgentCost, type EvalMode, type EvalQuestion, type ModeScore } from './eval.js';
 import { listLocalFiles, localFolders, type LocalFile } from './folders.js';
 import { WIKI } from './wiki.js';
 
@@ -56,7 +60,10 @@ export interface Measured {
   documents: number;
   passages: number;
   questions: number;
-  modes: Record<EvalMode, ModeScore | null>;
+  /** agent: not in measurements made before it could be measured. */
+  modes: Partial<Record<EvalMode, ModeScore | null>>;
+  /** What the search assistant cost, when it was measured. */
+  agent?: AgentCost | null;
   /** Why meaning was not measured, when it was not. */
   note: string | null;
 }
@@ -84,6 +91,8 @@ export interface MeasureRun {
   /** compare: the way being embedded. */
   way: string | null;
   error: string | null;
+  /** measure: the search assistant is asked too, with this effort. */
+  agent?: Effort | null;
 }
 let current: (MeasureRun & { stop: AbortController }) | null = null;
 
@@ -91,6 +100,8 @@ export interface MeasureView {
   questions: number;
   /** A model is connected, so questions can be written. */
   canWrite: boolean;
+  /** The model the search assistant would be measured with, or null when there is none. */
+  agentModel: string | null;
   measured: Measured[];
   compared: Compared | null;
   run: MeasureRun | null;
@@ -99,8 +110,8 @@ export interface MeasureView {
 }
 export function measureView(): MeasureView {
   const s = saved.read();
-  const run = current ? { running: current.running, what: current.what, phase: current.phase, done: current.done, total: current.total, way: current.way, error: current.error } : null;
-  return { questions: s?.questions?.length ?? 0, canWrite: llmConfigured(), measured: s?.measured ?? [], compared: s?.compared ?? null, run, file: saved.path() };
+  const run = current ? { running: current.running, what: current.what, phase: current.phase, done: current.done, total: current.total, way: current.way, error: current.error, agent: current.agent ?? null } : null;
+  return { questions: s?.questions?.length ?? 0, canWrite: llmConfigured(), agentModel: searchLlmSettings()?.model ?? null, measured: s?.measured ?? [], compared: s?.compared ?? null, run, file: saved.path() };
 }
 
 type Progress = Pick<MeasureRun, 'phase' | 'done' | 'total' | 'way'>;
@@ -122,15 +133,15 @@ async function questions(fresh: boolean, signal: AbortSignal, at: Progress): Pro
   return made;
 }
 
-/** Ask the questions of the index as it is, and keep the result. */
-export async function measure(opts: { fresh?: boolean; signal?: AbortSignal; progress?: Progress } = {}): Promise<Measured> {
+/** Ask the questions of the index as it is, and keep the result. `agent`: ask the search assistant too. */
+export async function measure(opts: { fresh?: boolean; agent?: Effort; signal?: AbortSignal; progress?: Progress } = {}): Promise<Measured> {
   const signal = opts.signal ?? new AbortController().signal;
   const at: Progress = opts.progress ?? { phase: 'asking', done: 0, total: 0, way: null };
   const index = await getLocalIndex();
   if (!index) throw new Error('Measuring reads the built-in index. With QDRANT_URL set there is no keyword index to set beside the vectors.');
   const asked = await questions(!!opts.fresh, signal, at);
   Object.assign(at, { phase: 'asking', done: 0, total: asked.length });
-  const score = await scoreQuestions(asked, signal, (done) => (at.done = done));
+  const score = await scoreQuestions(asked, signal, (done) => (at.done = done), { agent: opts.agent });
   if (signal.aborted) throw new Error('Stopped.');
   const stats = await index.stats(DRIVE_COLLECTION);
   const made = await index.embeddingState(DRIVE_COLLECTION);
@@ -142,6 +153,7 @@ export async function measure(opts: { fresh?: boolean; signal?: AbortSignal; pro
     passages: stats.chunks,
     questions: score.questions,
     modes: score.modes,
+    agent: score.agent,
     note: score.note,
   };
   const s = saved.read() ?? {};
@@ -240,11 +252,11 @@ export async function compare(opts: { fresh?: boolean; signal?: AbortSignal; pro
 }
 
 /** From the console: start one, and let the page read how far it is. */
-export function startMeasure(what: 'measure' | 'compare', fresh = false): MeasureRun {
+export function startMeasure(what: 'measure' | 'compare', fresh = false, agent: Effort | null = null): MeasureRun {
   if (current?.running) return current;
-  const run: NonNullable<typeof current> = { running: true, what, phase: 'asking', done: 0, total: 0, way: null, error: null, stop: new AbortController() };
+  const run: NonNullable<typeof current> = { running: true, what, phase: 'asking', done: 0, total: 0, way: null, error: null, agent: what === 'measure' ? agent : null, stop: new AbortController() };
   current = run;
-  void (what === 'measure' ? measure({ fresh, signal: run.stop.signal, progress: run }) : compare({ fresh, signal: run.stop.signal, progress: run }))
+  void (what === 'measure' ? measure({ fresh, agent: agent ?? undefined, signal: run.stop.signal, progress: run }) : compare({ fresh, signal: run.stop.signal, progress: run }))
     .catch((e) => {
       run.error = run.stop.signal.aborted ? null : e instanceof Error ? e.message : String(e);
     })

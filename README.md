@@ -194,6 +194,22 @@ wiki/
 | Your own notes | Whatever you write under a `## Notes` heading on a page stays when the page is written again |
 | A small or local model | Works: the model is asked for labelled lines, not JSON. Set `WIKI_PART_CHARS` (default 24000) lower when the model's window is small. What a page says is as good as the model that read the document |
 
+### The search assistant
+
+`search_knowledge` answers one search. A question with several parts, or asked in other words than the documents
+use, often needs several. `find_documents` hands it to a search assistant: a model that searches several times,
+reads where an excerpt is not enough, and returns the documents that answer, best first, each with a line on what
+it holds. It answers nothing itself: the model that asked reads the documents. A model that finds and a model that
+answers, as in agentic search models.
+
+| | |
+| --- | --- |
+| Model | The language model, or one set for search alone under **Models → Search assistant**: a local model while Chat uses a hosted one, for instance. Any of the providers above |
+| What it sees | Excerpts and parts of your documents, under the checks `search_knowledge` and `read_document` apply: excluded folders, and only the folders the person asking may see |
+| Effort | `low`: 3 rounds of searches. `medium` (default): 6. `high`: the question is split into its parts, an assistant searches each at once, and their documents are merged by rank |
+| Cost | It uses the server's model for whoever calls it. One person has at most 2 questions at once and 60 an hour; an assistant runs at most 6 calls a round and reads at most 80,000 characters; a question stops after 5 minutes |
+| Measure it | **Search → Passages → Measure with it** asks the measuring questions of the assistant too, beside keywords and meaning, with the time and tokens it took. In a terminal: `knowledge measure --agent` |
+
 ## How it works
 
 <p align="center">
@@ -408,6 +424,8 @@ Everything is exported from `@chnxthr/knowledge-mcp`.
 | `state` | `get(key)`, `set(key, value)`, `delete(key)`. Kept per plugin in the store, so it survives restarts |
 | `config` | This plugin's `plugins.<id>` section of `mcp.config.json` |
 | `log(...)` | Writes to stderr with the plugin name. Secrets are masked. Never use `console.log` in stdio mode |
+| `signal` | Aborted when the client cancels the call. A long tool stops its work then. Absent outside an MCP call |
+| `progress(done, message?)` | Tells the client how far a long call is, when it asked to be told. Otherwise does nothing |
 | `auth` | The full auth context, including Slack channel and Drive folder limits |
 
 </details>
@@ -468,7 +486,7 @@ Each turns on when its env vars are set. All built-in tools only read.
 
 | Plugin | Tools | Needs |
 | --- | --- | --- |
-| `knowledge` | `search_knowledge`, `read_document`, `linked_documents` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required |
+| `knowledge` | `search_knowledge`, `read_document`, `linked_documents`, `find_documents` | A local folder (`folders` in the config) or Google Drive. Nothing else: the index is a local file and search works by keywords. An embedding model (`OPENAI_API_KEY`, or another provider through `EMBEDDING_BASE_URL`) adds search by meaning. With `QDRANT_URL` vectors live in Qdrant and an embedding model is required. `find_documents` is listed while a language model is connected |
 | `drive` | `search_drive`, `read_drive_file`, `list_drive_folder` | A Google sign-in from the console (it reads your own Drive), or a service account: share a folder or a document with that account and it is searchable. An OAuth refresh token in the environment works too |
 | `slack` | `slack_list_channels`, `slack_read_channel`, `slack_find_files`, `slack_get_file` | `SLACK_BOT_TOKEN` (`xoxb-`). The bot sees only channels it was invited to |
 | `slack` | `slack_search` | `SLACK_USER_TOKEN` (`xoxp-`) as well. Results are limited to the bot's channels |
@@ -497,6 +515,7 @@ What the model reads is kept short, because it pays for every line:
 | `search_knowledge` | Up to `topK` parts (default 5, at most 2 per document), each with the document, its date, an ID, the heading and how many terms of the question it holds. Two parts that are neighbours in a document are shown as one passage. When no passage holds half of the terms, the answer says the match is weak. A filter that matches nothing answers with the values that field has |
 | `read_document` | With `part` (the number a result shows): that passage and the parts around it (`around`, default 1), a few thousand characters. Without it: the document from the start, up to `maxChars` (default 20,000), and the `offset` that continues it. Plain text, not JSON |
 | `linked_documents` | With a document ID: what it links to and what links to it, by title, each with its ID. Without one: how many documents and links there are, and the documents most others link to. A search result that has links says so (`Links: to 2 · from 3`) |
+| `find_documents` | The documents that answer a question, found by the search assistant: up to `limit` (default 8), best first, each with its ID, the part to read, and a line on what it holds. No passages: the asking model reads what it needs with `read_document` |
 | A tool on a database | Rows as a compact table: `{"rowCount":2,"columns":["id","total"],"rows":[[1,10.5],[2,20]]}`, one row per line. The column names are said once |
 
 **The knowledge graph.** Documents in the local folders are linked the way their authors linked them, with no
@@ -811,7 +830,7 @@ Node by its full path and the server starts there too.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
-   A language model connected on the Models page is sent the text of your documents while you chat or the wiki is written, and at no other time. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
+   A language model connected on the Models page is sent the text of your documents while you chat or the wiki is written, and at no other time. The search assistant's model is sent excerpts and parts of them while it searches (`find_documents`, or measuring it); a model set for it alone is in `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL` and `SEARCH_LLM_MODEL`. A saved key is sent only to the provider and address it was given for. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.
 7. A database connection reads whatever its database user can read. Give it a user of its own that can only read: never a superuser, not the user your application runs as, and with `explore` only one that sees what every permitted person may see. A member without a tool list may use every connection.

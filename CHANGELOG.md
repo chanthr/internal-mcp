@@ -47,6 +47,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **A search assistant: `find_documents`.** With a model connected, a question can be handed to a model that
+  searches several times with different words, reads where an excerpt is not enough, and returns the documents
+  that answer it, best first, each with a line on what it holds (it answers nothing itself). `effort` sets how
+  hard it looks; `high` splits the question into its parts and searches them at once. It sees what
+  `search_knowledge` and `read_document` would show the person asking, and no more. The Models page can give it a
+  model of its own (`SEARCH_LLM_*`), such as a small local one while Chat uses a hosted one, and measuring search
+  (Search → Passages, or `knowledge measure --agent`) can ask it the same questions, now scored by NDCG and recall
+  as well, with several right documents per question allowed.
 - **A public address from your own machine (Cloudflare Tunnel).** *Connect a client → Other people* gives the
   server an https address without moving it: a temporary one (`…trycloudflare.com`, no account, for trying it
   out) or your own (`mcp.example.com`, on a domain in your Cloudflare account). The console installs cloudflared,

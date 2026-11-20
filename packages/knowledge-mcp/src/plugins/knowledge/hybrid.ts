@@ -18,7 +18,10 @@
  * Measured on 24 questions over 508 documents with a small local model: keywords alone found 16, meaning alone 17,
  * merged with K=60 only 14, merged with any K from 0 to 5 found 17.
  */
+import { getConfig } from '../../core/config.js';
+import { isPathInScope } from '../../core/scope.js';
 import { embedQuery, embeddingsConfigured } from '../drive/embeddings.js';
+import { isExcludedPath } from '../drive/exclude.js';
 import { DRIVE_COLLECTION, getLocalIndex, getQdrantClient, vectorForm, vectorProblem, type ChunkPayload, type ScoredPoint } from '../drive/qdrant.js';
 
 export type SearchMode = 'keyword' | 'keyword + semantic' | 'semantic';
@@ -43,21 +46,29 @@ export interface IndexSearch {
 
 const RRF_K = 2;
 
-/** Merge ranked lists by reciprocal rank fusion. Exported for tests. */
+/**
+ * Reciprocal rank fusion of ranked lists of keys: best first. A tie keeps the order the keys were first met in.
+ * Search merges keywords and meaning with it, and the search assistant what its searches and assistants found.
+ */
+export function rankFusion(lists: string[][]): Array<{ key: string; score: number }> {
+  const score = new Map<string, number>();
+  for (const list of lists) list.forEach((key, rank) => score.set(key, (score.get(key) ?? 0) + 1 / (RRF_K + rank + 1)));
+  return [...score.entries()].map(([key, s]) => ({ key, score: s })).sort((a, b) => b.score - a.score);
+}
+
+/** Merge ranked lists of passages by reciprocal rank fusion. Exported for tests. */
 export function fuse(lists: Array<{ kind: 'keyword' | 'semantic'; points: ScoredPoint[] }>): IndexHit[] {
-  const byId = new Map<string, { payload: ChunkPayload; score: number; matched: Array<'keyword' | 'semantic'> }>();
+  const byId = new Map<string, { payload: ChunkPayload; matched: Array<'keyword' | 'semantic'> }>();
   for (const { kind, points } of lists) {
-    points.forEach((pt, rank) => {
-      const id = String(pt.id);
-      const hit = byId.get(id) ?? { payload: pt.payload as unknown as ChunkPayload, score: 0, matched: [] };
-      hit.score += 1 / (RRF_K + rank + 1);
+    for (const pt of points) {
+      const hit = byId.get(String(pt.id)) ?? { payload: pt.payload as unknown as ChunkPayload, matched: [] };
       hit.matched.push(kind);
-      byId.set(id, hit);
-    });
+      byId.set(String(pt.id), hit);
+    }
   }
-  const hits = [...byId.values()].sort((a, b) => b.score - a.score);
-  const best = hits[0]?.score ?? 1;
-  return hits.map((h) => ({ ...h, score: h.score / best }));
+  const fused = rankFusion(lists.map((l) => l.points.map((pt) => String(pt.id))));
+  const best = fused[0]?.score ?? 1;
+  return fused.map(({ key, score }) => ({ ...byId.get(key)!, score: score / best }));
 }
 
 /** Search the index. `limit` is how many candidates to return (callers filter and trim afterwards). */
@@ -95,6 +106,44 @@ export async function searchIndex(query: string, must: Must, limit: number): Pro
     degraded,
     empty: hits.length === 0 && (await local.stats(DRIVE_COLLECTION)).chunks === 0,
   };
+}
+
+/** config drive.rank: a weight per path prefix. */
+export const RANK_RULES = getConfig().drive.rank;
+
+/** First rank rule whose prefix the path starts with. */
+function rankRule(path: string): { label: string; weight: number } | null {
+  const p = path.replace(/^\/+/, '');
+  return RANK_RULES.find((r) => p.startsWith(r.prefix.replace(/^\/+/, ''))) ?? null;
+}
+
+export interface VisibleHit {
+  h: IndexHit;
+  p: ChunkPayload;
+  /** The rank rule's label, when one applies. */
+  label: string | null;
+  /** The score after the rank rules and the document's status. */
+  adj: number;
+}
+
+/**
+ * What a caller is shown of a search, best first: drive.rank rules by path, superseded and parked documents
+ * demoted (frontmatter status), excluded folders and anything outside the caller's folders left out. (Chunks
+ * indexed before a folder was excluded are checked again here.)
+ */
+export function visibleHits(hits: IndexHit[], folderScope: string[] | null): VisibleHit[] {
+  return hits
+    .map((h) => {
+      const p = h.payload;
+      const rule = rankRule(p.file_path ?? '');
+      let boost = rule?.weight ?? 1;
+      if (p.doc_status === 'superseded') boost *= 0.8;
+      else if (p.doc_status === 'parked') boost *= 0.92;
+      return { h, p, label: rule?.label ?? null, adj: h.score * boost };
+    })
+    .sort((a, b) => b.adj - a.adj)
+    .filter((x) => !isExcludedPath(x.p.file_path ?? ''))
+    .filter((x) => !folderScope || isPathInScope(x.p.file_path ?? '', folderScope));
 }
 
 async function isEmpty(): Promise<boolean> {

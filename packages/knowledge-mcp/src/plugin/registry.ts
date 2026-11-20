@@ -213,7 +213,7 @@ export class Registry {
   }
 
   /** Validate, run and normalize. Permission is checked by the caller (server/mcp.ts) before this. */
-  async call(name: string, args: Record<string, unknown> | undefined, auth: AuthContext): Promise<ReturnType<typeof normalizeResult>> {
+  async call(name: string, args: Record<string, unknown> | undefined, auth: AuthContext, call: Pick<ToolContext, 'signal' | 'progress'> = {}): Promise<ReturnType<typeof normalizeResult>> {
     const e = this.entries.get(name);
     if (e) {
       const enabled = this.toolEnabled(e);
@@ -228,6 +228,7 @@ export class Registry {
         config: this.pluginConfig.get(e.plugin.id),
         state: stateFor(e.plugin.id),
         log: (...a: unknown[]) => console.error(`[${e.plugin.id}]`, ...a),
+        ...call,
       };
       try {
         return normalizeResult(await e.tool.run(parsed.data as never, ctx));

@@ -7,13 +7,22 @@
  * the documents by the connected model (a question a person would ask, in other words than the document's).
  *
  * Three ways of searching are scored side by side, since they fail on different questions: keywords, meaning
- * (vectors), and both merged as the search tool does.
+ * (vectors), and both merged as the search tool does. A fourth on request: the search assistant (agent_search.ts),
+ * which searches several times with the connected model. It costs a few model calls per question, so it is asked
+ * for, not run by default.
+ *
+ * A question may have several right documents (a question with several parts, or "which documents say X"). Then
+ * what counts is how many of them come and how high: recall (the share among the first ten) and NDCG (the same,
+ * weighed by place). With one right document NDCG is 1 for the first place, 0.63 for the second, 0.5 for the third.
  */
-import { ask } from '../../core/llm.js';
+import { authStore, getAuthMaybe } from '../../core/context.js';
+import { getConfig } from '../../core/config.js';
+import { ask, searchLlmSettings } from '../../core/llm.js';
 import { embedQuery, embeddingsConfigured } from '../drive/embeddings.js';
 import { extractLocalFile } from '../drive/extract_text.js';
 import { DRIVE_COLLECTION, getLocalIndex, vectorForm, vectorProblem, type ScoredPoint } from '../drive/qdrant.js';
 import { listLocalFiles, localFolders, type LocalFile } from './folders.js';
+import { agentSearch, type Effort } from './agent_search.js';
 import { fuse } from './hybrid.js';
 import { withoutThinking } from './wiki.js';
 
@@ -21,6 +30,8 @@ export interface EvalQuestion {
   question: string;
   /** The document that answers it: its ID, or a part of its path. */
   document: string;
+  /** Other documents that answer it too (each its ID, or a part of its path). */
+  documents?: string[];
   /** Free label, to read the result by kind (a keyword question, a paraphrase, …). */
   kind?: string;
 }
@@ -33,11 +44,26 @@ export interface ModeScore {
   top10: number;
   /** Mean of 1/rank over the questions (0 when it was not among the first ten). */
   mrr: number;
+  /** Mean NDCG of the first ten. Not in measurements made before it was. */
+  ndcg?: number;
+  /** Mean share of the right documents among the first ten. Not in measurements made before it was. */
+  recall?: number;
 }
-export type EvalMode = 'keyword' | 'meaning' | 'both';
+export type EvalMode = 'keyword' | 'meaning' | 'both' | 'agent';
+/** What the search assistant cost, per question on average, when it was measured. */
+export interface AgentCost {
+  model: string;
+  effort: Effort;
+  seconds: number;
+  /** Tokens read and written. */
+  tokens: number;
+  searches: number;
+}
 export interface EvalScore {
   questions: number;
+  /** agent: null unless it was asked for. */
   modes: Record<EvalMode, ModeScore | null>;
+  agent: AgentCost | null;
   /** Why meaning could not be scored, when it could not. */
   note: string | null;
   /** Questions whose document was not among the first three with both merged: what there is to look at. */
@@ -45,56 +71,109 @@ export interface EvalScore {
 }
 
 const DEPTH = 40;
-const matches = (target: string, p: ScoredPoint): boolean => {
-  const id = String(p.payload?.file_id ?? '');
-  const path = String(p.payload?.file_path ?? '');
-  return id === target || id.includes(target) || path.includes(target);
-};
-/** The documents of a result in order, each once, and where the wanted one is among them (0: not among the first ten). */
-function rankOf(target: string, points: ScoredPoint[]): { rank: number; got: string[] } {
-  const seen: string[] = [];
-  let rank = 0;
-  for (const p of points) {
-    const id = String(p.payload?.file_id ?? '');
-    if (seen.includes(id)) continue;
-    seen.push(id);
-    if (!rank && matches(target, p)) rank = seen.length;
+/** The right documents of a question. */
+export const targetsOf = (q: EvalQuestion): string[] => [...new Set([q.document, ...(q.documents ?? [])].filter(Boolean))];
+const isTarget = (target: string, id: string, path: string): boolean => id === target || id.includes(target) || path.includes(target);
+
+/** Where the right documents came among the first ten of a result (1-based, in order), for one question. */
+export interface Placed {
+  ranks: number[];
+  /** How many right documents the question has. */
+  wanted: number;
+}
+/** The documents of a result in order, each once, and where the right ones are among the first ten. */
+export function placeOf(targets: string[], docs: Array<{ id: string; path: string }>): Placed & { got: string[] } {
+  const seen: Array<{ id: string; path: string }> = [];
+  for (const d of docs) {
+    if (seen.some((s) => s.id === d.id)) continue;
+    seen.push(d);
     if (seen.length >= 10) break;
   }
-  return { rank, got: seen.slice(0, 3).map((id) => String(points.find((p) => String(p.payload?.file_id) === id)?.payload?.file_path ?? id)) };
+  // A target is a part of a path and may match several documents: each target is credited once, at the first
+  // document that matches it, and each document once. So NDCG stays within 1 and recall counts targets.
+  const open = [...targets];
+  const ranks: number[] = [];
+  seen.forEach((d, i) => {
+    const t = open.findIndex((x) => isTarget(x, d.id, d.path));
+    if (t < 0) return;
+    open.splice(t, 1);
+    ranks.push(i + 1);
+  });
+  return { ranks, wanted: Math.max(1, targets.length), got: seen.slice(0, 3).map((d) => d.path || d.id) };
 }
-export const scoreOf = (ranks: number[]): ModeScore => ({
-  first: ranks.filter((r) => r === 1).length,
-  top3: ranks.filter((r) => r >= 1 && r <= 3).length,
-  top10: ranks.filter((r) => r >= 1).length,
-  mrr: Math.round((ranks.reduce((s, r) => s + (r ? 1 / r : 0), 0) / Math.max(1, ranks.length)) * 1000) / 1000,
-});
+const docsOf = (points: ScoredPoint[]) => points.map((p) => ({ id: String(p.payload?.file_id ?? ''), path: String(p.payload?.file_path ?? '') }));
 
-/** Ask every question of the index as it is now, three ways. */
-export async function scoreQuestions(questions: EvalQuestion[], signal?: AbortSignal, each?: (done: number) => void): Promise<EvalScore> {
+const round3 = (n: number) => Math.round(n * 1000) / 1000;
+const gain = (rank: number) => 1 / Math.log2(rank + 1);
+/** Scores over the questions. A number is where the one right document came (0: not among the first ten). */
+export function scoreOf(placed: Array<number | Placed>): ModeScore {
+  const ps: Placed[] = placed.map((p) => (typeof p === 'number' ? { ranks: p ? [p] : [], wanted: 1 } : p));
+  const n = Math.max(1, ps.length);
+  const ideal = (wanted: number) => Array.from({ length: Math.min(wanted, 10) }, (_, i) => gain(i + 1)).reduce((s, g) => s + g, 0);
+  return {
+    first: ps.filter((p) => p.ranks.includes(1)).length,
+    top3: ps.filter((p) => p.ranks.some((r) => r <= 3)).length,
+    top10: ps.filter((p) => p.ranks.length > 0).length,
+    mrr: round3(ps.reduce((s, p) => s + (p.ranks.length ? 1 / Math.min(...p.ranks) : 0), 0) / n),
+    ndcg: round3(ps.reduce((s, p) => s + p.ranks.reduce((g, r) => g + gain(r), 0) / ideal(p.wanted), 0) / n),
+    recall: round3(ps.reduce((s, p) => s + Math.min(1, p.ranks.length / p.wanted), 0) / n),
+  };
+}
+
+/** The owner of this machine, for measuring from the console or a terminal: every document is theirs to search. */
+const owner = () => ({ ok: true as const, org_id: getConfig().orgId, role: 'admin' as const, email: 'console@localhost' });
+
+/** Ask every question of the index as it is, three ways; and of the search assistant too with `agent`. */
+export async function scoreQuestions(questions: EvalQuestion[], signal?: AbortSignal, each?: (done: number) => void, opts: { agent?: Effort } = {}): Promise<EvalScore> {
   const index = await getLocalIndex();
   if (!index) throw new Error('Scoring reads the built-in index. With QDRANT_URL set there is no keyword index to compare with.');
   const problem = embeddingsConfigured() ? await vectorProblem() : 'no embedding model is set';
-  const ranks: Record<EvalMode, number[]> = { keyword: [], meaning: [], both: [] };
+  const agentModel = opts.agent ? searchLlmSettings() : null;
+  if (opts.agent && !agentModel) throw new Error('Measuring the search assistant needs a language model. Connect one on the Models page.');
+  const placed: Record<EvalMode, Placed[]> = { keyword: [], meaning: [], both: [], agent: [] };
   const misses: EvalScore['misses'] = [];
   const prefix = problem ? '' : (await vectorForm()).queryPrefix;
+  const cost = { ms: 0, tokens: 0, searches: 0, model: agentModel?.model ?? '' };
   for (const [n, q] of questions.entries()) {
     if (signal?.aborted) break;
     each?.(n);
+    const targets = targetsOf(q);
     const keyword = await index.keywordSearch(DRIVE_COLLECTION, { query: q.question, limit: DEPTH, with_payload: true });
-    ranks.keyword.push(rankOf(q.document, keyword).rank);
+    placed.keyword.push(placeOf(targets, docsOf(keyword)));
     let meaning: ScoredPoint[] | null = null;
     if (!problem) {
       meaning = await index.search(DRIVE_COLLECTION, { vector: await embedQuery(q.question, prefix), limit: DEPTH, with_payload: true });
-      ranks.meaning.push(rankOf(q.document, meaning).rank);
+      placed.meaning.push(placeOf(targets, docsOf(meaning)));
     }
     // Merged exactly as the search tool merges them.
     const merged = fuse([{ kind: 'keyword', points: keyword }, ...(meaning ? [{ kind: 'semantic' as const, points: meaning }] : [])]).map((h) => ({ id: '', score: h.score, payload: h.payload }) as unknown as ScoredPoint);
-    const both = rankOf(q.document, merged);
-    ranks.both.push(both.rank);
-    if (!(both.rank >= 1 && both.rank <= 3)) misses.push({ question: q.question, document: q.document, got: both.got });
+    const both = placeOf(targets, docsOf(merged));
+    placed.both.push(both);
+    if (!both.ranks.some((r) => r <= 3)) misses.push({ question: q.question, document: targets.join(', '), got: both.got });
+    if (opts.agent && agentModel) {
+      const run = () => agentSearch(q.question, { effort: opts.agent, limit: 10, signal, settings: agentModel });
+      // A failure on one question counts as not found: a measurement is not lost to one bad answer.
+      const r = await (getAuthMaybe() ? run() : authStore.run(owner(), run)).catch((e) => {
+        if (signal?.aborted) throw e;
+        return null;
+      });
+      placed.agent.push(placeOf(targets, r?.documents ?? []));
+      if (r) {
+        cost.ms += r.ms;
+        cost.tokens += r.usage.input + r.usage.output;
+        cost.searches += r.searches;
+        cost.model = r.model;
+      }
+    }
   }
-  return { questions: questions.length, modes: { keyword: scoreOf(ranks.keyword), meaning: problem ? null : scoreOf(ranks.meaning), both: scoreOf(ranks.both) }, note: problem, misses };
+  const asked = Math.max(1, placed.both.length);
+  return {
+    questions: questions.length,
+    modes: { keyword: scoreOf(placed.keyword), meaning: problem ? null : scoreOf(placed.meaning), both: scoreOf(placed.both), agent: opts.agent ? scoreOf(placed.agent) : null },
+    agent: opts.agent ? { model: cost.model, effort: opts.agent, seconds: Math.round(cost.ms / asked / 100) / 10, tokens: Math.round(cost.tokens / asked), searches: Math.round((cost.searches / asked) * 10) / 10 } : null,
+    note: problem,
+    misses,
+  };
 }
 
 const QUESTION_PROTOCOL = `You are given one document. Write one question that a person would ask and that this document answers.

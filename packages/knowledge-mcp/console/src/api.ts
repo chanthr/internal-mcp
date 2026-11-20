@@ -264,6 +264,8 @@ export interface State {
     embeddings: { set: boolean; model: string | null; dim: number | null; baseUrl: string | null; keySet: boolean };
     /** A language model for the server's own work (the Models page). The key is never sent back. */
     llm: { set: boolean; provider: 'anthropic' | 'openai' | 'chatgpt' | null; model: string | null; baseUrl: string | null; keySet: boolean };
+    /** The search assistant's own model, when one is set. Otherwise it uses the language model. */
+    searchLlm: { set: boolean; provider: 'anthropic' | 'openai' | 'chatgpt' | null; model: string | null; baseUrl: string | null; keySet: boolean };
     /** Reading scanned documents (server: plugins/drive/ocr.ts). The key is never sent back. */
     ocr: { set: boolean; kind: 'model' | 'mathpix' | null; model: string | null; baseUrl: string | null; local: boolean; keySet: boolean; auto: boolean };
   };
