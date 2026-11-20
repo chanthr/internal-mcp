@@ -247,6 +247,8 @@ export interface State {
     recut: number;
     /** The stored vectors were made from another form of the passage than the setting asks for now. */
     behind: boolean;
+    /** How making vectors went (server: indexer.ts vectorStatus). */
+    vectorRun?: { error: string | null; errorAt: string | null; filled: number; filledAt: string | null; retryAt: string | null };
   } | null;
   plugins: PluginStatus[];
   /** The computer's own folder chooser can be opened from the page. */
