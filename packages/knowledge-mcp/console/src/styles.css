@@ -280,3 +280,46 @@ p { margin: 0; }
 .chat-meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
 .chat-input { position: sticky; bottom: 16px; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--sheet); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06); }
 .chat-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Notes: one shown in a font of the person's choosing, and printed alone (Print or save as PDF). */
+.note-font {
+  width: min(240px, 40vw);
+}
+.note-print {
+  padding: 8px 0 24px;
+}
+.skill-text {
+  max-height: 60vh;
+  overflow: auto;
+}
+@media print {
+  /* Everything but the note and what holds it is out of the page (printNote marks what holds it). */
+  body * {
+    display: none !important;
+  }
+  .print-path,
+  .note-print,
+  .note-print * {
+    display: revert !important;
+  }
+  html,
+  body,
+  .print-path {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    max-width: none !important;
+    min-height: 0 !important;
+    height: auto !important;
+    background: #fff !important;
+  }
+  /* Code and tables are printed whole, not cut at a scroll box. */
+  .note-print * {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  .note-print pre {
+    white-space: pre-wrap !important;
+  }
+}

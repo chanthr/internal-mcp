@@ -25,6 +25,7 @@ import { readDocumentTool } from './tools/read_document.js';
 import { linkedDocumentsTool } from './tools/linked_documents.js';
 import { findDocumentsTool } from './tools/find_documents.js';
 import { saveNoteTool } from './tools/save_note.js';
+import { useSkillTool } from './tools/use_skill.js';
 import { cli } from '../../core/invocation.js';
 import { watchFolders } from './watch.js';
 import { settingsDir } from '../../core/config.js';
@@ -66,13 +67,14 @@ export const knowledgePlugin = definePlugin({
     if (!indexAvailable()) return 'with QDRANT_URL set, an embedding model is required: set OPENAI_API_KEY or EMBEDDING_BASE_URL (or remove QDRANT_URL to use the built-in index)';
     return true;
   },
-  tools: [searchKnowledgeTool, readDocumentTool, linkedDocumentsTool, findDocumentsTool, saveNoteTool],
+  tools: [searchKnowledgeTool, readDocumentTool, linkedDocumentsTool, findDocumentsTool, saveNoteTool, useSkillTool],
   instructions:
     'Knowledge base: for any question about what the team\'s documents say, call search_knowledge first. ' +
     'Results are passages; call read_document with a Document ID when you need the whole document. ' +
     'Documents link to each other: linked_documents follows those links from a result to the pages around it. ' +
     'When it is listed, find_documents hands a question to a search assistant that searches several times and returns the documents that answer it: for a question with several parts, or one search_knowledge did not find. ' +
     'save_note keeps something as a note in this knowledge base (notes you made from documents, what you found): it is searched with the rest. ' +
+    'When it is listed, use_skill lists the skills installed here (instructions for a kind of task) and reads the one a task calls for. ' +
     'Each result shows the document date: say how old a figure is rather than presenting it as current. ' +
     'Where results come from a folder named wiki, those pages were written by a model from the documents: a topic page gathers what several documents say and names them. Use it for an overview, and the documents it names for the exact wording.',
   async start({ state, log }) {
