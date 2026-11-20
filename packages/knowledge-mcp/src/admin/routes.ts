@@ -12,6 +12,7 @@
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
 import { vectorStatus } from '../plugins/drive/indexer.js';
+import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -19,8 +20,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { z } from 'zod';
-import { configSource, getConfig } from '../core/config.js';
-import { home } from '../core/paths.js';
+import { configSource, getConfig, settingsDir } from '../core/config.js';
 import { authStore } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
@@ -86,11 +86,7 @@ import { canReload, requestReload } from './supervisor.js';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-/** Folder that holds .env and mcp.config.json: where the loaded config file is, else the working directory. */
-export function settingsDir(): string {
-  const source = configSource();
-  return source.startsWith('file:') ? dirname(source.slice(5)) : home() ?? process.cwd();
-}
+export { settingsDir };
 
 /** Can the console write the config? Not when it comes from an env var (MCP_CONFIG_JSON): there is no file to edit. */
 const editable = () => !configSource().startsWith('env:');
@@ -651,7 +647,20 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   );
 
   // ── A wiki written from the documents by the connected model (plugins/knowledge/wiki.ts) ──
-  api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured() })));
+  api.get('/wiki', wrap(async (_req, res) => void res.json({ ...(await wikiStatus(settingsDir())), model: llmConfigured(), auto: autoView() })));
+  // Keep the wiki up to date by itself (plugins/knowledge/wiki_auto.ts): on reads what is added or changed from now.
+  api.post(
+    '/wiki/auto',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const { on, perDay } = z.object({ on: z.boolean(), perDay: z.number().int().min(1).max(500).optional() }).strict().parse(req.body);
+      if (on && !wikiExists(settingsDir())) return refuse(res, 409, 'There is no wiki yet. Create it first.');
+      const view = await setAuto(on, perDay, settingsDir());
+      // Turned on: whatever came since the last pass is looked at now, not at the next pass.
+      if (on) void maybeRunWiki(settingsDir()).catch(() => undefined);
+      res.json(view);
+    }),
+  );
   api.post(
     '/wiki',
     wrap(async (_req, res) => {

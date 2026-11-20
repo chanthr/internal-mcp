@@ -226,6 +226,16 @@ test('the plan\'s limit stops the answer with a sentence; the access token is re
   assert.equal(account().refreshToken, `refresh-${refreshes + 1}`);
 });
 
+test('a plan that is busy for a moment is asked again, as an API endpoint is', async () => {
+  const { ask } = await import('../src/core/llm.js');
+  process.env.LLM_RETRY_MS = '5';
+  const before = seen.filter((s) => s.path === '/v1/responses').length;
+  responses = [(res) => void res.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'busy' } }))];
+  const a = await ask({ prompt: 'Say ready' }, { kind: 'chatgpt', model: 'gpt-6.1-sol' });
+  assert.deepEqual([a.text, seen.filter((s) => s.path === '/v1/responses').length - before], ['ready', 2]);
+  delete process.env.LLM_RETRY_MS;
+});
+
 test('a refresh token OpenAI no longer takes asks for a new sign-in; signing out revokes and keeps the installation', async () => {
   const file = join(dir, 'data', 'chatgpt-account.json');
   writeFileSync(file, JSON.stringify({ ...account(), refreshToken: 'dead', expiresAt: 0 }));

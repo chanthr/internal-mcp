@@ -53,6 +53,11 @@ Changes that affect people who run or extend the server. Dates are release dates
   this machine gets batches of 32 and a 120-second timeout by default (they used to time out at 10 seconds on a
   busy laptop). With no embedding model set, the page says how many passages already have vectors and from which
   model.
+- **The wiki keeps itself up to date.** *Keep the wiki up to date* on the Wiki page reads documents that are
+  added or changed from then on, after each scan, up to 50 a day; what was waiting stays for the button. Pages are
+  written as each document is read (a restart in the middle used to leave what was read without pages), missing
+  pages are written again from what was kept, a busy model is asked again after a pause, and documents that could
+  not be read are listed with why. A ChatGPT plan is now retried like an API endpoint (`LLM_RETRY_MS`).
 - **A search assistant: `find_documents`.** With a model connected, a question can be handed to a model that
   searches several times with different words, reads where an excerpt is not enough, and returns the documents
   that answer it, best first, each with a line on what it holds (it answers nothing itself). `effort` sets how

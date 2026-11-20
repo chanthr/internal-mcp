@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,6 +31,7 @@ const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
 const { readAnswer, partsOf, pageName, topicKey, readWikiState } = await import('../src/plugins/knowledge/wiki.js');
+const { maybeRunWiki } = await import('../src/plugins/knowledge/wiki_auto.js');
 
 const server = await runHttp(new Registry(builtinPlugins));
 const base = `http://localhost:${server.port}`;
@@ -55,7 +56,7 @@ const wiki = join(dir, 'wiki');
 const page = (...parts: string[]) => readFileSync(join(wiki, ...parts), 'utf8');
 
 /** A model that reads what it is given: "Topic: fact." lines become topics and facts, a heading becomes the title. */
-const model = { calls: [] as Array<{ system: string; prompt: string }>, delay: 0 };
+const model = { calls: [] as Array<{ system: string; prompt: string }>, delay: 0, failNext: 0 };
 const llm = createServer((req: IncomingMessage, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -67,6 +68,11 @@ const llm = createServer((req: IncomingMessage, res) => {
     const prompt = body.messages.at(-1).content as string;
     model.calls.push({ system, prompt });
     if (model.delay) await new Promise((r) => setTimeout(r, model.delay));
+    // A provider that is busy for a moment.
+    if (model.failNext > 0) {
+      model.failNext--;
+      return void res.writeHead(503).end(JSON.stringify({ error: { message: 'overloaded, try again' } }));
+    }
     let text: string;
     if (system.startsWith('You write the opening')) {
       const topic = /^Topic: (.+)$/m.exec(prompt)![1];
@@ -125,7 +131,11 @@ test('what the model answers is read whatever it is wrapped in', () => {
 });
 
 test('the wiki is made as a folder of this server, and read into only with a model connected', async () => {
-  assert.deepEqual((await api('GET', '/wiki')).json, { exists: false, path: wiki, documents: 0, topics: 0, waiting: 0, gone: 0, run: null, model: false });
+  // Keeping it up to date needs a wiki first: what waits is known only then.
+  assert.equal((await api('POST', '/wiki/auto', { on: true })).status, 409);
+  // A page name fits a Linux file name (255 bytes) even in Hangul, where each character is three bytes.
+  assert.ok(Buffer.byteLength(pageName('가'.repeat(150))) <= 180);
+  assert.deepEqual((await api('GET', '/wiki')).json, { exists: false, path: wiki, documents: 0, topics: 0, waiting: 0, gone: 0, run: null, model: false, failed: [], auto: { on: false, since: null, perDay: 50, readToday: 0, backlog: 0, pausedUntil: null, last: null } });
   assert.equal((await api('POST', '/wiki/run', {})).status, 409);
 
   const made = await api('POST', '/wiki');
@@ -234,4 +244,150 @@ test('a run stops where going on is no use, and when the person stops it', async
   assert.match(s.run.stopped, /^Stopped\. What was read so far is kept\.$/);
   assert.ok(s.run.done >= 1 && s.run.done < 3 && s.waiting === 3 - s.run.done, JSON.stringify(s.run));
   assert.ok(existsSync(join(wiki, 'sources', 'docs - a.md')));
+});
+
+/** Wait for the run that is going on to end, and return the status after it. */
+const settled = async () => {
+  for (let i = 0; i < 400; i++) {
+    const st = (await api('GET', '/wiki')).json;
+    if (!st.run?.running) return st;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error('the run did not end');
+};
+
+test('pages that were read but never written are written again, without asking the model', async () => {
+  connect();
+  put('z-broken.md', '# Z\n\nBROKEN\n', new Date('2026-03-09T00:00:00Z'));
+  const all = await runWiki({ limit: 50 });
+  // Everything is read but the document the model cannot read, which waits with why.
+  assert.equal(all.waiting, 1, JSON.stringify(all.failed));
+  assert.equal(readWikiState().failed?.['local:docs/z-broken.md']?.modified !== undefined, true);
+  // As after a restart in the middle of a run: what was read is kept, but two of its pages are not on disk.
+  rmSync(join(wiki, 'sources', 'docs - b.md'));
+  rmSync(join(wiki, 'topics', 'Beta.md'));
+  const asked = model.calls.length;
+  const again = await runWiki({});
+  assert.equal(again.run.repaired, 2);
+  assert.ok(existsSync(join(wiki, 'sources', 'docs - b.md')) && existsSync(join(wiki, 'topics', 'Beta.md')));
+  assert.match(page('topics', 'Beta.md'), /- Two\. \(\[\[docs - b\|B\]\]\)/);
+  // Only the document that keeps failing was asked for again.
+  assert.ok(model.calls.slice(asked).every((c) => c.prompt.includes('BROKEN')), 'no page was written by asking the model');
+});
+
+test('a provider that is busy is asked again, and a document that keeps failing is kept with why', async () => {
+  Object.assign(process.env, { LLM_RETRY_MS: '5' });
+  put('d.md', '# D\n\nDelta: Four.\n', new Date('2026-03-04T00:00:00Z'));
+  // Busy once: the document it was asking about is asked for again after a pause.
+  model.failNext = 1;
+  const r = await runWiki({});
+  assert.deepEqual([r.run.stopped, model.failNext], [null, 0], JSON.stringify(r.run));
+  assert.ok(existsSync(join(wiki, 'sources', 'docs - d.md')));
+  // Written as soon as it was read: its line is in the log.
+  assert.match(page('log.md'), /## \[\d{4}-\d\d-\d\d\] read \| docs\/d\.md → 1 topic\n$/);
+  const broken = r.failed.find((f: any) => f.document === 'docs/z-broken.md');
+  assert.ok(broken && /shape asked for/.test(broken.why) && broken.tries >= 2, JSON.stringify(r.failed));
+
+  // Busy every time it is asked about one document: that one waits with why, and the run goes on with the next.
+  put('e.md', '# E\n\nEpsilon: Five.\n', new Date('2026-03-05T00:00:00Z'));
+  model.failNext = 3;
+  const busy = await runWiki({});
+  assert.deepEqual([busy.run.stopped, model.failNext, busy.run.attempted], [null, 0, 2], JSON.stringify(busy.run));
+  assert.ok(busy.failed.some((f: any) => f.document === 'docs/e.md' && /503/.test(f.why)), JSON.stringify(busy.failed));
+  delete process.env.LLM_RETRY_MS;
+});
+
+test('kept up to date: what comes after it is turned on is read by itself, up to a number a day', async () => {
+  connect();
+  // What waits now (e.md, and broken.md) stays for the button.
+  const on = await api('POST', '/wiki/auto', { on: true, perDay: 1 });
+  assert.deepEqual([on.status, on.json.on, on.json.backlog, on.json.perDay], [200, true, 2, 1], on.text);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal((await settled()).waiting, 2);
+
+  put('f.md', '# F\n\nPhi: Six.\n', new Date('2026-03-06T00:00:00Z'));
+  put('g.md', '# G\n\nGamma ray: Seven.\n', new Date('2026-03-07T00:00:00Z'));
+  assert.ok(await maybeRunWiki(dir));
+  const one = await settled();
+  assert.deepEqual([one.run.auto, one.run.done, one.auto.readToday, one.waiting], [true, 1, 1, 3], JSON.stringify(one.run));
+  assert.ok(!existsSync(join(wiki, 'sources', 'docs - e.md')), 'what waited when it was turned on is left for the button');
+  // No room left today.
+  assert.equal(await maybeRunWiki(dir), null);
+
+  // More room: switched again, it looks at once and reads the other new document.
+  assert.equal((await api('POST', '/wiki/auto', { on: true, perDay: 10 })).json.perDay, 10);
+  let two: any;
+  for (let i = 0; i < 200; i++) {
+    two = await settled();
+    if (two.auto.readToday === 2) break;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.equal(two.auto.readToday, 2);
+  // A key that is refused: the run stops, and this waits an hour before asking again.
+  put('h.md', '# H\n\nEta: Eight.\n', new Date('2026-03-08T00:00:00Z'));
+  connect('wrong-key-000000');
+  assert.ok(await maybeRunWiki(dir));
+  const refused = await settled();
+  assert.ok(refused.auto.pausedUntil && /did not accept the API key/.test(refused.auto.last.stopped), JSON.stringify(refused.auto));
+  assert.equal(await maybeRunWiki(dir), null, 'paused');
+  connect();
+  // Turned off: nothing is read by itself, and what waited is forgotten.
+  const off = await api('POST', '/wiki/auto', { on: false });
+  assert.deepEqual([off.json.on, off.json.backlog, off.json.pausedUntil], [false, 0, null]);
+  assert.equal(await maybeRunWiki(dir), null);
+});
+
+test('Stop means stop, off stops what it started, an unreadable folder keeps its pages, and failures count toward the day', async () => {
+  connect();
+  const startAuto = async (perDay: number) => {
+    await api('POST', '/wiki/auto', { on: false });
+    assert.equal((await api('POST', '/wiki/auto', { on: true, perDay })).status, 200);
+    await new Promise((r) => setTimeout(r, 50));
+    await settled();
+  };
+  // Pressed Stop while it reads by itself: it does not start again at the next scan.
+  await startAuto(50);
+  model.delay = 120;
+  for (const n of [1, 2, 3]) put(`s${n}.md`, `# S${n}\n\nSigma ${n}: Fact ${n}.\n`, new Date(`2026-04-0${n}T00:00:00Z`));
+  assert.ok(await maybeRunWiki(dir));
+  await new Promise((r) => setTimeout(r, 60));
+  await api('POST', '/wiki/stop');
+  const stopped = await settled();
+  model.delay = 0;
+  assert.match(stopped.run.stopped, /^Stopped\./);
+  assert.ok(stopped.auto.pausedUntil, 'paused after Stop');
+  assert.equal(await maybeRunWiki(dir), null);
+
+  // Turned off while it reads: what it started stops.
+  await startAuto(50);
+  model.delay = 120;
+  put('s4.md', '# S4\n\nSigma 4: Fact 4.\n', new Date('2026-04-04T00:00:00Z'));
+  assert.ok(await maybeRunWiki(dir));
+  await new Promise((r) => setTimeout(r, 30));
+  await api('POST', '/wiki/auto', { on: false });
+  const off = await settled();
+  model.delay = 0;
+  assert.match(off.run.stopped, /^Stopped\./);
+
+  // A folder that cannot be listed right now: what was read from it is not gone.
+  const pages = readdirSync(join(wiki, 'sources')).length;
+  chmodSync(docs, 0o000);
+  try {
+    const r = await runWiki({});
+    assert.equal(r.gone, 0);
+    assert.equal(readdirSync(join(wiki, 'sources')).length, pages);
+  } finally {
+    chmodSync(docs, 0o755);
+  }
+
+  // Two new documents the model cannot read, one slot left today: both are counted, read or not.
+  const before = (await api('GET', '/wiki')).json.auto.readToday;
+  await startAuto(before + 2);
+  put('t1.md', '# T1\n\nBROKEN\n', new Date('2026-04-11T00:00:00Z'));
+  put('t2.md', '# T2\n\nBROKEN\n', new Date('2026-04-12T00:00:00Z'));
+  assert.ok(await maybeRunWiki(dir));
+  const counted = await settled();
+  assert.deepEqual([counted.run.attempted, counted.auto.readToday], [2, before + 2], JSON.stringify(counted.auto));
+  assert.equal(await maybeRunWiki(dir), null, 'no room left today');
+  await api('POST', '/wiki/auto', { on: false });
 });
