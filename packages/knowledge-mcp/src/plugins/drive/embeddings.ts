@@ -13,6 +13,10 @@
  *
  * The API takes an `input` array, so one call embeds many chunks. 429 and 5xx are retried with exponential
  * backoff and jitter, and every call has a timeout.
+ *
+ * A model on this machine (an endpoint on localhost) gets smaller batches and longer timeouts by default: it shares
+ * the computer with everything else, takes seconds to load, and a batch of 128 long passages can take longer than
+ * a hosted API's 10 seconds. Without this the vectors of a large folder failed batch after batch on a busy laptop.
  */
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
@@ -32,8 +36,11 @@ export function embeddingsConfigured(): boolean {
   return !!(process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || process.env.EMBEDDING_BASE_URL?.trim());
 }
 
-// Inputs per batch (OpenAI accepts an array input). A conservative 128 leaves headroom under the token limit.
-const BATCH_SIZE = Number(process.env.EMBED_BATCH ?? 128);
+/** Is the endpoint on this machine? */
+export const embeddingsLocal = (): boolean => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/i.test(baseUrl());
+// Inputs per batch (OpenAI accepts an array input). A conservative 128 leaves headroom under the token limit; 32 on
+// this machine (see above).
+const batchSize = (): number => Number(process.env.EMBED_BATCH ?? (embeddingsLocal() ? 32 : 128));
 
 // ── Two retry policies (one per path) ──
 // Indexing (batch) path, patient: absorbs large chunk volumes and transient 429/5xx as far as possible (it runs in
@@ -44,14 +51,16 @@ interface EmbedPolicy {
   maxRetries: number;
   timeoutMs: number;
 }
-const INDEX_POLICY: EmbedPolicy = {
+// Read when used: whether the endpoint is on this machine is known only once it is set.
+const indexPolicy = (): EmbedPolicy => ({
   maxRetries: Number(process.env.EMBED_INDEX_RETRIES ?? 5),
-  timeoutMs: Number(process.env.EMBED_TIMEOUT_MS ?? 10_000),
-};
-const QUERY_POLICY: EmbedPolicy = {
+  timeoutMs: Number(process.env.EMBED_TIMEOUT_MS ?? (embeddingsLocal() ? 120_000 : 10_000)),
+});
+// A model on this machine may have to load first: a search waits for it once rather than answering without meaning.
+const queryPolicy = (): EmbedPolicy => ({
   maxRetries: Number(process.env.EMBED_QUERY_RETRIES ?? 2),
-  timeoutMs: Number(process.env.EMBED_QUERY_TIMEOUT_MS ?? 5_000),
-};
+  timeoutMs: Number(process.env.EMBED_QUERY_TIMEOUT_MS ?? (embeddingsLocal() ? 20_000 : 5_000)),
+});
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
@@ -145,12 +154,13 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
  */
 export async function embedTexts(
   texts: string[],
-  policy: EmbedPolicy = INDEX_POLICY,
+  policy: EmbedPolicy = indexPolicy(),
 ): Promise<number[][]> {
   if (texts.length === 0) return [];
   const results: number[][] = [];
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    const slice = texts.slice(i, i + BATCH_SIZE);
+  const size = batchSize();
+  for (let i = 0; i < texts.length; i += size) {
+    const slice = texts.slice(i, i + size);
     const embeds = await embedBatch(slice, policy);
     results.push(...embeds);
   }
@@ -161,6 +171,6 @@ export async function embedTexts(
 export async function embedQuery(query: string, prefix = ''): Promise<number[]> {
   // Some embedding models are trained with a prefix on the question ("query: …", an instruction): without it they
   // find less. Which one goes with the vectors in the index is the caller's to say (qdrant.ts vectorForm).
-  const [vec] = await embedTexts([`${prefix}${query}`], QUERY_POLICY);
+  const [vec] = await embedTexts([`${prefix}${query}`], queryPolicy());
   return vec;
 }

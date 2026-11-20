@@ -547,7 +547,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 | 작업 | 방법 |
 | --- | --- |
-| 로컬 폴더 추가 | `knowledge-mcp setup folder <경로>` 또는 설정의 `folders`. HTTP 서버는 뜰 때와 10분마다 훑습니다(`KNOWLEDGE_SCAN_INTERVAL_MIN`). stdio 세션은 시작할 때 한 번 훑습니다. `knowledge-mcp knowledge scan`은 지금 훑습니다. 바뀌지 않은 파일은 열지 않고, 지운 파일은 색인에서 빠집니다. 글을 먼저 색인하고 벡터는 뒤에 만들어서, 키워드 검색은 몇 초 안에 폴더 전체를 찾습니다 |
+| 로컬 폴더 추가 | `knowledge-mcp setup folder <경로>` 또는 설정의 `folders`. HTTP 서버는 뜰 때, 10분마다(`KNOWLEDGE_SCAN_INTERVAL_MIN`), 그리고 폴더 안 파일을 저장하거나 더하거나 지우면 몇 초 뒤에 훑습니다(폴더를 지켜봅니다. `KNOWLEDGE_WATCH=false`로 끕니다). stdio 세션은 시작할 때 한 번 훑습니다. `knowledge-mcp knowledge scan`은 지금 훑습니다. 바뀌지 않은 파일은 열지 않고, 지운 파일은 색인에서 빠집니다. 글을 먼저 색인하고 벡터는 뒤에 만들어서, 키워드 검색은 몇 초 안에 폴더 전체를 찾습니다. 임베딩 모델이 꺼져 있거나 느려서 만들지 못한 벡터는 1분, 5분, 15분 뒤에 다시 만들고, 콘솔에 이유를 보여 줍니다. 이 컴퓨터의 모델에는 한 번에 32개씩, 시간 제한 120초로 보냅니다(`EMBED_BATCH`, `EMBED_TIMEOUT_MS`) |
 | Drive 문서 추가 | Drive를 연결합니다. 색인이 빈 채로 서버가 뜨면 처음 색인을 스스로 만들고(`DRIVE_AUTO_INDEX=false`로 끕니다), 그 뒤 30분마다 변경분을 반영합니다(`DRIVE_SYNC_INTERVAL_MIN`). stdio 세션은 시작할 때 한 번 반영합니다 |
 | 뜻 검색을 나중에 추가 | 임베딩 모델을 정하고 서버를 다시 띄웁니다. 저장된 조각은 다음 훑기나 동기화 때 벡터를 받습니다. 문서를 다시 읽지 않습니다 |
 | 임베딩 모델 바꾸기 | 새 모델을 정한 뒤 `knowledge-mcp knowledge reembed`를 실행합니다. 옛 벡터를 버리고 저장된 글로 새 벡터를 만듭니다. 그 전까지는 키워드로 답합니다. 두 모델의 벡터는 섞지 않습니다 |
