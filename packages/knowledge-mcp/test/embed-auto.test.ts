@@ -72,7 +72,9 @@ test('vectors that could not be made are said, tried again soon, and made once t
 
   // The model comes up: the retry makes every vector, in batches small enough for a model on this machine.
   fake.down = false;
-  await until(async () => (await (await getLocalIndex())!.stats(DRIVE_COLLECTION)).withVectors === stats.chunks);
+  // What the console is told follows the round that wrote the vectors, so it is waited for, not the vectors alone.
+  await until(() => vectorStatus().filled === stats.chunks);
+  assert.equal((await (await getLocalIndex())!.stats(DRIVE_COLLECTION)).withVectors, stats.chunks);
   const done = vectorStatus();
   assert.deepEqual([done.error, done.retryAt, done.filled], [null, null, stats.chunks]);
   assert.ok(fake.batches.every((n) => n <= 32) && fake.batches.length >= 2, String(fake.batches));

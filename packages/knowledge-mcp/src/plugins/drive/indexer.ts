@@ -355,6 +355,9 @@ export async function backfillVectors(round = 20_000): Promise<number> {
       total += done;
       status.filled += done;
       status.filledAt = new Date().toISOString();
+      // A round that made vectors means the model answers again: the last failure is no longer the news.
+      status.error = null;
+      status.errorAt = null;
     }
   } catch (e) {
     // The endpoint is down or too slow: said on the console, and tried again soon rather than at the next pass.
