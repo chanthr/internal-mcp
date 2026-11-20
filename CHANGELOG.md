@@ -52,6 +52,12 @@ Changes that affect people who run or extend the server. Dates are release dates
   note into `notes/` (from the console's chat) or `inbox/<who>/` (from other assistants), never over another file
   and never into your documents; both folders are indexed without being configured. `POST /inbox` takes a note
   from a program with a member's key, such as a browser agent's routine.
+- **Vectors keep up by themselves.** The folders are watched: a file saved, added or removed is read within
+  seconds instead of at the next 10-minute pass (`KNOWLEDGE_WATCH=false` turns it off). Vectors that could not
+  be made are tried again after 1, 5 and 15 minutes, and Models → Search by meaning says why. An embedding model on
+  this machine gets batches of 32 and a 120-second timeout by default (they used to time out at 10 seconds on a
+  busy laptop). With no embedding model set, the page says how many passages already have vectors and from which
+  model.
 - **The wiki keeps itself up to date.** *Keep the wiki up to date* on the Wiki page reads documents that are
   added or changed from then on, after each scan, up to 50 a day; what was waiting stays for the button. Pages are
   written as each document is read (a restart in the middle used to leave what was read without pages), missing

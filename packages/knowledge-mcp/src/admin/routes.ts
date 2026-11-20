@@ -12,6 +12,7 @@
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
 import { deleteChat, historyOf, listChats, newChat, readChat, writeChat, type StoredTurn } from './chats.js';
+import { vectorStatus } from '../plugins/drive/indexer.js';
 import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
@@ -409,6 +410,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           },
           recut: await local.documentsCutOtherwise(DRIVE_COLLECTION, cutMark(profile), LEGACY_CUT),
           behind: embeddingsConfigured() && !problem ? (await vectorForm()).behind : false,
+          // How making vectors went: the last failure (until a round succeeds), and when it is tried again.
+          vectorRun: vectorStatus(),
         };
       }
       const tools = registry

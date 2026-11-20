@@ -40,9 +40,15 @@ export function Meaning() {
     return () => clearInterval(timer);
   }, [working, refresh]);
 
+  const missing = (i?.chunks ?? 0) - (i?.withVectors ?? 0);
+  const failing = e.set && !job?.running ? i?.vectorRun?.error ?? null : null;
   const help = !e.set
-    ? 'An embedding model on this computer, OpenAI, or another provider. The text of each passage is sent to it.'
-    : job?.running
+    ? i?.vectorsFrom && missing > 0
+      ? `No embedding model is set, so search uses keywords only. ${num(i.withVectors)} of ${num(i.chunks)} passages already have vectors from ${i.vectorsFrom}: set it up again and the other ${num(missing)} are made by themselves.`
+      : 'An embedding model on this computer, OpenAI, or another provider. The text of each passage is sent to it.'
+    : failing
+      ? `${num(missing)} of ${num(i?.chunks ?? 0)} passages have no vectors yet: ${failing}${i?.vectorRun?.retryAt ? ` Trying again at ${new Date(i.vectorRun.retryAt).toLocaleTimeString()}.` : ''}`
+      : job?.running
       ? `Making new vectors: ${num(i?.withVectors ?? 0)} of ${num(i?.chunks ?? 0)} passages. Search works by keywords meanwhile.`
       : job?.error
         ? job.error
@@ -55,7 +61,7 @@ export function Meaning() {
   return (
     <Section title="Search by meaning" text="Also finds documents worded differently from the question.">
       <div className="rows">
-        <Row title={e.set ? e.model ?? 'On' : 'Keywords only'} help={<span className={job?.error && !job.running ? 'error' : undefined}>{off.error ?? remake.error ?? help}</span>}>
+        <Row title={e.set ? e.model ?? 'On' : 'Keywords only'} help={<span className={(job?.error && !job.running) || failing ? 'error' : undefined}>{off.error ?? remake.error ?? help}</span>}>
           {working && <Spinner />}
           {e.set && !stale && !working && <Badge size="md" tone="success">On</Badge>}
           {stale && !job?.running && (
