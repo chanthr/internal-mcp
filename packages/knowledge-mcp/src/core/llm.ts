@@ -300,15 +300,17 @@ const pause = (ms: number, signal?: AbortSignal) =>
  */
 export async function ask(req: LlmRequest, settings: LlmSettings | null = llmSettings()): Promise<LlmAnswer> {
   if (!settings) throw new LlmError('No model is connected. Connect one in the console (Agent).');
-  // The SDK retries by itself. The plain endpoint is retried here.
+  // The SDK retries by itself. A plain endpoint and a ChatGPT plan are retried here, the same way: a failure that
+  // passes (a limit, a provider that is busy) is asked again twice, after a pause that doubles. LLM_RETRY_MS sets
+  // the first pause (1500 ms).
   if (settings.kind === 'anthropic') return askClaude(settings, req);
-  if (settings.kind === 'chatgpt') return askChatgpt(settings, req);
+  const first = Number(process.env.LLM_RETRY_MS) || 1500;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await askOpenai(settings, req);
+      return settings.kind === 'chatgpt' ? await askChatgpt(settings, req) : await askOpenai(settings, req);
     } catch (e) {
       if (!(e instanceof LlmError) || !e.retry || attempt >= 2) throw e;
-      await pause(1500 * 2 ** attempt, req.signal);
+      await pause(first * 2 ** attempt, req.signal);
     }
   }
 }

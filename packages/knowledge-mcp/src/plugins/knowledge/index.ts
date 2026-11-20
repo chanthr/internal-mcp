@@ -25,6 +25,9 @@ import { readDocumentTool } from './tools/read_document.js';
 import { linkedDocumentsTool } from './tools/linked_documents.js';
 import { findDocumentsTool } from './tools/find_documents.js';
 import { cli } from '../../core/invocation.js';
+import { settingsDir } from '../../core/config.js';
+import { repairWiki, wikiExists } from './wiki.js';
+import { maybeRunWiki } from './wiki_auto.js';
 
 /** Is there anything that feeds the index? */
 function hasSource(): boolean {
@@ -70,12 +73,23 @@ export const knowledgePlugin = definePlugin({
     'Each result shows the document date: say how old a figure is rather than presenting it as current. ' +
     'Where results come from a folder named wiki, those pages were written by a model from the documents: a topic page gathers what several documents say and names them. Use it for an overview, and the documents it names for the exact wording.',
   async start({ state, log }) {
+    // Pages of the wiki that a run read but did not get to write (a restart in the middle) are written now.
+    try {
+      if (wikiExists(settingsDir())) {
+        const n = repairWiki(settingsDir());
+        if (n) log(`wiki: wrote ${n} page(s) that were missing`);
+      }
+    } catch (e) {
+      log(`wiki: could not write missing pages: ${e instanceof Error ? e.message : e}`);
+    }
     // HTTP server: scan the folders now and then on a timer. KNOWLEDGE_SCAN_ENABLED=false turns it off.
     if (!(await shouldScan(state, log))) return;
     // Scans the OCR on this computer can read are read after each pass, when the person turned that on (console).
     afterFolderPass(() => {
       if (process.env.OCR_AUTO?.trim() === 'true' && ocrIsLocal() && ocrWaiting() > 0 && !ocrRun()?.running) startOcrRun();
     });
+    // Documents added or changed since "Keep the wiki up to date" was turned on (wiki_auto.ts).
+    afterFolderPass(() => void maybeRunWiki(settingsDir(), log).catch((e) => log(`wiki: ${e instanceof Error ? e.message : e}`)));
     startFolderScans(parseInt(process.env.KNOWLEDGE_SCAN_INTERVAL_MIN || '10', 10), log);
   },
   async catchUp({ state, log }) {
