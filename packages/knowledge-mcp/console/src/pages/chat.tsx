@@ -12,9 +12,13 @@
  *
  * Layout: the conversation, and below it a composer that stays at the bottom of the window. While an answer is
  * written the page follows it, unless the person scrolled up to read: then it stays where they are.
+ *
+ * A command the model asks to run (run_command, server: admin/terminal.ts) is shown on its own card, not folded
+ * with the other tool calls: the command in full, why, and where it runs, with Run and Don't run. Nothing runs
+ * until Run is pressed. While it runs its output is shown as it comes.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { call, chatStream, type ChatEvent, type ChatSummary, type StoredChat } from '../api';
+import { call, chatStream, type ChatEvent, type ChatSummary, type StoredChat, type WaitingCommand } from '../api';
 import { AskFirst, Page, useServer } from '../app';
 import { Select } from '../ui/select';
 import { Markdown } from '../markdown';
@@ -22,6 +26,7 @@ import { Button } from '../ui/button';
 import { EmptyState } from '../ui/empty-state';
 import { MessageActions } from '../ui/message-actions';
 import { TextArea } from '../ui/text-area';
+import { Spinner } from '../ui/spinner';
 import { ThinkingLoader } from '../ui/thinking-loader';
 import { ToolCallCard, ToolCallGroup } from '../ui/tool-call-card';
 import { num } from '../format';
@@ -32,6 +37,143 @@ interface Call {
   input: unknown;
   startedAt: number;
   result?: { ok: boolean; text: string; ms: number };
+  /** run_command: the command as the server asked for it, and how it went. */
+  cmd?: { id: string; command: string; why: string; state: WaitingCommand['state']; cwd: string; output: string; exit?: number | null; seconds?: number; note?: string };
+}
+const COMMAND = 'run_command';
+/** What the page keeps of a command's output while it runs: the end, where it is. */
+const OUTPUT_CHARS = 100_000;
+
+/** The person's answer to a command. */
+const answerCommand = (id: string, run: boolean) => call('POST', `/chat/commands/${id}`, { run });
+
+type CardState = WaitingCommand['state'];
+/**
+ * One command the chat asks to run. Waiting: the command in full, why, where, and the two answers. Running: the
+ * output as it comes. Done: how it ended, and the output folded (open when it failed).
+ */
+function CommandCard({ command, why, cwd, state, ok, summary, output, note, onAnswer }: {
+  command: string;
+  why: string;
+  cwd?: string;
+  state: CardState;
+  ok?: boolean;
+  summary?: string;
+  output?: string;
+  /** Not run: why, in a line. */
+  note?: string;
+  onAnswer?: (run: boolean) => Promise<unknown>;
+}) {
+  const [sending, setSending] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const out = useRef<HTMLPreElement>(null);
+  const card = useRef<HTMLElement>(null);
+  const lines = command.split('\n').length;
+  // Letters that look like others (a Cyrillic а in an address): the person is told to read closely.
+  const unusual = /[^\x20-\x7e\n\t]/.test(command);
+  // Asked to answer: the card is read from its top, not from where the page followed the answer to.
+  useEffect(() => {
+    if (state !== 'waiting' || !onAnswer || !card.current) return;
+    if (card.current.getBoundingClientRect().top < 72) card.current.scrollIntoView({ block: 'start' });
+  }, [state, onAnswer]);
+  useLayoutEffect(() => {
+    if (state === 'running' && out.current) out.current.scrollTop = out.current.scrollHeight;
+  }, [output, state]);
+  const answer = async (run: boolean) => {
+    if (!onAnswer) return;
+    setSending(true);
+    setProblem(null);
+    try {
+      await onAnswer(run);
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSending(false);
+    }
+  };
+  const title =
+    state === 'waiting' ? 'Run this command on your computer?' : state === 'running' ? 'Running on your computer' : state === 'declined' ? 'Not run' : ok ? 'Ran on your computer' : 'The command failed';
+  return (
+    <section ref={card} className="cmd" data-state={state} data-failed={state === 'done' && !ok ? '' : undefined} aria-label={title}>
+      <div className="cmd-head">
+        <span className="cmd-title">{title}</span>
+        {state === 'running' && <Spinner size={13} label="Running" />}
+        {(summary || (state === 'waiting' && lines > 1)) && <span className="cmd-summary">{summary ?? `${lines} lines`}</span>}
+      </div>
+      {why && <p className="cmd-why">{why}</p>}
+      <pre className="cmd-line">{command}</pre>
+      {state === 'waiting' && (
+        <>
+          {unusual && <p className="cmd-warn">It has characters other than plain English letters and signs. Check names and addresses letter by letter.</p>}
+          <p className="cmd-where">
+            It runs {cwd ? <>in <code>{cwd}</code>, </> : ''}with the permissions of the account that started this server.
+          </p>
+          {onAnswer && (
+            <div className="actions">
+              <Button size="sm" disabled={sending} onClick={() => void answer(true)}>Run</Button>
+              <Button size="sm" variant="ghost" disabled={sending} onClick={() => void answer(false)}>Don't run</Button>
+            </div>
+          )}
+        </>
+      )}
+      {problem && <p className="error" role="alert">{problem}</p>}
+      {state === 'running' && <pre ref={out} className="cmd-output">{output || 'No output yet.'}</pre>}
+      {state === 'declined' && note && <p className="cmd-where">{note}</p>}
+      {state === 'done' && output && (
+        <details className="cmd-more" open={!ok}>
+          <summary>Output</summary>
+          <pre className="cmd-output">{output}</pre>
+        </details>
+      )}
+    </section>
+  );
+}
+
+/** How a command ended, in a few words: "exit 0 · 3s". */
+const ended = (exit: number | null | undefined, seconds: number | undefined) => `exit ${exit ?? 'none'} · ${seconds ?? 0}s`;
+/** What the server told the model about a command that ran or did not, as the card says it. */
+function endOf(first: string): { summary?: string; note?: string } {
+  const exit = /exit code (\S+) after (\d+) s/.exec(first);
+  if (exit) return { summary: ended(exit[1] === 'none' ? null : Number(exit[1]), Number(exit[2])) };
+  if (/^It was stopped after/.test(first)) return { summary: 'stopped at the time limit' };
+  if (/^It was stopped:/.test(first)) return { summary: 'stopped' };
+  if (/^The person chose not/.test(first)) return { note: 'You chose not to run it.' };
+  const late = /^No one approved it within (\d+) minutes/.exec(first);
+  if (late) return { note: `Not answered within ${late[1]} minutes, so it did not run.` };
+  if (/^The conversation was stopped/.test(first)) return { note: 'The conversation was stopped before it ran.' };
+  return { note: first };
+}
+
+/** A run_command call as its card shows it: from the events while it is live, or from what was kept. */
+function cardOf(c: Call, onAnswer: (id: string, run: boolean) => Promise<unknown>) {
+  const input = (c.input && typeof c.input === 'object' ? c.input : {}) as { command?: unknown; why?: unknown };
+  // What the server will run, as it said so; the model's own words only for a call kept from before.
+  const base = c.cmd ? { command: c.cmd.command, why: c.cmd.why } : { command: String(input.command ?? ''), why: String(input.why ?? '') };
+  if (c.result) {
+    // What came back: its first line says how it ended; the output follows "Output:" when it ran.
+    const first = c.result.text.split('\n')[0];
+    const at = c.result.text.indexOf('\n\nOutput:\n');
+    const ran = c.cmd ? c.cmd.state !== 'declined' && c.cmd.state !== 'waiting' : at >= 0;
+    return {
+      ...base,
+      cwd: c.cmd?.cwd,
+      state: (ran ? 'done' : 'declined') as CardState,
+      ok: c.result.ok,
+      ...endOf(first),
+      output: ran ? c.cmd?.output || (at >= 0 ? c.result.text.slice(at + 10) : '') : undefined,
+    };
+  }
+  // Not asked yet (the server checks it first): no answers to give.
+  if (!c.cmd) return { ...base, state: 'waiting' as CardState };
+  return {
+    ...base,
+    cwd: c.cmd.cwd,
+    state: c.cmd.state,
+    output: c.cmd.output,
+    note: c.cmd.note,
+    summary: c.cmd.state === 'done' ? ended(c.cmd.exit, c.cmd.seconds) : undefined,
+    onAnswer: c.cmd.state === 'waiting' ? (run: boolean) => onAnswer(c.cmd!.id, run) : undefined,
+  };
 }
 interface Turn {
   role: 'user' | 'assistant';
@@ -104,6 +246,8 @@ export function Chat() {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   /** The answer in this conversation is still being written by the server (the page was left in the middle). */
   const [elsewhere, setElsewhere] = useState(false);
+  /** Its commands that wait for an answer or run, as the server says. */
+  const [waiting, setWaiting] = useState<WaitingCommand[]>([]);
   const [draft, setDraft] = useState('');
   const [tools, setTools] = useState<string[] | null>(null);
   const [showTools, setShowTools] = useState(false);
@@ -126,6 +270,7 @@ export function Chat() {
     if (!id) {
       setTurns([]);
       setElsewhere(false);
+      setWaiting([]);
       return;
     }
     try {
@@ -133,10 +278,12 @@ export function Chat() {
       if (mine !== opening.current) return;
       setTurns(c.turns.map(turnOf));
       setElsewhere(c.answering);
+      setWaiting(c.answering ? (c.commands ?? []) : []);
     } catch {
       if (mine !== opening.current) return;
       setTurns([]);
       setElsewhere(false);
+      setWaiting([]);
     }
   }, []);
   // The conversation in the address, or the latest one.
@@ -182,6 +329,11 @@ export function Chat() {
   }
 
   const step = (t: Turn, label: string): Turn => (t.steps[t.steps.length - 1] === label ? t : { ...t, steps: [...t.steps, label] });
+  /** Change the command `id` of the answer being written. */
+  const command = (t: Turn, id: string, change: (c: NonNullable<Call['cmd']>) => NonNullable<Call['cmd']>): Turn => ({
+    ...t,
+    calls: t.calls.map((c) => (c.cmd?.id === id ? { ...c, cmd: change(c.cmd) } : c)),
+  });
   const take = (e: ChatEvent) => {
     if (e.type === 'text') update((t) => ({ ...t, text: t.text + e.text }));
     else if (e.type === 'thinking') update((t) => step(t, 'Thinking'));
@@ -192,7 +344,11 @@ export function Chat() {
     else if (e.type === 'chat') {
       setChatId(e.id);
       nameInAddress(e.id);
-    }
+    } else if (e.type === 'approve') {
+      update((t) => step({ ...t, calls: t.calls.map((c) => (c.id === e.callId ? { ...c, cmd: { id: e.id, command: e.command, why: e.why, state: 'waiting', cwd: e.cwd, output: '' } } : c)) }, 'Waiting for your answer'));
+    } else if (e.type === 'decided') update((t) => step(command(t, e.id, (c) => ({ ...c, state: e.run ? 'running' : 'declined' })), e.run ? 'Running the command' : 'Thinking'));
+    else if (e.type === 'output') update((t) => command(t, e.id, (c) => ({ ...c, output: (c.output + e.text).slice(-OUTPUT_CHARS) })));
+    else if (e.type === 'ran') update((t) => step(command(t, e.id, (c) => ({ ...c, state: 'done', exit: e.exit, seconds: e.seconds })), 'Reading the results'));
   };
 
   const send = (text = draft) => {
@@ -211,6 +367,17 @@ export function Chat() {
       })
       .finally(() => {
         update((t) => (t.live ? { ...t, live: false, end: t.end ?? { model: llm.model ?? '', usage: { input: 0, output: 0, cached: 0, steps: 0 }, note: 'Stopped.', seconds: Math.max(1, Math.round((Date.now() - t.startedAt) / 1000)) } } : t));
+        // A command still waiting or running when the answer ended was stopped with it: no Run button stays.
+        update((t) => ({
+          ...t,
+          calls: t.calls.map((c) =>
+            c.cmd?.state === 'waiting'
+              ? { ...c, cmd: { ...c.cmd, state: 'declined', note: 'The conversation was stopped before it ran.' } }
+              : c.cmd?.state === 'running'
+                ? { ...c, cmd: { ...c.cmd, state: 'done', exit: null } }
+                : c,
+          ),
+        }));
         void loadList();
       });
   };
@@ -281,7 +448,11 @@ export function Chat() {
                 <span className="chat-tools-names">{g.tools.join(', ')}</span>
               </div>
             ))}
-            <p className="chat-tools-note">All of them only read, but save_note, which writes notes into the notes folder of this server. Tools that change other things are left out: run them yourself on the Tools page.</p>
+            <p className="chat-tools-note">
+              All of them only read, but save_note, which writes notes into the notes folder of this server
+              {tools.includes(COMMAND) ? ', and run_command, which runs a command on this computer only after you press Run' : ''}. Tools that change
+              other things are left out: run them yourself on the Tools page.
+            </p>
           </div>
         )}
 
@@ -306,10 +477,10 @@ export function Chat() {
                 <div key={i} className="chat-user">{t.text}</div>
               ) : (
                 <div key={i} className="chat-answer" data-ui-message="">
-                  {t.calls.length > 0 && (
+                  {t.calls.some((c) => c.name !== COMMAND) && (
                     <div className="chat-calls">
-                      <ToolCallGroup label={`Used ${t.calls.length} tool${t.calls.length === 1 ? '' : 's'}`} defaultOpen={false}>
-                        {t.calls.map((c) => (
+                      <ToolCallGroup label={`Used ${t.calls.filter((c) => c.name !== COMMAND).length} tool${t.calls.filter((c) => c.name !== COMMAND).length === 1 ? '' : 's'}`} defaultOpen={false}>
+                        {t.calls.filter((c) => c.name !== COMMAND).map((c) => (
                           <ToolCallCard
                             key={c.id}
                             name={c.name}
@@ -325,6 +496,11 @@ export function Chat() {
                       </ToolCallGroup>
                     </div>
                   )}
+                  {t.calls
+                    .filter((c) => c.name === COMMAND)
+                    .map((c) => (
+                      <CommandCard key={c.id} {...cardOf(c, answerCommand)} />
+                    ))}
                   {t.live && !t.text && <ThinkingLoader variant="plain" size="sm" phases={t.steps} phase={t.steps.length - 1} />}
                   {t.text && (
                     <div className="chat-text">
@@ -346,6 +522,25 @@ export function Chat() {
             )}
           </div>
         )}
+        {elsewhere &&
+          waiting.map((c) => (
+            <CommandCard
+              key={c.id}
+              command={c.command}
+              why={c.why}
+              cwd={c.cwd}
+              state={c.state}
+              output={c.output}
+              onAnswer={
+                c.state === 'waiting'
+                  ? async (run) => {
+                      await answerCommand(c.id, run);
+                      if (chatId) await open(chatId);
+                    }
+                  : undefined
+              }
+            />
+          ))}
         {elsewhere && <p className="field-help">The answer to the last message is still being written. It appears here when it is done.</p>}
         <div ref={end} className="chat-end" />
         <div className="chat-composer">

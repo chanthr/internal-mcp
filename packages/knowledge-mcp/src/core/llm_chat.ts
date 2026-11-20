@@ -45,8 +45,8 @@ export interface ChatRequest {
   history: ChatTurn[];
   message: string;
   tools: ChatTool[];
-  /** Run one tool. Throws only for a failure of the server; a tool's own error comes back as ok: false. */
-  run: (name: string, input: Record<string, unknown>) => Promise<{ ok: boolean; text: string }>;
+  /** Run one tool (`id`: the call's, as the events name it). Throws only for a failure of the server; a tool's own error comes back as ok: false. */
+  run: (name: string, input: Record<string, unknown>, id: string) => Promise<{ ok: boolean; text: string }>;
   emit: (e: ChatEvent) => void;
   signal: AbortSignal;
   /** Rounds of tool calls before the model is stopped. */
@@ -94,7 +94,7 @@ async function callTool(req: ChatRequest, id: string, name: string, input: Recor
   req.emit({ type: 'tool', id, name, input });
   const started = Date.now();
   const known = req.tools.some((t) => t.name === name);
-  const r = known ? await req.run(name, input) : { ok: false, text: `There is no tool named ${name} here.` };
+  const r = known ? await req.run(name, input, id) : { ok: false, text: `There is no tool named ${name} here.` };
   req.emit({ type: 'result', id, ok: r.ok, text: r.text, ms: Date.now() - started });
   return { ok: r.ok, text: shorten(r.text) };
 }

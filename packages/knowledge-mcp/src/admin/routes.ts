@@ -15,6 +15,7 @@ import { createSkill, installFromFolder, installFromGithub, listSkills, oneLine 
 import { INBOX, listNotes, NOTES, readNote } from '../plugins/knowledge/notes.js';
 import { listFonts, MAX_FONT_BYTES, readFont, removeFont, saveFont } from './fonts.js';
 import { deleteChat, historyOf, listChats, newChat, readChat, writeChat, type StoredTurn } from './chats.js';
+import { commandsOf, decide, runCommand, TERMINAL_TOOL, terminalOn, terminalTool, type TerminalEvent } from './terminal.js';
 import { vectorStatus } from '../plugins/drive/indexer.js';
 import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -1360,11 +1361,15 @@ export function mountConsole(app: Express, registry: Registry): boolean {
    */
   // One that writes is offered as well: save_note, which writes only new notes into this server's notes/ folder
   // (and replaces notes it wrote there): the person asks the chat to keep what it made.
-  const chatTools = (): ChatTool[] =>
-    registry
+  // And run_command (terminal.ts), which is not an MCP tool: the console's chat only, and each command runs only
+  // after the person approves it on this page.
+  const chatTools = (): ChatTool[] => [
+    ...registry
       .listTools(pingTool)
-      .filter((t) => t.name !== pingTool.name && (t.annotations?.readOnlyHint === true || t.name === 'save_note') && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
-      .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> }));
+      .filter((t) => t.name !== pingTool.name && t.name !== TERMINAL_TOOL && (t.annotations?.readOnlyHint === true || t.name === 'save_note') && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
+      .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> })),
+    ...(terminalOn() ? [terminalTool()] : []),
+  ];
   /** The skills there are, by name and what each is for: the model reads one with use_skill when a task calls for it. */
   const skillsLine = (): string => {
     // One short line each, and not more than SKILL_LINES of them: a skill costs little until it is read.
@@ -1381,6 +1386,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     'When the person asks to keep something (notes on a document, a summary), save it with save_note; it goes into the notes folder of this server.',
     'Answer in the language of the question.',
   ].join('\n');
+  const TERMINAL_RULES =
+    '\n\nWhen a task needs something installed (a skill, a font, a library) or a short script run, use run_command. The person approves each command before it runs, so explain in `why` what it does. Install skills into the skills folder the tool names; one that is there is ready for use_skill at once.';
   api.get('/chat', wrap(async (_req, res) => void res.json({ tools: chatTools().map((t) => t.name), left: registry.listTools(pingTool).filter((t) => t.name !== pingTool.name).length - chatTools().length })));
   // ── Skills (plugins/knowledge/skills.ts): installed from GitHub or a folder, or written here ──
   api.get('/skills', wrap(async (_req, res) => void res.json({ skills: listSkills() })));
@@ -1489,13 +1496,23 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       const chat = readChat(String(req.params.id));
       if (!chat) return refuse(res, 404, 'There is no such conversation.');
-      res.json(chat);
+      // A command waiting for the person, or running: shown when the conversation is opened again (terminal.ts).
+      res.json({ ...chat, commands: commandsOf(chat.id) });
     }),
   );
   api.delete(
     '/chats/:id',
     wrap(async (req, res) => {
       if (!deleteChat(String(req.params.id))) return refuse(res, 404, 'There is no such conversation.');
+      res.json({ ok: true });
+    }),
+  );
+  // The person's answer to a command the chat asked to run.
+  api.post(
+    '/chat/commands/:id',
+    wrap(async (req, res) => {
+      const { run } = z.object({ run: z.boolean() }).strict().parse(req.body);
+      if (!decide(String(req.params.id), run)) return refuse(res, 404, 'That command is not waiting for an answer any more.');
       res.json({ ok: true });
     }),
   );
@@ -1537,8 +1554,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.on('close', () => {
         if (!res.writableEnded) stop.abort();
       });
-      const send = (e: ChatEvent | { type: 'chat'; id: string; title: string }) => {
-        if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(e)}\n`);
+      const send = (e: ChatEvent | TerminalEvent | { type: 'chat'; id: string; title: string }) => {
+        if (res.writableEnded || res.destroyed) return;
+        // A page that does not read (a frozen tab) is not sent a command's output to keep in memory here: the
+        // result carries the output, and the page reads it from there.
+        if (e.type === 'output' && res.writableLength > 1_000_000) return;
+        res.write(`${JSON.stringify(e)}\n`);
       };
       // What the page is sent is kept with the conversation as well.
       const emit = (e: ChatEvent) => {
@@ -1557,11 +1578,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
             system:
               `${CHAT_RULES}\n\nWhat this server tells the assistants that connect to it:\n${instructions}` +
               skillsLine() +
+              (terminalOn() ? TERMINAL_RULES : '') +
               (left ? `\n\nThis conversation is longer than what you are given: its first ${left} message${left === 1 ? ' is' : 's are'} left out.` : ''),
             history,
             message: body.message,
             tools: chatTools(),
-            run: async (name, input) => runAsConsole(name, input),
+            run: async (name, input, id) => (name === TERMINAL_TOOL ? runCommand(input, { chatId: chat.id, callId: id, signal: stop.signal, say: send }) : runAsConsole(name, input)),
             emit,
             signal: stop.signal,
           },

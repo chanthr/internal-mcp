@@ -264,6 +264,29 @@ The **Notes** page lists `notes/` and `inbox/` and shows a note in a font you ad
 kept in `fonts/`). **Print or save as PDF** prints the note alone; choose *Save as PDF* in the browser's print
 window.
 
+### Commands the chat runs, after you approve them
+
+The console's chat can install what a task needs (a skill, a font, a library) or run a short script, with
+`run_command`. Before anything runs, the chat shows the command in full, why the model wants it, and where it runs,
+with **Run** and **Don't run**. Nothing runs until you press Run: a command you decline, leave for 15 minutes, or
+whose conversation you stop does not run. Leaving the page does not lose it; the command waits on the conversation
+until you come back.
+
+What you read is what runs: a command with characters that cannot be seen (direction marks, zero-width
+characters, control characters), or padded with blank lines or long runs of spaces, is refused before it is shown,
+and a command with letters other than plain ASCII is marked so you check names and addresses.
+
+A command runs on this computer with `/bin/sh` (`cmd` on Windows) and the permissions of the account that started
+the server, in `data/workspace`, one at a time per conversation, and is stopped after 10 minutes. What it starts in
+the background stops with it, and with the server. It gets a plain environment (`PATH`, `HOME`, the locale), not
+the server's keys; a command you approve can still read any file your account can, the server's `.env` among
+them. The skills and fonts folders are in `$KNOWLEDGE_SKILLS_DIR` and `$KNOWLEDGE_FONTS_DIR`: a skill copied there
+is ready at once. Every command asked for is written to `data/terminal.log` as it happens (refused, asked,
+declined, started, ended); its output is not.
+
+Only the console's chat has this tool. It is not one of the server's MCP tools, so an assistant connected with a
+key never sees it. `KNOWLEDGE_TERMINAL=false` turns it off.
+
 ## How it works
 
 <p align="center">
@@ -896,6 +919,7 @@ Node by its full path and the server starts there too.
 9. The console token is the admin's key. Its holder can change every setting, and can declare a connection that sends a secret from `.env` to an address of their choosing (that is what a connection is). The console narrows this to secrets in the folder's `.env`: it refuses a `${NAME}` that names one of the server's own credentials or a variable the server only inherited from the shell.
 10. A sign-in made from the console is kept in the data directory (`railway-login.json`, `google-login.json`, `mcp-logins/`), readable by the owner only, like the data file. A Google sign-in reads as you: whatever is in the folders you chose is visible to every user of the server, so choose folders meant for all of them. The address the browser comes back to after a sign-in accepts only the answer to a sign-in the console started minutes before, and saves nothing by itself.
 11. An app added through its MCP server acts as the account that signed in, for every user who may use that app's tools here. Only tools that read are on unless you allow changes, and what counts as reading is the app's own word about each tool, so add servers you trust. What its tools return is the app's text, not instructions.
+12. The console's chat can run commands on this computer (`run_command`), each only after you press Run on it. A document or a tool result can tell the model to ask for a command, so read the command, not only the reason given for it, before you run it. It runs as the account that started the server, without the server's keys in its environment, but it can read the files that account can (the server's `.env` among them). Connected assistants cannot reach it. `KNOWLEDGE_TERMINAL=false` turns it off.
 
 ## File map
 

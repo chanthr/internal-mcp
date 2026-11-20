@@ -216,6 +216,21 @@ p { margin: 0; }
 .chat-turns { display: flex; flex-direction: column; gap: 28px; }
 .chat-user { align-self: flex-end; max-width: 80%; padding: 10px 16px; border-radius: 18px; background: var(--active); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.6; }
 .chat-answer { display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+/* A command the chat asks to run: the command in full, then the answers. While it waits it stands out a little */
+.cmd { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--sheet); }
+.cmd[data-state="waiting"] { border-color: var(--faint); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.06); }
+.cmd-head { display: flex; align-items: center; gap: 8px; min-height: 20px; }
+.cmd-title { font-weight: 600; }
+.cmd-summary { margin-left: auto; color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cmd[data-failed] .cmd-summary { color: var(--danger); }
+.cmd-why { margin: 0; color: var(--muted); }
+/* Never cut: the person approves what they can read, all of it */
+.cmd-line { margin: 0; padding: 10px 12px; border-radius: 8px; background: var(--hover); font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cmd-where { margin: 0; font-size: 12px; color: var(--faint); }
+.cmd-warn { margin: 0; font-size: 12px; color: var(--danger); }
+.cmd-where code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.cmd-output { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; font-family: var(--mono); font-size: 12px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.cmd-more > summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 /* The tool cards draw their edge with a shadow, and the group clips its list: room on every side keeps the edge */
 .chat-calls .ui-tclc-group__list { padding: 6px 3px 4px; }
 .chat-text { overflow-wrap: anywhere; }

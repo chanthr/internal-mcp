@@ -47,6 +47,14 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **The chat runs commands, each after you approve it.** `run_command` lets the console's chat install a skill, a
+  font or a library, or run a short script. The command is shown in full with why and where it runs, and runs only
+  when you press Run; declined, unanswered for 15 minutes, or stopped, it does not. A command with characters that
+  cannot be seen, or padded to hide part of it, is refused before it is shown. It runs with `/bin/sh` as the account
+  that started the server in `data/workspace`, without the server's keys, one at a time per conversation, for at
+  most 10 minutes; what it starts in the background stops with it and with the server. Each step is logged to
+  `data/terminal.log` without the output. Connected assistants never see it.
+  `KNOWLEDGE_TERMINAL=false` turns it off.
 - **Skills, and notes in your own font.** The Skills page installs skills (Agent Skills format) from GitHub or a
   folder, or writes one; every assistant that uses the server is told their names and reads one with `use_skill`
   when a task calls for it. Nothing in a skill is run. The Notes page lists `notes/` and `inbox/`, shows a note in
