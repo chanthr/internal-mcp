@@ -29,15 +29,16 @@ const inputSchema = z.object({
 
 const PER_HOUR = 60;
 const saved = new Map<string, number[]>();
-/** Who is writing, as a folder name under inbox/: the key's id, or the part of the email before the @. */
-const whoOf = (auth: AuthContext): string => (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : (auth.email ?? 'local'));
+/** Who is writing, as a folder name under inbox/: the person (the part of the email before the @), else the key. As POST /inbox. */
+const whoOf = (auth: AuthContext): string => auth.email ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : 'local');
 
 export const saveNoteTool = defineTool({
   name: 'save_note',
   description: DESCRIPTION,
   input: inputSchema,
-  // It writes, but only new files in this server's own note folders (or notes it wrote there before).
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  // It writes only into this server's note folders, but with path it replaces a note there (the earlier version is
+  // kept in .versions/): a client that asks before such a call should ask.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   run: (args, ctx) => {
     if (ctx.user.role === 'viewer') return { content: [{ type: 'text' as const, text: '[error] A viewer may not save notes.' }], isError: true };
     const who = whoOf(ctx.auth);

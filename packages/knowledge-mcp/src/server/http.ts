@@ -468,13 +468,17 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     try {
       const { saveNote, INBOX } = await import('../plugins/knowledge/notes.js');
       const { scanFoldersSoon } = await import('../plugins/knowledge/folders.js');
-      const who = body.data.from ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : auth.email ?? 'other');
-      const r = saveNote({ ...body.data, place: INBOX, from: who });
+      // The folder is who sent it (the key's owner), whatever the note calls itself: that goes in as `via`.
+      const who = auth.email ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : 'other');
+      const { from: via, ...note } = body.data;
+      const r = saveNote({ ...note, via, place: INBOX, from: who });
       void scanFoldersSoon().catch(() => undefined);
       logToolCall({ tool: 'inbox', auth, ok: true, error: null, durationMs: 0 });
       res.status(201).json({ saved: r.shown });
     } catch (e) {
-      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+      // The reason (a path of this server, a file system error) is for the server's log, not for the sender.
+      console.error('[inbox] could not save a note:', e instanceof Error ? e.message : e);
+      res.status(500).json({ error: 'The note could not be saved on the server.' });
     }
   });
 

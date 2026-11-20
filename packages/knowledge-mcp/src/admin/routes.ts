@@ -1461,7 +1461,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         chat.answering = false;
         chat.updated = new Date().toISOString();
         try {
-          writeChat(chat);
+          // Deleted while the answer was written: it stays deleted.
+          if (readChat(chat.id)) writeChat(chat);
         } catch (e) {
           console.error('[console] could not keep the conversation:', msg(e));
         }
