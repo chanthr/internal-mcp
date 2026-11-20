@@ -47,6 +47,12 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Vectors keep up by themselves.** The folders are watched: a file saved, added or removed is read within
+  seconds instead of at the next 10-minute pass (`KNOWLEDGE_WATCH=false` turns it off). Vectors that could not
+  be made are tried again after 1, 5 and 15 minutes, and Models → Search by meaning says why. An embedding model on
+  this machine gets batches of 32 and a 120-second timeout by default (they used to time out at 10 seconds on a
+  busy laptop). With no embedding model set, the page says how many passages already have vectors and from which
+  model.
 - **A search assistant: `find_documents`.** With a model connected, a question can be handed to a model that
   searches several times with different words, reads where an excerpt is not enough, and returns the documents
   that answer it, best first, each with a line on what it holds (it answers nothing itself). `effort` sets how

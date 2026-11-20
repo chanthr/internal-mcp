@@ -348,12 +348,47 @@ export async function fillMissingVectors(max: number): Promise<number> {
 export async function backfillVectors(round = 20_000): Promise<number> {
   if (!(await getLocalIndex()) || !(await vectorsUsable())) return 0;
   let total = 0;
-  for (;;) {
-    const done = await withLock(BACKFILL_LOCK, () => fillMissingVectors(round));
-    if (!done) break; // nothing left, or another run holds the lock
-    total += done;
+  try {
+    for (;;) {
+      const done = await withLock(BACKFILL_LOCK, () => fillMissingVectors(round));
+      if (!done) break; // nothing left, or another run holds the lock
+      total += done;
+      status.filled += done;
+      status.filledAt = new Date().toISOString();
+    }
+  } catch (e) {
+    // The endpoint is down or too slow: said on the console, and tried again soon rather than at the next pass.
+    status.error = e instanceof Error ? e.message.slice(0, 300) : String(e);
+    status.errorAt = new Date().toISOString();
+    retrySoon();
+    throw e;
   }
+  status.error = null;
+  status.errorAt = null;
+  retryStep = 0;
   return total;
+}
+
+// ── Making vectors: how it went, and trying again after a failure ──
+
+const status = { error: null as string | null, errorAt: null as string | null, filled: 0, filledAt: null as string | null, retryAt: null as string | null };
+/** How making vectors went since the server started: the last failure (until a round succeeds) and what was made. */
+export const vectorStatus = (): Readonly<typeof status> => ({ ...status });
+
+/** Pauses before vectors that failed are tried again: a minute, then five, then a quarter of an hour. */
+const RETRY_STEPS = (process.env.EMBED_RETRY_STEPS_MS ?? '60000,300000,900000').split(',').map(Number);
+let retryStep = 0;
+let retryTimer: NodeJS.Timeout | null = null;
+function retrySoon(): void {
+  if (retryTimer) return;
+  const ms = RETRY_STEPS[Math.min(retryStep++, RETRY_STEPS.length - 1)];
+  status.retryAt = new Date(Date.now() + ms).toISOString();
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    status.retryAt = null;
+    void backfillVectors().catch(() => undefined);
+  }, ms);
+  retryTimer.unref?.();
 }
 
 /**

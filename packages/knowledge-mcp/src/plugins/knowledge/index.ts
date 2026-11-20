@@ -17,7 +17,7 @@ import { reembed } from './reembed.js';
 import { compare, measure } from './measure.js';
 import { EFFORTS, type Effort } from './agent_search.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
-import { afterFolderPass, foldersConfigured, scanFolders, startFolderScans } from './folders.js';
+import { afterFolderPass, foldersConfigured, localFolders, scanFolders, scanFoldersSoon, startFolderScans } from './folders.js';
 import { ocrIsLocal } from '../drive/ocr.js';
 import { ocrRun, ocrWaiting, startOcrRun } from './ocr_run.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
@@ -25,6 +25,7 @@ import { readDocumentTool } from './tools/read_document.js';
 import { linkedDocumentsTool } from './tools/linked_documents.js';
 import { findDocumentsTool } from './tools/find_documents.js';
 import { cli } from '../../core/invocation.js';
+import { watchFolders } from './watch.js';
 
 /** Is there anything that feeds the index? */
 function hasSource(): boolean {
@@ -77,6 +78,10 @@ export const knowledgePlugin = definePlugin({
       if (process.env.OCR_AUTO?.trim() === 'true' && ocrIsLocal() && ocrWaiting() > 0 && !ocrRun()?.running) startOcrRun();
     });
     startFolderScans(parseInt(process.env.KNOWLEDGE_SCAN_INTERVAL_MIN || '10', 10), log);
+    // A file saved, added or removed is read within seconds, not at the next timed pass (watch.ts).
+    if (process.env.KNOWLEDGE_WATCH?.trim() !== 'false') {
+      watchFolders(localFolders(), () => void scanFoldersSoon(log).catch((e) => log(`folders: scan failed: ${e instanceof Error ? e.message : e}`)), log);
+    }
   },
   async catchUp({ state, log }) {
     // stdio session: one scan at start, so files edited since the last session are searchable.
