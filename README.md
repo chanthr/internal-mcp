@@ -193,6 +193,8 @@ wiki/
 | Obsidian | Open `wiki/` as a vault: pages link with `[[…]]`, and file names are the titles |
 | Your own notes | Whatever you write under a `## Notes` heading on a page stays when the page is written again |
 | A small or local model | Works: the model is asked for labelled lines, not JSON. Set `WIKI_PART_CHARS` (default 24000) lower when the model's window is small. What a page says is as good as the model that read the document |
+| Keeping it up to date | **Keep the wiki up to date** on the Wiki page reads documents that are added or changed from then on, after each scan of the folders, up to 50 a day. What was waiting when you turned it on stays for the button, so a large backlog does not spend the model's usage by itself |
+| When reading fails | A document's pages and its line in the log are written as soon as it is read, so a restart in the middle loses nothing; pages that are missing are written again from what was kept, without asking the model. A model that is busy or limiting requests is asked again after a pause (the same way for an API and a ChatGPT plan). A document that keeps failing is shown with why and left until it changes; a failure every call would hit (a key, a used-up plan) pauses the automatic reading for an hour |
 
 ### The search assistant
 

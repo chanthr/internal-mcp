@@ -6,6 +6,7 @@ import { call, type Changed } from '../api';
 import { LinkButton, Page, Row, Section, useAction, useServer } from '../app';
 import { num, plural } from '../format';
 import { Button } from '../ui/button';
+import { Switch } from '../ui/switch';
 
 export function WikiPage() {
   return (
@@ -26,6 +27,18 @@ interface WikiRun {
   usage: { input: number; output: number; calls: number };
   stopped: string | null;
   finishedAt: string | null;
+  auto: boolean;
+  repaired: number;
+}
+/** Keeping the wiki up to date by itself (server: wiki_auto.ts). */
+interface Auto {
+  on: boolean;
+  since: string | null;
+  perDay: number;
+  readToday: number;
+  backlog: number;
+  pausedUntil: string | null;
+  last: { at: string; read: number; failed: number; stopped: string | null } | null;
 }
 interface WikiStatus {
   exists: boolean;
@@ -36,9 +49,14 @@ interface WikiStatus {
   gone: number;
   run: WikiRun | null;
   model: boolean;
+  auto: Auto;
+  /** Documents that could not be read, as they are now, newest first. */
+  failed: Array<{ document: string; why: string; tries: number; at: string }>;
 }
 /** How many documents one press reads. Reading costs: a person sees what it came to before reading on. */
 const BATCH = 25;
+/** As the server (wiki_auto.ts DEFAULT_PER_DAY). */
+const DEFAULT_PER_DAY = 50;
 
 /** The wiki the model writes from the documents: make it, read documents into it, and see how far a run is. */
 function Wiki() {
@@ -60,6 +78,8 @@ function Wiki() {
   const run = wiki?.run ?? null;
   const next = Math.min(wiki?.waiting ?? 0, BATCH);
   const last = run && !run.running ? run : null;
+  const auto = wiki?.auto ?? null;
+  const switchAuto = (on: boolean) => void act.run(async () => { await call('POST', '/wiki/auto', { on }); await load(); });
   return (
     <Section title="Wiki folder" text="Searched like your other folders, and opens in Obsidian as it is.">
       <div className="rows">
@@ -101,10 +121,10 @@ function Wiki() {
                       {last.stopped ? ` ${last.stopped}` : ''}
                     </span>
                   )}
-                  {last && last.failed.length > 0 && (
+                  {wiki.failed.length > 0 && (
                     <span className="row-note">
-                      Not read: {last.failed.slice(0, 3).map((f) => `${f.document} (${f.why})`).join('; ')}
-                      {last.failed.length > 3 ? ` and ${last.failed.length - 3} more` : ''}
+                      Not read: {wiki.failed.slice(0, 3).map((f) => `${f.document} (${f.why}${f.tries > 1 ? `, tried ${f.tries} times` : ''})`).join('; ')}
+                      {wiki.failed.length > 3 ? ` and ${wiki.failed.length - 3} more` : ''}
                     </span>
                   )}
                 </>
@@ -124,6 +144,24 @@ function Wiki() {
                 {next > 0 ? `Read ${plural(next, 'document')}` : 'Read documents'}
               </Button>
             )}
+          </Row>
+        )}
+        {wiki?.exists && auto && (
+          <Row
+            title="Keep the wiki up to date"
+            help={
+              auto.on ? (
+                <>
+                  Documents added or changed since {new Date(auto.since ?? Date.now()).toLocaleDateString()} are read after each scan, up to {plural(auto.perDay, 'document')} a day ({num(auto.readToday)} today).
+                  {auto.backlog > 0 ? ` The ${plural(auto.backlog, 'document')} waiting when this was turned on ${auto.backlog === 1 ? 'is' : 'are'} read with the button.` : ''}
+                  {auto.pausedUntil && <span className="row-note">Paused until {new Date(auto.pausedUntil).toLocaleTimeString()}: {auto.last?.stopped}</span>}
+                </>
+              ) : (
+                `Reads documents that are added or changed by itself, up to ${DEFAULT_PER_DAY} a day, with the model on the Models page. What waits now stays for the button.`
+              )
+            }
+          >
+            <Switch aria-label="Keep the wiki up to date" checked={auto.on} disabled={!state.editable || !wiki.model || act.busy} onChange={(e) => switchAuto(e.target.checked)} />
           </Row>
         )}
       </div>

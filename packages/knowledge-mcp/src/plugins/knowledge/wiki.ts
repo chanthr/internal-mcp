@@ -17,8 +17,16 @@
  * points, topics with facts); the pages are written from that data by this file, so every page has the same shape
  * and every fact keeps its source. What the model returned is kept in the data directory: pages can be written
  * again without asking the model again, and a document is read again only when it has changed.
+ *
+ * A document's pages and its log line are written as soon as it is read, not at the end of a run: a server that
+ * restarts in the middle (a watcher that restarts it on every change of the code does) loses nothing. Pages that
+ * are in what is kept but not on disk are written again before every run (repairWiki), without asking the model.
+ *
+ * A model that fails for a while (a limit, a timeout, a provider that is down: LlmError with retry) is asked again
+ * after a pause, twice. What still fails is kept with the reason; a document that failed three times is left for
+ * the person (wiki_auto.ts does not try it again until it changes).
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { z } from 'zod';
 import { dataFile } from '../../core/data_file.js';
@@ -58,11 +66,22 @@ interface SourceState {
   /** The document was longer than what is read of one document. */
   partial?: boolean;
 }
+/** A document that could not be read: when it was as it is now, why, and how often it was tried. */
+export interface Failure {
+  modified: string;
+  why: string;
+  tries: number;
+  at: string;
+}
 export interface WikiState {
   version: 1;
   sources: Record<string, SourceState>;
   topics: Record<string, TopicState>;
+  /** Not in wiki states written before it was kept. */
+  failed?: Record<string, Failure>;
 }
+/** Tries after which a document is left until it changes or the person reads it again by hand. */
+export const MOST_TRIES = 3;
 const stateFile = dataFile<WikiState>('wiki-state.json');
 export const readWikiState = (): WikiState => stateFile.read() ?? { version: 1, sources: {}, topics: {} };
 
@@ -307,6 +326,25 @@ export function createWiki(dir: string): string {
   return root;
 }
 
+/**
+ * Write the pages that are in what is kept but not on disk (a run that ended before its pages were written, a page
+ * deleted by hand). No model is asked. Returns how many pages were written.
+ */
+export function repairWiki(dir: string, state: WikiState = readWikiState()): number {
+  const root = wikiDir(dir);
+  if (!wikiExists(dir)) return 0;
+  const touched = { sources: new Set<string>(), topics: new Set<string>() };
+  for (const [id, s] of Object.entries(state.sources)) if (!existsSync(join(root, 'sources', `${s.page}.md`))) touched.sources.add(id);
+  for (const [key, t] of Object.entries(state.topics)) if (!existsSync(join(root, 'topics', `${pageName(t.title)}.md`))) touched.topics.add(key);
+  const n = touched.sources.size + touched.topics.size;
+  if (n > 0) {
+    mkdirSync(join(root, 'sources'), { recursive: true });
+    mkdirSync(join(root, 'topics'), { recursive: true });
+    writeWiki(dir, state, touched);
+  }
+  return n;
+}
+
 /** Write every page from what is kept, and take away the pages of what is gone. */
 export function writeWiki(dir: string, state: WikiState, touched?: { sources: Set<string>; topics: Set<string> }): void {
   const root = wikiDir(dir);
@@ -460,6 +498,10 @@ export interface WikiRun {
   /** Why it stopped before the end: stopped by the person, or something every further call would hit as well. */
   stopped: string | null;
   finishedAt: string | null;
+  /** Started by itself (wiki_auto.ts), not by the person. */
+  auto: boolean;
+  /** Pages that were in what is kept but missing on disk, written again before reading. */
+  repaired: number;
 }
 let run: (WikiRun & { abort: AbortController }) | null = null;
 export const wikiRun = (): WikiRun | null => {
@@ -474,31 +516,73 @@ export function stopWikiRun(): void {
   }
 }
 
+/** Pauses before a document is asked for again after a passing failure (ms). Shorter in tests. */
+const retryPauses = (): number[] => {
+  const base = Number(process.env.WIKI_RETRY_MS) || 5_000;
+  return [base, base * 4];
+};
+const pause = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+  });
+
 /**
  * Read up to `limit` documents that are new or changed, write their pages, and write the opening of the topic
  * pages that changed. Runs on after the caller has its answer: `wikiRun()` says how far it is. `afterWrite` is
- * called when pages were written (the folder is then read into the index again).
+ * called when pages were written (the folder is then read into the index again). `only` narrows the documents
+ * (wiki_auto.ts reads only what came after it was turned on); `onEnd` hears how the run ended.
  */
-export function startWikiRun(dir: string, opts: { limit: number; summaries?: number; afterWrite?: () => void }): WikiRun {
+export function startWikiRun(
+  dir: string,
+  opts: { limit: number; summaries?: number; afterWrite?: () => void; only?: (doc: WikiDoc, state: WikiState) => boolean; auto?: boolean; onEnd?: (run: WikiRun) => void },
+): WikiRun {
   if (run?.running) return wikiRun()!;
   const abort = new AbortController();
-  const mine: WikiRun & { abort: AbortController } = { running: true, done: 0, total: 0, phase: 'reading', current: null, written: 0, failed: [], usage: { input: 0, output: 0, calls: 0 }, stopped: null, finishedAt: null, abort };
+  const mine: WikiRun & { abort: AbortController } = {
+    running: true,
+    done: 0,
+    total: 0,
+    phase: 'reading',
+    current: null,
+    written: 0,
+    failed: [],
+    usage: { input: 0, output: 0, calls: 0 },
+    stopped: null,
+    finishedAt: null,
+    auto: !!opts.auto,
+    repaired: 0,
+    abort,
+  };
   run = mine;
   const root = wikiDir(dir);
   const work = async () => {
     const state = readWikiState();
+    mine.repaired = repairWiki(dir, state);
     const rules = readFileSync(join(root, 'AGENTS.md'), 'utf8');
     const limits = wikiLimits();
     const { toRead, gone } = wikiWaiting(await wikiDocuments(dir), state);
     const touched = { sources: new Set<string>(), topics: new Set<string>() };
-    const log: string[] = [];
+    // One line per document, written as it is read. Lines of the log follow each other; the first after the head
+    // of the file has a blank line before it.
+    const logLine = (line: string) => {
+      const path = join(root, 'log.md');
+      const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
+      const sep = /(^|\n)## \[[^\n]*\n$/.test(text) ? '' : text.endsWith('\n') ? '\n' : '\n\n';
+      appendFileSync(path, `${sep}${line}\n`);
+    };
     for (const id of gone) {
-      forget(state, id, touched.topics);
+      const was = new Set<string>();
+      forget(state, id, was);
       rmSync(join(root, 'sources', `${state.sources[id].page}.md`), { force: true });
-      log.push(`## [${today()}] gone | ${id.replace(/^local:/, '')}`);
       delete state.sources[id];
+      delete state.failed?.[id];
+      for (const key of was) touched.topics.add(key);
+      writeWiki(dir, state, { sources: new Set(), topics: new Set([...was].filter((k) => state.topics[k]?.facts.length)) });
+      logLine(`## [${today()}] gone | ${id.replace(/^local:/, '')}`);
     }
-    const batch = toRead.slice(0, opts.limit);
+    if (gone.length) stateFile.write(state);
+    const batch = toRead.filter((d) => !opts.only || opts.only(d, state)).slice(0, opts.limit);
     mine.total = batch.length;
     for (const doc of batch) {
       if (abort.signal.aborted) break;
@@ -507,8 +591,23 @@ export function startWikiRun(dir: string, opts: { limit: number; summaries?: num
         const { text, needsOcr } = await extractLocalFile(doc.abs, doc.mimeType);
         if (needsOcr || !text.trim()) throw new LlmError('There is no text in it to read.');
         const known = Object.values(state.topics).map((t) => t.title);
-        const { read, partial } = await readDocument(doc.path, text, rules, known, limits, mine.usage, abort.signal);
-        forget(state, doc.id, touched.topics);
+        // A failure that passes (a limit, a timeout) is waited out and asked again, twice.
+        let got: Awaited<ReturnType<typeof readDocument>> | null = null;
+        for (const wait of [0, ...retryPauses()]) {
+          if (wait) await pause(wait, abort.signal);
+          if (abort.signal.aborted) break;
+          try {
+            got = await readDocument(doc.path, text, rules, known, limits, mine.usage, abort.signal);
+            break;
+          } catch (e) {
+            if (!(e instanceof LlmError && e.retry) || wait === retryPauses().at(-1)) throw e;
+          }
+        }
+        if (!got) break;
+        const { read, partial } = got;
+        // This document's pages are written now: the topics it fed before and the ones it feeds now.
+        const mineTopics = new Set<string>();
+        forget(state, doc.id, mineTopics);
         const keys: string[] = [];
         for (const t of read.topics) {
           const key = topicKey(t.title);
@@ -518,24 +617,31 @@ export function startWikiRun(dir: string, opts: { limit: number; summaries?: num
             had.facts.push(...t.facts.map((text) => ({ text, source: doc.id })));
           } else state.topics[key] = { title: nfc(t.title).trim(), kind: t.kind, definition: t.definition, facts: t.facts.map((text) => ({ text, source: doc.id })) };
           keys.push(key);
-          touched.topics.add(key);
+          mineTopics.add(key);
         }
         state.sources[doc.id] = { modified: doc.modifiedTime, title: oneLine(read.title) || doc.name, page: sourcePage(doc.path), summary: read.summary, points: read.points, topics: [...new Set(keys)], ...(partial ? { partial: true } : {}) };
+        delete state.failed?.[doc.id];
         touched.sources.add(doc.id);
-        log.push(`## [${today()}] read | ${doc.path} → ${keys.length} topic${keys.length === 1 ? '' : 's'}`);
+        for (const key of mineTopics) touched.topics.add(key);
+        stateFile.write(state);
+        writeWiki(dir, state, { sources: new Set([doc.id]), topics: new Set([...mineTopics].filter((k) => state.topics[k]?.facts.length)) });
+        logLine(`## [${today()}] read | ${doc.path} → ${keys.length} topic${keys.length === 1 ? '' : 's'}`);
       } catch (e) {
         if (abort.signal.aborted) break;
         const why = e instanceof Error ? e.message : String(e);
         mine.failed.push({ document: doc.path, why });
+        // Kept with the reason, so the page can say what was not read and why, and a document that keeps failing
+        // is not asked for again and again.
+        const was = state.failed?.[doc.id];
+        state.failed = { ...state.failed, [doc.id]: { modified: doc.modifiedTime, why: why.slice(0, 300), tries: was && was.modified === doc.modifiedTime ? was.tries + 1 : 1, at: new Date().toISOString() } };
+        stateFile.write(state);
         // The key, the model, the credit: the next document would fail the same way. Stop and say why.
-        if (e instanceof LlmError && !e.retry && !/no text in it|shape asked for|declined/.test(why)) {
+        if (e instanceof LlmError && !/no text in it|shape asked for|declined/.test(why)) {
           mine.stopped = why;
           break;
         }
       }
       mine.done++;
-      // Kept after every document: a run that is stopped, or a server that restarts, loses nothing that was read.
-      stateFile.write(state);
     }
     mine.current = null;
     // A topic nothing speaks of any more goes, with its page.
@@ -580,8 +686,7 @@ export function startWikiRun(dir: string, opts: { limit: number; summaries?: num
     // Related topics are read from the documents they share, so the neighbours of what changed are written too.
     for (const id of touched.sources) for (const key of state.sources[id]?.topics ?? []) touched.topics.add(key);
     writeWiki(dir, state, touched);
-    if (log.length) writeFileSync(join(root, 'log.md'), `${readFileSync(join(root, 'log.md'), 'utf8').trimEnd()}\n\n${log.join('\n')}\n`);
-    if (touched.sources.size || touched.topics.size || gone.length) opts.afterWrite?.();
+    if (touched.sources.size || touched.topics.size || gone.length || mine.repaired) opts.afterWrite?.();
   };
   void work()
     .catch((e) => {
@@ -591,14 +696,35 @@ export function startWikiRun(dir: string, opts: { limit: number; summaries?: num
       mine.running = false;
       mine.current = null;
       mine.finishedAt = new Date().toISOString();
+      try {
+        opts.onEnd?.(wikiRun()!);
+      } catch {
+        /* the one who listens has its own troubles */
+      }
     });
   return wikiRun()!;
 }
 
-/** What the page shows: is there a wiki, how much is in it, how much waits to be read. */
-export async function wikiStatus(dir: string): Promise<{ exists: boolean; path: string; documents: number; topics: number; waiting: number; gone: number; run: WikiRun | null }> {
+/** What the page shows: is there a wiki, how much is in it, how much waits to be read, what could not be read. */
+export async function wikiStatus(dir: string): Promise<{
+  exists: boolean;
+  path: string;
+  documents: number;
+  topics: number;
+  waiting: number;
+  gone: number;
+  run: WikiRun | null;
+  failed: Array<{ document: string; why: string; tries: number; at: string }>;
+}> {
   const state = readWikiState();
   const exists = wikiExists(dir);
-  const { toRead, gone } = exists ? wikiWaiting(await wikiDocuments(dir), state) : { toRead: [], gone: [] };
-  return { exists, path: wikiDir(dir), documents: Object.keys(state.sources).length, topics: Object.keys(state.topics).length, waiting: toRead.length, gone: gone.length, run: wikiRun() };
+  const docs = exists ? await wikiDocuments(dir) : [];
+  const { toRead, gone } = exists ? wikiWaiting(docs, state) : { toRead: [], gone: [] };
+  // Only failures of documents that are still there and still as they were when they failed.
+  const now = new Map(docs.map((d) => [d.id, d.modifiedTime]));
+  const failed = Object.entries(state.failed ?? {})
+    .filter(([id, f]) => now.get(id) === f.modified)
+    .map(([id, f]) => ({ document: id.replace(/^local:/, ''), why: f.why, tries: f.tries, at: f.at }))
+    .sort((a, b) => b.at.localeCompare(a.at));
+  return { exists, path: wikiDir(dir), documents: Object.keys(state.sources).length, topics: Object.keys(state.topics).length, waiting: toRead.length, gone: gone.length, run: wikiRun(), failed };
 }

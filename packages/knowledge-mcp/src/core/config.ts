@@ -16,8 +16,9 @@
  * This is only "what to look at".
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { z } from 'zod';
-import { candidates } from './paths.js';
+import { candidates, home } from './paths.js';
 import { ConnectionsSchema, DataToolsSchema, dataConfigProblems } from '../connections/schema.js';
 
 /** First line of the server instructions. Each enabled plugin appends its own notes (plugin `instructions`). */
@@ -263,6 +264,12 @@ export function getConfig(): AppConfig {
 }
 
 /** Which config source was chosen (for boot logs / diagnostics). Valid after getConfig(). */
+/** Folder that holds .env and mcp.config.json: where the loaded config file is, else the home folder or the working directory. */
+export function settingsDir(): string {
+  const source = configSource();
+  return source.startsWith('file:') ? dirname(source.slice(5)) : (home() ?? process.cwd());
+}
+
 export function configSource(): string {
   return _source;
 }
