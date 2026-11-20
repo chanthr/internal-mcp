@@ -212,6 +212,38 @@ answers, as in agentic search models.
 | Cost | It uses the server's model for whoever calls it. One person has at most 2 questions at once and 60 an hour; an assistant runs at most 6 calls a round and reads at most 80,000 characters; a question stops after 5 minutes |
 | Measure it | **Search → Passages → Measure with it** asks the measuring questions of the assistant too, beside keywords and meaning, with the time and tokens it took. In a terminal: `knowledge measure --agent` |
 
+### Conversations, notes, and what other programs send
+
+Chat keeps its conversations on this computer (`data/chats/`, readable by you only): pick one up again from the list
+at the top of the page, or start a new one. Leaving the page does not stop an answer; it is there when you come
+back. What the model is given of a long conversation is its newest 60,000 characters (`CHAT_HISTORY_CHARS`).
+
+Ask the chat to keep something, such as notes on a lecture it read, and it calls `save_note`. Notes are Markdown files
+in two folders beside the settings, searched and read into the wiki like any other folder, and they open in
+Obsidian:
+
+| Folder | What goes there |
+| --- | --- |
+| `notes/` | What the console's chat saves. Yours to edit as well |
+| `inbox/<who>/` | What other assistants save with `save_note` (Claude, ChatGPT, Cursor), and what programs send to `POST /inbox` |
+
+A note is never written over another file, and `save_note` can replace only a note in these folders: your documents
+are not changed. Viewers may not save. The chat offers `save_note` and the tools that only read.
+
+A program that does not speak MCP, such as a browser agent's scheduled routine (Aside, for example) or a script,
+sends a note with a key of a member or an admin:
+
+```bash
+curl -X POST https://<your address>/inbox \
+  -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \
+  -d '{"title": "Course page, week 4", "content": "Assignment 2 is due on Friday.", "from": "aside", "url": "https://school.example/week-4"}'
+```
+
+It answers `201 {"saved": "inbox/aside/2026-11-20 Course page, week 4.md"}`. Fields: `title`, `content` (Markdown, up
+to 200,000 characters), and optionally `from` (the folder under `inbox/`), `url` and `tags`. In an Aside routine,
+end the task with this step: *"Send what you found to Knowledge MCP: POST it to https://<your address>/inbox with
+the header Authorization: Bearer <key>, as JSON with title, content (Markdown) and from: "aside"."*
+
 ## How it works
 
 <p align="center">
@@ -833,7 +865,7 @@ Node by its full path and the server starts there too.
 
 1. Never commit `.env`, service-account JSON, `mcp.config.json` or `data/`. All are gitignored and kept out of the image.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
-3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`.
+3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`. The one built-in tool that writes, `save_note`, and `POST /inbox` write only new Markdown files into `notes/` and `inbox/` beside the settings (or replace a note there); members and admins may, viewers may not.
 4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
    A language model connected on the Models page is sent the text of your documents while you chat or the wiki is written, and at no other time. The search assistant's model is sent excerpts and parts of them while it searches (`find_documents`, or measuring it); a model set for it alone is in `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL` and `SEARCH_LLM_MODEL`. A saved key is sent only to the provider and address it was given for. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.

@@ -10,6 +10,9 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request as ExpressRequest, type Response as ExpressResponse } from 'express';
 import rateLimit from 'express-rate-limit';
+import { z } from 'zod';
+import { isToolAllowed } from '../core/scope.js';
+import { logToolCall } from '../store/tool_log.js';
 import { randomUUID, createHash } from 'crypto';
 import { connect } from 'node:net';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -443,6 +446,37 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   };
   app.get('/mcp', mcpRateLimit, mcpAuthFailRateLimit, handleSessionStream);
   app.delete('/mcp', mcpRateLimit, mcpAuthFailRateLimit, handleSessionStream);
+
+  // ── POST /inbox: a note sent by a program that does not speak MCP (a browser agent's routine, a script) ──
+  // The same keys as /mcp; a member or an admin may send, and only to inbox/<from>/ (plugins/knowledge/notes.ts).
+  const inboxLimiter = rateLimit({ windowMs: RL_WINDOW_MS, limit: Number(process.env.INBOX_RATE_LIMIT_MAX ?? 30), standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many notes. Wait a minute.' } });
+  const inboxBody = z
+    .object({
+      title: z.string().trim().min(1).max(200),
+      content: z.string().min(1).max(200_000),
+      from: z.string().trim().min(1).max(60).optional(),
+      url: z.string().url().max(2000).optional(),
+      tags: z.array(z.string().trim().min(1).max(40)).max(12).optional(),
+    })
+    .strict();
+  app.post('/inbox', inboxLimiter, mcpAuthFailRateLimit, async (req, res) => {
+    const auth = await resolveAuth(req);
+    if (!auth.ok) return void res.status(auth.unavailable ? 503 : 401).json({ error: auth.unavailable ? 'Sign-in is unavailable right now. Try again shortly.' : 'A key is needed: Authorization: Bearer <key>.' });
+    if (auth.role === 'viewer' || !isToolAllowed(auth, 'save_note', registry.groupOf('save_note'))) return void res.status(403).json({ error: 'This key may not send notes.' });
+    const body = inboxBody.safeParse(req.body);
+    if (!body.success) return void res.status(400).json({ error: body.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
+    try {
+      const { saveNote, INBOX } = await import('../plugins/knowledge/notes.js');
+      const { scanFoldersSoon } = await import('../plugins/knowledge/folders.js');
+      const who = body.data.from ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : auth.email ?? 'other');
+      const r = saveNote({ ...body.data, place: INBOX, from: who });
+      void scanFoldersSoon().catch(() => undefined);
+      logToolCall({ tool: 'inbox', auth, ok: true, error: null, durationMs: 0 });
+      res.status(201).json({ saved: r.shown });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
 
   // MCP endpoint (POST): session routing + stateless fallback
   app.post('/mcp', mcpRateLimit, mcpAuthFailRateLimit, async (req, res) => {

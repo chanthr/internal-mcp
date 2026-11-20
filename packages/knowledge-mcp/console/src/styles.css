@@ -197,6 +197,9 @@ p { margin: 0; }
 /* Chat: a bar with the model and its tools, the conversation, and the box to write in at the bottom of the window */
 .chat { display: flex; flex-direction: column; gap: 20px; min-height: calc(100vh - 220px); }
 .chat-bar { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+.chat-pick {
+  width: min(320px, 45vw);
+}
 .chat-bar-gap { flex: 1; }
 .chat-model { font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 3px 8px; border-radius: 6px; background: var(--hover); }
 .chat-tools-toggle { appearance: none; border: 0; background: none; padding: 0; font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }

@@ -11,6 +11,7 @@
  *
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
+import { deleteChat, historyOf, listChats, newChat, readChat, writeChat, type StoredTurn } from './chats.js';
 import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
@@ -20,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { configSource, getConfig, settingsDir } from '../core/config.js';
-import { authStore } from '../core/context.js';
+import { authStore, CONSOLE_EMAIL } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
 import { cli, stdioEntry } from '../core/invocation.js';
@@ -1330,7 +1331,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
    */
   const runAsConsole = async (name: string, args: Record<string, unknown>): Promise<{ ok: boolean; text: string; ms: number }> => {
     const started = Date.now();
-    const auth: AuthContext = { ok: true, org_id: getConfig().orgId, role: 'admin', email: 'console@localhost' };
+    const auth: AuthContext = { ok: true, org_id: getConfig().orgId, role: 'admin', email: CONSOLE_EMAIL };
     const r = await authStore.run(auth, () => registry.call(name, args, auth));
     logToolCall({ tool: name, auth, ok: r.isError !== true, error: r.isError === true ? (r.content.find((c) => c.type === 'text') as { text?: string } | undefined)?.text ?? null : null, durationMs: Date.now() - started });
     const text = r.content.map((c) => (c.type === 'text' ? String((c as { text?: unknown }).text ?? '') : `[${c.type}]`)).join('\n');
@@ -1351,30 +1352,65 @@ export function mountConsole(app: Express, registry: Registry): boolean {
    * says nothing about it, or that changes things, is left out: the model decides what to call, and nothing it
    * decides here should change data. Those are tried by hand above.
    */
+  // One that writes is offered as well: save_note, which writes only new notes into this server's notes/ folder
+  // (and replaces notes it wrote there): the person asks the chat to keep what it made.
   const chatTools = (): ChatTool[] =>
     registry
       .listTools(pingTool)
-      .filter((t) => t.name !== pingTool.name && t.annotations?.readOnlyHint === true && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
+      .filter((t) => t.name !== pingTool.name && (t.annotations?.readOnlyHint === true || t.name === 'save_note') && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
       .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> }));
   const CHAT_RULES = [
     'You are answering in the console of this MCP server, where its owner tries how its tools work for an AI assistant.',
     'Use the tools to find the answer, as an assistant connected to this server would. Say which documents or sources the answer comes from.',
     'If the tools find nothing that answers the question, say so plainly instead of answering from memory.',
+    'When the person asks to keep something (notes on a document, a summary), save it with save_note; it goes into the notes folder of this server.',
     'Answer in the language of the question.',
   ].join('\n');
   api.get('/chat', wrap(async (_req, res) => void res.json({ tools: chatTools().map((t) => t.name), left: registry.listTools(pingTool).filter((t) => t.name !== pingTool.name).length - chatTools().length })));
+  // ── Conversations kept on this machine (chats.ts) ──
+  api.get('/chats', wrap(async (_req, res) => void res.json({ chats: listChats() })));
+  api.get(
+    '/chats/:id',
+    wrap(async (req, res) => {
+      const chat = readChat(String(req.params.id));
+      if (!chat) return refuse(res, 404, 'There is no such conversation.');
+      res.json(chat);
+    }),
+  );
+  api.delete(
+    '/chats/:id',
+    wrap(async (req, res) => {
+      if (!deleteChat(String(req.params.id))) return refuse(res, 404, 'There is no such conversation.');
+      res.json({ ok: true });
+    }),
+  );
   api.post(
     '/chat',
     wrap(async (req, res) => {
       const body = z
         .object({
           message: z.string().trim().min(1).max(20_000),
+          /** Go on with this conversation: what the model is given comes from it (chats.ts historyOf). */
+          chatId: z.string().max(64).optional(),
+          /** A page that keeps no conversation sends the text of the turns so far itself. */
           history: z.array(z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(100_000) }).strict()).max(200).default([]),
         })
         .strict()
         .parse(req.body);
       const settings = llmSettings();
       if (!settings) return refuse(res, 409, 'No language model is connected. Connect one on the Models page.');
+      const found = body.chatId ? readChat(body.chatId) : null;
+      if (body.chatId && !found) return refuse(res, 404, 'There is no such conversation.');
+      if (found?.answering) return refuse(res, 409, 'An answer is still being written in this conversation. Open it again in a moment.');
+      const { history, left } = found ? historyOf(found) : { history: body.history.filter((h) => h.text.trim()), left: 0 };
+      const chat = found ?? newChat(body.message);
+      // The question is kept before the model is asked: leaving the page in the middle does not lose it.
+      const startedAt = Date.now();
+      chat.turns.push({ role: 'user', text: body.message, at: new Date(startedAt).toISOString() });
+      chat.answering = true;
+      chat.updated = new Date(startedAt).toISOString();
+      writeChat(chat);
+      const answer: StoredTurn = { role: 'assistant', text: '', at: new Date(startedAt).toISOString(), calls: [] };
       // One event per line, as they happen. The page reads them while the answer is written.
       res.status(200);
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -1386,15 +1422,27 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.on('close', () => {
         if (!res.writableEnded) stop.abort();
       });
-      const emit = (e: ChatEvent) => {
+      const send = (e: ChatEvent | { type: 'chat'; id: string; title: string }) => {
         if (!res.writableEnded && !res.destroyed) res.write(`${JSON.stringify(e)}\n`);
       };
+      // What the page is sent is kept with the conversation as well.
+      const emit = (e: ChatEvent) => {
+        if (e.type === 'text') answer.text += e.text;
+        else if (e.type === 'tool') answer.calls!.push({ id: e.id, name: e.name, input: e.input });
+        else if (e.type === 'result') Object.assign(answer.calls!.find((c) => c.id === e.id) ?? {}, { ok: e.ok, text: e.text, ms: e.ms });
+        else if (e.type === 'done') answer.end = { model: e.model, usage: e.usage, note: e.note, seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)) };
+        else if (e.type === 'error') answer.error = e.message;
+        send(e);
+      };
+      send({ type: 'chat', id: chat.id, title: chat.title });
       const instructions = registry.instructions();
       try {
         const end = await converse(
           {
-            system: `${CHAT_RULES}\n\nWhat this server tells the assistants that connect to it:\n${instructions}`,
-            history: body.history.filter((h) => h.text.trim()),
+            system:
+              `${CHAT_RULES}\n\nWhat this server tells the assistants that connect to it:\n${instructions}` +
+              (left ? `\n\nThis conversation is longer than what you are given: its first ${left} message${left === 1 ? ' is' : 's are'} left out.` : ''),
+            history,
             message: body.message,
             tools: chatTools(),
             run: async (name, input) => runAsConsole(name, input),
@@ -1406,6 +1454,17 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         emit({ type: 'done', ...end });
       } catch (e) {
         if (!stop.signal.aborted) emit({ type: 'error', message: msg(e) });
+      } finally {
+        // Kept whatever happened: answered, failed, or stopped by the person.
+        answer.end ??= answer.error ? undefined : { model: settings.model, usage: { input: 0, output: 0, cached: 0, steps: 0 }, note: 'Stopped.', seconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)) };
+        chat.turns.push(answer);
+        chat.answering = false;
+        chat.updated = new Date().toISOString();
+        try {
+          writeChat(chat);
+        } catch (e) {
+          console.error('[console] could not keep the conversation:', msg(e));
+        }
       }
       res.end();
     }),

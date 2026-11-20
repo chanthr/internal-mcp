@@ -47,6 +47,11 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Conversations are kept, and notes are saved.** Chat keeps its conversations on this computer and picks them
+  up again from a list; leaving the page no longer loses them or stops an answer. `save_note` writes a Markdown
+  note into `notes/` (from the console's chat) or `inbox/<who>/` (from other assistants), never over another file
+  and never into your documents; both folders are indexed without being configured. `POST /inbox` takes a note
+  from a program with a member's key, such as a browser agent's routine.
 - **The wiki keeps itself up to date.** *Keep the wiki up to date* on the Wiki page reads documents that are
   added or changed from then on, after each scan, up to 50 a day; what was waiting stays for the button. Pages are
   written as each document is read (a restart in the middle used to leave what was read without pages), missing

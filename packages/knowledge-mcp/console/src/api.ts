@@ -98,10 +98,34 @@ export type ChatEvent =
   | { type: 'tool'; id: string; name: string; input: unknown }
   | { type: 'result'; id: string; ok: boolean; text: string; ms: number }
   | { type: 'done'; model: string; usage: { input: number; output: number; cached: number; steps: number }; note: string | null }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  /** The conversation this message is kept in: sent first. */
+  | { type: 'chat'; id: string; title: string };
+
+/** A conversation kept on this machine (server: admin/chats.ts). */
+export interface ChatSummary {
+  id: string;
+  title: string;
+  updated: string;
+  messages: number;
+}
+export interface StoredChat {
+  id: string;
+  title: string;
+  updated: string;
+  answering: boolean;
+  turns: Array<{
+    role: 'user' | 'assistant';
+    text: string;
+    at: string;
+    calls?: Array<{ id: string; name: string; input: unknown; ok?: boolean; text?: string; ms?: number }>;
+    end?: { model: string; usage: { input: number; output: number; cached: number; steps: number }; note: string | null; seconds: number };
+    error?: string;
+  }>;
+}
 
 /** Ask the chat, and hand each event to `on` as it arrives. Aborting the signal stops the model too. */
-export async function chatStream(body: { message: string; history: Array<{ role: 'user' | 'assistant'; text: string }> }, on: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
+export async function chatStream(body: { message: string; chatId?: string }, on: (e: ChatEvent) => void, signal: AbortSignal): Promise<void> {
   const res = await fetch('./api/chat', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token() ?? ''}`, 'Content-Type': 'application/json' },

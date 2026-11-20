@@ -18,9 +18,10 @@
  * counted and left out.
  */
 import { cutMark, LEGACY_CUT } from '../drive/index_profile.js';
+import { existsSync } from 'node:fs';
 import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
-import { getConfig } from '../../core/config.js';
+import { getConfig, settingsDir } from '../../core/config.js';
 import { appRoot } from '../../core/paths.js';
 import { withLock } from '../../core/lock.js';
 import { isExcludedName } from '../drive/exclude.js';
@@ -44,7 +45,16 @@ export interface LocalFolder {
   source: string;
 }
 
-/** The configured folders: config `folders`, then env KNOWLEDGE_FOLDERS (comma-separated paths). */
+/** The folders this server writes notes into, beside the settings (notes.ts). */
+export const NOTES = 'notes';
+export const INBOX = 'inbox';
+export type Place = typeof NOTES | typeof INBOX;
+export const placeDir = (place: Place, dir: string = settingsDir()): string => join(resolve(dir), place);
+
+/**
+ * The configured folders: config `folders`, then env KNOWLEDGE_FOLDERS (comma-separated paths), then the folders
+ * this server writes notes into (notes/, inbox/) once they exist: those are indexed without being configured.
+ */
 export function localFolders(): LocalFolder[] {
   const fromEnv = (process.env.KNOWLEDGE_FOLDERS ?? '')
     .split(',')
@@ -62,6 +72,14 @@ export function localFolders(): LocalFolder[] {
     for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
     used.add(name);
     out.push({ path, name, source: f.source ?? 'files' });
+  }
+  for (const place of [NOTES, INBOX] as const) {
+    const path = placeDir(place);
+    if (out.some((o) => o.path === path) || !existsSync(path)) continue;
+    let name: string = place;
+    for (let n = 2; used.has(name); n++) name = `${place}-${n}`;
+    used.add(name);
+    out.push({ path, name, source: place });
   }
   return out;
 }

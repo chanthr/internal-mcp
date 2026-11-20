@@ -14,6 +14,9 @@ import type { AuthContext } from './auth.js';
 
 export const authStore = new AsyncLocalStorage<AuthContext>();
 
+/** The caller a call from the console runs as: the owner at this machine, as the admin (admin/routes.ts runAsConsole). */
+export const CONSOLE_EMAIL = 'console@localhost';
+
 // Process-wide auth for stdio only. Not set on HTTP (authStore.run per request).
 let _processAuth: AuthContext | undefined;
 

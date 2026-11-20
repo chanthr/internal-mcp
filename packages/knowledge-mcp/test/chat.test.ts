@@ -120,7 +120,8 @@ test('an OpenAI-style endpoint: the model searches, the result goes back to it, 
     const r = await chat('How do deploys go out?', [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'Hello.' }]);
     assert.equal(r.status, 200);
     const types = r.events.map((e) => e.type);
-    assert.deepEqual([types[0], types.at(-1)], ['thinking', 'done']);
+    // First the conversation it is kept in, then the answer.
+    assert.deepEqual([types[0], types[1], types.at(-1)], ['chat', 'thinking', 'done']);
     const call = r.events.find((e) => e.type === 'tool');
     assert.deepEqual([call.name, call.input], ['search_knowledge', { query: 'deploys main branch' }]);
     const result = r.events.find((e) => e.type === 'result');
@@ -138,8 +139,8 @@ test('an OpenAI-style endpoint: the model searches, the result goes back to it, 
     assert.deepEqual(first.body.messages.map((m: any) => m.role), ['system', 'user', 'assistant', 'user']);
     assert.match(first.body.messages[0].content, /owner tries how its tools work/);
     const names = first.body.tools.map((t: any) => t.function.name).sort();
-    // With a model connected, the search assistant is one of the tools too.
-    assert.deepEqual(names, ['find_documents', 'linked_documents', 'read_document', 'search_knowledge']);
+    // With a model connected, the search assistant is one of the tools too; save_note is the one that writes (notes/).
+    assert.deepEqual(names, ['find_documents', 'linked_documents', 'read_document', 'save_note', 'search_knowledge']);
     assert.ok(first.body.tools.every((t: any) => !('$schema' in t.function.parameters) && t.function.parameters.type === 'object'));
     const turn = second.body.messages.slice(-2);
     assert.deepEqual(turn[0].tool_calls, [{ id: 'call_a', type: 'function', function: { name: 'search_knowledge', arguments: '{"query": "deploys main branch"}' } }]);
@@ -254,8 +255,9 @@ test('closing the page stops the model: the request to the provider is dropped t
     const stop = new AbortController();
     const res = await fetch(`${base}/console/api/chat`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: 'Write a lot' }), signal: stop.signal });
     const reader = res.body!.getReader();
-    const first = new TextDecoder().decode((await reader.read()).value);
-    assert.match(first, /Starting a long answer/);
+    let first = '';
+    while (!/Starting a long answer/.test(first)) first += new TextDecoder().decode((await reader.read()).value);
+    assert.match(first, /^\{"type":"chat"[^\n]*\n[\s\S]*Starting a long answer/);
     stop.abort();
     await Promise.race([gone, new Promise((_, no) => setTimeout(() => no(new Error('the provider request was not dropped')), 3000))]);
   } finally {
