@@ -15,7 +15,7 @@
  * what counts is how many of them come and how high: recall (the share among the first ten) and NDCG (the same,
  * weighed by place). With one right document NDCG is 1 for the first place, 0.63 for the second, 0.5 for the third.
  */
-import { authStore, getAuthMaybe } from '../../core/context.js';
+import { authStore, CONSOLE_EMAIL, getAuthMaybe } from '../../core/context.js';
 import { getConfig } from '../../core/config.js';
 import { ask, searchLlmSettings } from '../../core/llm.js';
 import { embedQuery, embeddingsConfigured } from '../drive/embeddings.js';
@@ -121,7 +121,7 @@ export function scoreOf(placed: Array<number | Placed>): ModeScore {
 }
 
 /** The owner of this machine, for measuring from the console or a terminal: every document is theirs to search. */
-const owner = () => ({ ok: true as const, org_id: getConfig().orgId, role: 'admin' as const, email: 'console@localhost' });
+const owner = () => ({ ok: true as const, org_id: getConfig().orgId, role: 'admin' as const, email: CONSOLE_EMAIL });
 
 /** Ask every question of the index as it is, three ways; and of the search assistant too with `agent`. */
 export async function scoreQuestions(questions: EvalQuestion[], signal?: AbortSignal, each?: (done: number) => void, opts: { agent?: Effort } = {}): Promise<EvalScore> {

@@ -47,6 +47,11 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Conversations are kept, and notes are saved.** Chat keeps its conversations on this computer and picks them
+  up again from a list; leaving the page no longer loses them or stops an answer. `save_note` writes a Markdown
+  note into `notes/` (from the console's chat) or `inbox/<who>/` (from other assistants), never over another file
+  and never into your documents; both folders are indexed without being configured. `POST /inbox` takes a note
+  from a program with a member's key, such as a browser agent's routine.
 - **Vectors keep up by themselves.** The folders are watched: a file saved, added or removed is read within
   seconds instead of at the next 10-minute pass (`KNOWLEDGE_WATCH=false` turns it off). Vectors that could not
   be made are tried again after 1, 5 and 15 minutes, and Models → Search by meaning says why. An embedding model on

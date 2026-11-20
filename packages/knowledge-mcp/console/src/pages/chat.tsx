@@ -2,15 +2,21 @@
  * Talk to the connected model with this server's tools, to see how they work for an AI assistant before connecting
  * one (server: core/llm_chat.ts, the /chat route).
  *
- * The model is given the tools that only read, and the instructions this server gives every client. Each tool call
- * and what it returned is shown as it happens. The conversation lives on this page only: nothing is saved.
+ * The model is given the tools that only read, save_note (which writes notes into this server's notes/ folder),
+ * and the instructions this server gives every client. Each tool call and what it returned is shown as it happens.
+ *
+ * Conversations are kept on this machine by the server (admin/chats.ts): the question when it is sent, the answer
+ * when it is done. Going to another page of the console does not stop an answer: it is written on, and is there
+ * when the conversation is opened again. Closing or reloading the tab does stop it (the request ends), and what was
+ * written so far is kept. The address names the conversation (#/chat?c=<id>).
  *
  * Layout: the conversation, and below it a composer that stays at the bottom of the window. While an answer is
  * written the page follows it, unless the person scrolled up to read: then it stays where they are.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { call, chatStream, type ChatEvent } from '../api';
-import { Page, useServer } from '../app';
+import { call, chatStream, type ChatEvent, type ChatSummary, type StoredChat } from '../api';
+import { AskFirst, Page, useServer } from '../app';
+import { Select } from '../ui/select';
 import { Markdown } from '../markdown';
 import { Button } from '../ui/button';
 import { EmptyState } from '../ui/empty-state';
@@ -76,10 +82,28 @@ function suggestions(tools: string[]): string[] {
   return out.slice(0, 3);
 }
 
+/** A kept message as the page shows it. */
+const turnOf = (t: StoredChat['turns'][number]): Turn => ({
+  role: t.role,
+  text: t.text,
+  calls: (t.calls ?? []).map((c) => ({ id: c.id, name: c.name, input: c.input, startedAt: Date.parse(t.at), result: c.ok === undefined ? undefined : { ok: c.ok, text: c.text ?? '', ms: c.ms ?? 0 } })),
+  steps: [],
+  startedAt: Date.parse(t.at),
+  end: t.end,
+  error: t.error,
+});
+/** The conversation the address names. */
+const chatInAddress = (): string | null => new URLSearchParams(location.hash.split('?')[1] ?? '').get('c');
+const nameInAddress = (id: string | null) => history.replaceState(null, '', id ? `#/chat?c=${id}` : '#/chat');
+
 export function Chat() {
   const { state, go } = useServer();
   const llm = state.services.llm;
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [chatId, setChatId] = useState<string | null>(null);
+  const [chats, setChats] = useState<ChatSummary[]>([]);
+  /** The answer in this conversation is still being written by the server (the page was left in the middle). */
+  const [elsewhere, setElsewhere] = useState(false);
   const [draft, setDraft] = useState('');
   const [tools, setTools] = useState<string[] | null>(null);
   const [showTools, setShowTools] = useState(false);
@@ -91,6 +115,40 @@ export function Chat() {
   const busy = turns.some((t) => t.live);
 
   useEffect(() => void call<{ tools: string[] }>('GET', '/chat').then((r) => setTools(r.tools), () => setTools([])), [state.tools.length]);
+
+  /** Which opening is the latest: an answer for one asked before it is dropped. */
+  const opening = useRef(0);
+  const loadList = useCallback(() => call<{ chats: ChatSummary[] }>('GET', '/chats').then((r) => (setChats(r.chats), r.chats), () => [] as ChatSummary[]), []);
+  const open = useCallback(async (id: string | null) => {
+    const mine = ++opening.current;
+    setChatId(id);
+    nameInAddress(id);
+    if (!id) {
+      setTurns([]);
+      setElsewhere(false);
+      return;
+    }
+    try {
+      const c = await call<StoredChat>('GET', `/chats/${id}`);
+      if (mine !== opening.current) return;
+      setTurns(c.turns.map(turnOf));
+      setElsewhere(c.answering);
+    } catch {
+      if (mine !== opening.current) return;
+      setTurns([]);
+      setElsewhere(false);
+    }
+  }, []);
+  // The conversation in the address, or the latest one.
+  useEffect(() => {
+    void loadList().then((list) => void open(chatInAddress() ?? list[0]?.id ?? null));
+  }, [loadList, open]);
+  // An answer the server is still writing (the page was left in the middle): read the conversation again until it is done.
+  useEffect(() => {
+    if (!elsewhere || !chatId) return;
+    const timer = setInterval(() => void open(chatId), 2000);
+    return () => clearInterval(timer);
+  }, [elsewhere, chatId, open]);
   useEffect(() => {
     const onScroll = () => {
       const left = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
@@ -103,7 +161,7 @@ export function Chat() {
     // Braces: newer browsers return a promise from scrolling, and an effect may return nothing but its clean-up.
     if (follow.current) void end.current?.scrollIntoView({ block: 'end' });
   }, [turns]);
-  useEffect(() => () => stop.current?.abort(), []);
+  // Leaving the page does not stop the answer: the server writes it on and keeps it with the conversation.
 
   /** Change the answer being written. */
   const update = useCallback(
@@ -131,26 +189,30 @@ export function Chat() {
     else if (e.type === 'result') update((t) => step({ ...t, calls: t.calls.map((c) => (c.id === e.id ? { ...c, result: { ok: e.ok, text: e.text, ms: e.ms } } : c)) }, 'Reading the results'));
     else if (e.type === 'done') update((t) => ({ ...t, live: false, end: { model: e.model, usage: e.usage, note: e.note, seconds: Math.max(1, Math.round((Date.now() - t.startedAt) / 1000)) } }));
     else if (e.type === 'error') update((t) => ({ ...t, live: false, error: e.message }));
+    else if (e.type === 'chat') {
+      setChatId(e.id);
+      nameInAddress(e.id);
+    }
   };
 
   const send = (text = draft) => {
     const message = text.trim();
-    if (!message || busy) return;
-    // What the model is given of the conversation so far: the text of each turn.
-    const history = turns.filter((t) => !t.error && t.text.trim()).map((t) => ({ role: t.role, text: t.text }));
+    if (!message || busy || elsewhere) return;
+    // The server gives the model the conversation so far, from what it kept.
     const now = Date.now();
     setTurns((all) => [...all, { role: 'user', text: message, calls: [], steps: [], startedAt: now }, { role: 'assistant', text: '', calls: [], live: true, steps: ['Thinking'], startedAt: now }]);
     setDraft('');
     follow.current = true;
     const controller = new AbortController();
     stop.current = controller;
-    void chatStream({ message, history }, take, controller.signal)
+    void chatStream({ message, ...(chatId ? { chatId } : {}) }, take, controller.signal)
       .catch((e) => {
         if (!controller.signal.aborted) update((t) => ({ ...t, live: false, error: e instanceof Error ? e.message : String(e) }));
       })
-      .finally(() =>
-        update((t) => (t.live ? { ...t, live: false, end: t.end ?? { model: llm.model ?? '', usage: { input: 0, output: 0, cached: 0, steps: 0 }, note: 'Stopped.', seconds: Math.max(1, Math.round((Date.now() - t.startedAt) / 1000)) } } : t)),
-      );
+      .finally(() => {
+        update((t) => (t.live ? { ...t, live: false, end: t.end ?? { model: llm.model ?? '', usage: { input: 0, output: 0, cached: 0, steps: 0 }, note: 'Stopped.', seconds: Math.max(1, Math.round((Date.now() - t.startedAt) / 1000)) } } : t));
+        void loadList();
+      });
   };
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends; Shift+Enter is a new line. Not while a Korean or Japanese word is still being composed.
@@ -171,18 +233,44 @@ export function Chat() {
   };
 
   return (
-    <Page title="Chat" text="Ask the connected model. It answers with this server's tools, the way an assistant connected to it would. Nothing here is saved.">
+    <Page title="Chat" text="Ask the connected model. It answers with this server's tools, the way an assistant connected to it would. Conversations are kept on this computer.">
       <div className="chat">
         <div className="chat-bar">
           <span className="chat-model">{llm.model}</span>
           {tools && (
             <button type="button" className="chat-tools-toggle" aria-expanded={showTools} onClick={() => setShowTools((v) => !v)}>
-              {tools.length ? `${num(tools.length)} tool${tools.length === 1 ? '' : 's'} that only read` : 'No tools yet'}
+              {tools.length ? `${num(tools.length)} tool${tools.length === 1 ? '' : 's'}` : 'No tools yet'}
             </button>
           )}
           <span className="chat-bar-gap" />
-          {turns.length > 0 && !busy && (
-            <Button size="sm" variant="ghost" onClick={() => setTurns([])}>New chat</Button>
+          {chats.length > 0 && (
+            <div className="chat-pick">
+              <Select
+                size="sm"
+                aria-label="Conversation"
+                placeholder="Conversations"
+                value={chatId}
+                disabled={busy}
+                onChange={(id) => void open(id)}
+                options={chats.slice(0, 100).map((c) => ({ value: c.id, label: `${c.title} · ${new Date(c.updated).toLocaleDateString()}` }))}
+              />
+            </div>
+          )}
+          {chatId && !busy && (
+            <AskFirst
+              label="Delete"
+              title="Delete this conversation?"
+              text="It is removed from this computer. Notes saved from it stay in the notes folder."
+              confirm="Delete"
+              onConfirm={async () => {
+                await call('DELETE', `/chats/${chatId}`);
+                const list = await loadList();
+                await open(list[0]?.id ?? null);
+              }}
+            />
+          )}
+          {(turns.length > 0 || chatId) && !busy && (
+            <Button size="sm" variant="ghost" onClick={() => void open(null)}>New chat</Button>
           )}
         </div>
         {showTools && tools && (
@@ -193,7 +281,7 @@ export function Chat() {
                 <span className="chat-tools-names">{g.tools.join(', ')}</span>
               </div>
             ))}
-            <p className="chat-tools-note">Tools that change things are left out. Run them yourself on the Tools page.</p>
+            <p className="chat-tools-note">All of them only read, but save_note, which writes notes into the notes folder of this server. Tools that change other things are left out: run them yourself on the Tools page.</p>
           </div>
         )}
 
@@ -258,6 +346,7 @@ export function Chat() {
             )}
           </div>
         )}
+        {elsewhere && <p className="field-help">The answer to the last message is still being written. It appears here when it is done.</p>}
         <div ref={end} className="chat-end" />
         <div className="chat-composer">
           <div className="chat-box">

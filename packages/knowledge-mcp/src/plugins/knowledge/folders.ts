@@ -18,10 +18,11 @@
  * counted and left out.
  */
 import { cutMark, LEGACY_CUT } from '../drive/index_profile.js';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve, sep } from 'node:path';
-import { getConfig } from '../../core/config.js';
-import { appRoot } from '../../core/paths.js';
+import { getConfig, settingsDir } from '../../core/config.js';
+import { appRoot, dataDir } from '../../core/paths.js';
 import { withLock } from '../../core/lock.js';
 import { isExcludedName } from '../drive/exclude.js';
 import { extractLocalFile, mimeForFileName } from '../drive/extract_text.js';
@@ -44,7 +45,30 @@ export interface LocalFolder {
   source: string;
 }
 
-/** The configured folders: config `folders`, then env KNOWLEDGE_FOLDERS (comma-separated paths). */
+/** The folders this server writes notes into, beside the settings (notes.ts). */
+export const NOTES = 'notes';
+export const INBOX = 'inbox';
+export type Place = typeof NOTES | typeof INBOX;
+/**
+ * Where the note folders are: beside the settings, or in the data directory when the settings folder cannot be
+ * written (a container whose configuration is mounted read-only keeps its data on a volume).
+ */
+export function placeBase(dir?: string): string {
+  if (dir) return resolve(dir);
+  const settings = settingsDir();
+  try {
+    accessSync(settings, constants.W_OK);
+    return resolve(settings);
+  } catch {
+    return dataDir();
+  }
+}
+export const placeDir = (place: Place, dir?: string): string => join(placeBase(dir), place);
+
+/**
+ * The configured folders: config `folders`, then env KNOWLEDGE_FOLDERS (comma-separated paths), then the folders
+ * this server writes notes into (notes/, inbox/) once they exist: those are indexed without being configured.
+ */
 export function localFolders(): LocalFolder[] {
   const fromEnv = (process.env.KNOWLEDGE_FOLDERS ?? '')
     .split(',')
@@ -52,7 +76,9 @@ export function localFolders(): LocalFolder[] {
     .filter(Boolean)
     .map((path) => ({ path, name: undefined as string | undefined, source: undefined as string | undefined }));
   const out: LocalFolder[] = [];
-  const used = new Set<string>();
+  // The note folders' names are theirs: a configured folder named notes or inbox is numbered instead, so the IDs of
+  // the notes (local:notes/…) do not move to another folder when one is configured later.
+  const used = new Set<string>([NOTES, INBOX]);
   for (const f of [...getConfig().folders, ...fromEnv]) {
     const path = isAbsolute(f.path) ? resolve(f.path) : resolve(appRoot(), f.path);
     if (out.some((o) => o.path === path)) continue;
@@ -62,6 +88,11 @@ export function localFolders(): LocalFolder[] {
     for (let n = 2; used.has(name); n++) name = `${base}-${n}`;
     used.add(name);
     out.push({ path, name, source: f.source ?? 'files' });
+  }
+  for (const place of [NOTES, INBOX] as const) {
+    const path = placeDir(place);
+    if (out.some((o) => o.path === path) || !existsSync(path)) continue;
+    out.push({ path, name: place, source: place });
   }
   return out;
 }

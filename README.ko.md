@@ -186,6 +186,39 @@ wiki/
 | 비용 | 부르는 사람이 누구든 서버의 모델을 씁니다. 한 사람은 동시에 2개, 한 시간에 60개까지 묻습니다. 도우미 하나는 한 회차에 6번까지 호출하고 8만 자까지 읽습니다. 질문 하나는 5분이 지나면 멈춥니다 |
 | 재 보기 | **Search → Passages → Measure with it**은 측정 질문을 키워드, 뜻 검색과 함께 검색 도우미에게도 묻고, 걸린 시간과 토큰을 보여 줍니다. 터미널에서는 `knowledge measure --agent` |
 
+### 대화, 노트, 다른 프로그램이 보내는 것
+
+채팅은 대화를 이 컴퓨터에 남깁니다(`data/chats/`, 본인만 읽음). 화면 위쪽 목록에서 골라 이어 쓰거나 새로 시작합니다.
+화면을 나가도 답은 멈추지 않고, 돌아오면 그대로 있습니다. 긴 대화는 최근 6만 자만 모델에 보냅니다(`CHAT_HISTORY_CHARS`).
+
+채팅에 무언가를 남겨 달라고 하면(읽은 강의 자료로 만든 노트 같은 것) `save_note`를 부릅니다. 노트는 설정 옆 두 폴더에
+Markdown 파일로 저장되고, 다른 폴더처럼 검색되고 위키로 읽히며, 옵시디언에서 열립니다.
+
+| 폴더 | 들어가는 것 |
+| --- | --- |
+| `notes/` | 콘솔 채팅이 저장한 것. 직접 고쳐도 됩니다 |
+| `inbox/<보낸 계정>/` | 다른 AI 클라이언트(Claude, ChatGPT, Cursor)가 `save_note`로 저장한 것, 프로그램이 `POST /inbox`로 보낸 것. 폴더는 노트가 스스로 밝힌 출처가 아니라, 보낸 키의 계정으로 정해집니다 |
+
+노트는 다른 파일을 덮어쓰지 않고, `save_note`가 바꿀 수 있는 것은 부른 쪽 자기 폴더의 노트뿐입니다. 사용자의 문서는
+바뀌지 않고, 링크를 따라 쓰지도 않습니다. 바뀐 노트의 이전 내용은 옆의 숨김 폴더 `.versions/`에 남습니다. viewer는
+저장할 수 없습니다. 채팅은 읽기 도구와 `save_note`만 씁니다. `inbox/`는 검색되지만 위키에는 넣지 않습니다. 다른
+프로그램이 보낸 내용을 사용자의 문서가 말한 것처럼 정리하지 않기 위해서입니다. 설정 폴더에 쓸 수 없으면(설정을 읽기
+전용으로 붙인 컨테이너) 두 폴더는 데이터 폴더에 둡니다. `notes`, `inbox`라는 이름은 이 폴더 몫이라, 같은 이름으로
+설정한 폴더에는 번호가 붙습니다(`notes-2`).
+
+MCP를 쓰지 않는 프로그램(브라우저 에이전트 Aside의 예약 루틴, 스크립트 등)은 member나 admin의 키로 보냅니다.
+
+```bash
+curl -X POST https://<내 주소>/inbox \
+  -H "Authorization: Bearer <키>" -H "Content-Type: application/json" \
+  -d '{"title": "강의 페이지 4주차", "content": "과제 2는 금요일까지.", "from": "aside", "url": "https://school.example/week-4"}'
+```
+
+`201 {"saved": "inbox/<보낸 계정>/2026-11-20 강의 페이지 4주차.md"}`로 답합니다. 항목은 `title`, `content`(Markdown,
+20만 자까지), 그리고 선택으로 `from`(노트에 `via`로 남음), `url`, `tags`입니다. Aside 루틴에서는 작업 끝에 이렇게 적습니다.
+*"찾은 내용을 Knowledge MCP로 보내. https://<내 주소>/inbox 에 Authorization: Bearer <키> 헤더를 붙여 POST하고,
+title, content(Markdown), from: "aside"를 JSON으로 보내."*
+
 ## 동작 방식
 
 <p align="center">
@@ -794,7 +827,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 
 1. `.env`, 서비스 계정 JSON, `mcp.config.json`, `data/`는 커밋하지 않습니다. 모두 gitignore와 이미지 제외 목록에 있습니다.
 2. 데이터 파일에는 키 해시와 OAuth 클라이언트 비밀값이 있습니다. 소유자만 읽게 만들어지니 볼륨도 비공개로 둡니다.
-3. 기본 플러그인은 Drive, Slack, GitHub, Railway를 바꾸지 않습니다. 게이트웨이는 `expose`를 바꿀 때만 원격 쓰기 도구를 엽니다.
+3. 기본 플러그인은 Drive, Slack, GitHub, Railway를 바꾸지 않습니다. 게이트웨이는 `expose`를 바꿀 때만 원격 쓰기 도구를 엽니다. 기본 도구 가운데 쓰는 것은 `save_note` 하나이고, 이것과 `POST /inbox`는 설정 옆 `notes/`, `inbox/`에 새 Markdown 파일만 씁니다(또는 그 안의 노트를 바꿉니다). member와 admin만 쓸 수 있고 viewer는 못 씁니다.
 4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
    Models 화면에서 연결한 언어 모델에는 채팅하거나 위키를 쓰는 동안에만 문서의 글이 전달됩니다. 연결할 때는 키를 확인하는 짧은 질문 하나만 보냅니다. 키는 `.env`에 있고(`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) 화면으로 다시 보내지 않습니다. 검색 도우미의 모델에는 찾는 동안(`find_documents`, 또는 그것을 재는 동안) 문서의 발췌와 일부가 전달됩니다. 검색용으로 따로 정한 모델은 `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL`, `SEARCH_LLM_MODEL`에 있습니다. 저장한 키는 그 키를 받은 제공자와 주소로만 보냅니다.
 5. 서비스 계정 주소를 아는 사람은 누구나 그 계정에 문서를 공유할 수 있습니다. Drive는 받는 쪽에 묻지 않습니다. 그래서 root 밖 공유 문서는 공유된 맨 위 항목의 소유자가 `drive.trustedOwners`에 있을 때만 보여 줍니다. 이 목록에는 자기 조직만 넣고 `*`는 쓰지 마십시오. 신뢰하는 소유자가 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.

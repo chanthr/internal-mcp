@@ -33,7 +33,7 @@ import { z } from 'zod';
 import { dataFile } from '../../core/data_file.js';
 import { ask, LlmError } from '../../core/llm.js';
 import { extractLocalFile } from '../drive/extract_text.js';
-import { listLocalFiles, localFolders, type LocalFile } from './folders.js';
+import { INBOX, listLocalFiles, localFolders, type LocalFile } from './folders.js';
 
 export const WIKI = 'wiki';
 export const wikiDir = (dir: string): string => join(resolve(dir), WIKI);
@@ -508,7 +508,8 @@ export async function wikiListing(dir: string): Promise<{ docs: WikiDoc[]; unsur
   const docs: WikiDoc[] = [];
   const unsure: string[] = [];
   for (const folder of localFolders()) {
-    if (resolve(folder.path) === own) continue;
+    // inbox/ holds what other programs sent: searched, but not written up as if the person's documents said it.
+    if (resolve(folder.path) === own || folder.source === INBOX) continue;
     try {
       const listed = await listLocalFiles(folder);
       for (const file of listed.files) docs.push({ ...file, folder: folder.name });
