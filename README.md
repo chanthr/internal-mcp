@@ -244,6 +244,20 @@ to 200,000 characters), and optionally `from` (the folder under `inbox/`), `url`
 end the task with this step: *"Send what you found to Knowledge MCP: POST it to https://<your address>/inbox with
 the header Authorization: Bearer <key>, as JSON with title, content (Markdown) and from: "aside"."*
 
+### Skills, and notes in your own font
+
+A skill is a folder of instructions for a kind of task, in the Agent Skills format: `SKILL.md` with a `name` and a
+`description` in its front matter, and any files it refers to. Install one on the **Skills** page from a GitHub
+address (a repository, a folder in one, or a repository of several skills) or from a folder on this computer, or
+write one there. Skills are kept in `skills/` beside the settings and shared with every assistant that uses this
+server: they are told the names and what each is for, and read one with `use_skill` when a task calls for it, so a
+skill costs nothing until it is used. Nothing in a skill is run; install skills from people you trust, since an
+assistant follows what they say. The page shows a skill's text when it is installed.
+
+The **Notes** page lists `notes/` and `inbox/` and shows a note in a font you add (TrueType, OpenType or WOFF,
+kept in `fonts/`). **Print or save as PDF** prints the note alone; choose *Save as PDF* in the browser's print
+window.
+
 ## How it works
 
 <p align="center">

@@ -11,6 +11,9 @@
  *
  * Who may call it is decided in auth.ts: a browser on this machine that holds the console token.
  */
+import { createSkill, installFromFolder, installFromGithub, listSkills, readSkill, removeSkill } from '../plugins/knowledge/skills.js';
+import { INBOX, listNotes, NOTES, readNote } from '../plugins/knowledge/notes.js';
+import { listFonts, MAX_FONT_BYTES, readFont, removeFont, saveFont } from './fonts.js';
 import { deleteChat, historyOf, listChats, newChat, readChat, writeChat, type StoredTurn } from './chats.js';
 import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -1359,6 +1362,11 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       .listTools(pingTool)
       .filter((t) => t.name !== pingTool.name && (t.annotations?.readOnlyHint === true || t.name === 'save_note') && /^[a-zA-Z0-9_-]{1,64}$/.test(t.name))
       .map((t) => ({ name: t.name, description: t.description ?? '', inputSchema: (t.inputSchema ?? {}) as Record<string, unknown> }));
+  /** The skills there are, by name and what each is for: the model reads one with use_skill when a task calls for it. */
+  const skillsLine = (): string => {
+    const skills = listSkills();
+    return skills.length ? `\n\nSkills installed here (read one with use_skill when the task is the kind it is for):\n${skills.map((s) => `- ${s.name}: ${s.description}`).join('\n')}` : '';
+  };
   const CHAT_RULES = [
     'You are answering in the console of this MCP server, where its owner tries how its tools work for an AI assistant.',
     'Use the tools to find the answer, as an assistant connected to this server would. Say which documents or sources the answer comes from.',
@@ -1367,6 +1375,106 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     'Answer in the language of the question.',
   ].join('\n');
   api.get('/chat', wrap(async (_req, res) => void res.json({ tools: chatTools().map((t) => t.name), left: registry.listTools(pingTool).filter((t) => t.name !== pingTool.name).length - chatTools().length })));
+  // ── Skills (plugins/knowledge/skills.ts): installed from GitHub or a folder, or written here ──
+  api.get('/skills', wrap(async (_req, res) => void res.json({ skills: listSkills() })));
+  api.get(
+    '/skills/:name',
+    wrap(async (req, res) => {
+      try {
+        res.json({ text: readSkill(String(req.params.name)) });
+      } catch (e) {
+        refuse(res, 404, msg(e));
+      }
+    }),
+  );
+  api.post(
+    '/skills',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      const body = z
+        .union([
+          z.object({ from: z.string().trim().min(1).max(1000) }).strict(),
+          z.object({ name: z.string().trim().min(1).max(64), description: z.string().trim().min(1).max(1000), body: z.string().min(1).max(200_000) }).strict(),
+        ])
+        .parse(req.body);
+      try {
+        const installed =
+          'from' in body
+            ? /^https?:\/\//.test(body.from)
+              ? await installFromGithub(body.from)
+              : installFromFolder(body.from)
+            : [createSkill(body.name, body.description, body.body)];
+        res.json({ installed: installed.map((s) => s.name), skills: listSkills() });
+      } catch (e) {
+        refuse(res, 422, msg(e));
+      }
+    }),
+  );
+  api.delete(
+    '/skills/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      if (!removeSkill(String(req.params.name))) return refuse(res, 404, 'There is no such skill.');
+      res.json({ skills: listSkills() });
+    }),
+  );
+
+  // ── Notes (plugins/knowledge/notes.ts) and the fonts they are shown in (fonts.ts) ──
+  api.get('/notes', wrap(async (_req, res) => void res.json({ notes: listNotes() })));
+  api.get(
+    '/notes/file',
+    wrap(async (req, res) => {
+      const q = z.object({ place: z.enum([NOTES, INBOX]), path: z.string().min(1).max(1000) }).parse(req.query);
+      try {
+        res.json({ text: readNote(q.place, q.path) });
+      } catch (e) {
+        refuse(res, 404, msg(e));
+      }
+    }),
+  );
+  api.get('/fonts', wrap(async (_req, res) => void res.json({ fonts: listFonts(settingsDir()) })));
+  api.put(
+    '/fonts/:name',
+    // Read after the token was checked: a request without it is turned away before its body is taken in.
+    express.raw({ type: 'application/octet-stream', limit: MAX_FONT_BYTES }),
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      if (!Buffer.isBuffer(req.body)) return refuse(res, 400, 'Send the font as the body of the request (application/octet-stream).');
+      try {
+        res.json({ font: saveFont(settingsDir(), String(req.params.name), req.body), fonts: listFonts(settingsDir()) });
+      } catch (e) {
+        refuse(res, 422, msg(e));
+      }
+    }),
+  );
+  api.get(
+    '/fonts/:name',
+    wrap(async (req, res) => {
+      let font: ReturnType<typeof readFont> = null;
+      try {
+        font = readFont(settingsDir(), String(req.params.name));
+      } catch {
+        /* not a font name */
+      }
+      if (!font) return refuse(res, 404, 'There is no such font.');
+      res.setHeader('Content-Type', font.type);
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(font.bytes);
+    }),
+  );
+  api.delete(
+    '/fonts/:name',
+    wrap(async (req, res) => {
+      if (!mustEdit(res)) return;
+      try {
+        if (!removeFont(settingsDir(), String(req.params.name))) return refuse(res, 404, 'There is no such font.');
+      } catch (e) {
+        return refuse(res, 400, msg(e));
+      }
+      res.json({ fonts: listFonts(settingsDir()) });
+    }),
+  );
+
   // ── Conversations kept on this machine (chats.ts) ──
   api.get('/chats', wrap(async (_req, res) => void res.json({ chats: listChats() })));
   api.get(
@@ -1441,6 +1549,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
           {
             system:
               `${CHAT_RULES}\n\nWhat this server tells the assistants that connect to it:\n${instructions}` +
+              skillsLine() +
               (left ? `\n\nThis conversation is longer than what you are given: its first ${left} message${left === 1 ? ' is' : 's are'} left out.` : ''),
             history,
             message: body.message,

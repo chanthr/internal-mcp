@@ -215,6 +215,18 @@ curl -X POST https://<내 주소>/inbox \
 *"찾은 내용을 Knowledge MCP로 보내. https://<내 주소>/inbox 에 Authorization: Bearer <키> 헤더를 붙여 POST하고,
 title, content(Markdown), from: "aside"를 JSON으로 보내."*
 
+### 스킬, 그리고 내 폰트로 보는 노트
+
+스킬은 한 종류의 일에 대한 지시문 폴더입니다(Agent Skills 형식). 머리말에 `name`과 `description`이 있는 `SKILL.md`와,
+그 지시문이 가리키는 파일들로 이루어집니다. **Skills** 화면에서 GitHub 주소(저장소, 저장소 안의 폴더, 스킬 여럿이 든
+저장소)나 이 컴퓨터의 폴더로 설치하거나, 화면에서 직접 씁니다. 스킬은 설정 옆 `skills/`에 두고 이 서버를 쓰는 모든
+AI 클라이언트가 함께 씁니다. 클라이언트는 스킬 이름과 쓰임새만 듣고, 일이 그 종류일 때 `use_skill`로 읽습니다. 그래서
+쓰기 전에는 토큰이 들지 않습니다. 스킬 안의 어떤 것도 실행하지 않습니다. 클라이언트가 스킬에 적힌 대로 따르므로 믿을 수
+있는 곳의 스킬만 설치하십시오. 설치하면 화면이 그 내용을 바로 보여 줍니다.
+
+**Notes** 화면은 `notes/`와 `inbox/`의 노트를 보여 주고, 추가한 폰트(TrueType, OpenType, WOFF, `fonts/`에 보관)로
+노트를 표시합니다. **Print or save as PDF**는 노트만 인쇄합니다. 브라우저 인쇄 창에서 PDF로 저장을 고르면 됩니다.
+
 ## 동작 방식
 
 <p align="center">

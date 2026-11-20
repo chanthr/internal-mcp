@@ -47,6 +47,10 @@ Changes that affect people who run or extend the server. Dates are release dates
 
 ### Added
 
+- **Skills, and notes in your own font.** The Skills page installs skills (Agent Skills format) from GitHub or a
+  folder, or writes one; every assistant that uses the server is told their names and reads one with `use_skill`
+  when a task calls for it. Nothing in a skill is run. The Notes page lists `notes/` and `inbox/`, shows a note in
+  a font you add, and prints it or saves it as a PDF.
 - **Conversations are kept, and notes are saved.** Chat keeps its conversations on this computer and picks them
   up again from a list; leaving the page no longer loses them or stops an answer. `save_note` writes a Markdown
   note into `notes/` (from the console's chat) or `inbox/<who>/` (from other assistants), never over another file

@@ -11,6 +11,8 @@ import { AppsAndData } from './pages/apps';
 import { Models } from './pages/models';
 import { Chat } from './pages/chat';
 import { WikiPage } from './pages/wiki';
+import { Skills } from './pages/skills';
+import { Notes } from './pages/notes';
 import { Search } from './pages/search';
 import { Connect } from './pages/connect';
 import { Tools } from './pages/tools';
@@ -59,6 +61,7 @@ const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: str
     items: [
       { id: 'documents', label: 'Documents', render: () => <Documents /> },
       { id: 'apps', label: 'Apps and data', render: () => <AppsAndData /> },
+      { id: 'notes', label: 'Notes', render: () => <Notes /> },
     ],
   },
   {
@@ -67,6 +70,7 @@ const PAGES: Array<{ group: string | null; items: Array<{ id: string; label: str
       { id: 'models', label: 'Models', render: () => <Models /> },
       { id: 'chat', label: 'Chat', render: () => <Chat /> },
       { id: 'wiki', label: 'Wiki', render: () => <WikiPage /> },
+      { id: 'skills', label: 'Skills', render: () => <Skills /> },
     ],
   },
   { group: 'Search', items: [{ id: 'search', label: 'Search', render: () => <Search /> }] },

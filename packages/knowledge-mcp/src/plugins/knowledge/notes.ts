@@ -12,7 +12,7 @@
  * `path`, a note already in these folders is replaced, and only there: the person's own documents are never
  * changed by this.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { INBOX, NOTES, placeDir, type Place } from './folders.js';
 import { pageName } from './wiki.js';
@@ -92,4 +92,57 @@ export function saveNote(o: { title: string; content: string; tags?: string[]; p
   writeFileSync(file, noteText({ title, content: o.content, tags, from, url: o.url, created: createdDay }));
   const path = relative(root, file).split(sep).join('/');
   return { path, shown: `${o.place}/${path}`, created };
+}
+
+// ── Reading them back (the console's Notes page) ──
+
+export interface NoteEntry {
+  place: Place;
+  /** Path inside the folder. */
+  path: string;
+  title: string;
+  /** From the front matter, when the note has it. */
+  date: string | null;
+  from: string | null;
+  modified: string;
+  size: number;
+}
+
+/** Every note in notes/ and inbox/, newest first. Links are not followed. */
+export function listNotes(dir?: string, most = 2000): NoteEntry[] {
+  const out: NoteEntry[] = [];
+  for (const place of [NOTES, INBOX] as const) {
+    const root = placeDir(place, dir);
+    const walk = (rel: string) => {
+      let entries: import('node:fs').Dirent[];
+      try {
+        entries = readdirSync(join(root, rel), { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const e of entries) {
+        if (out.length >= most || e.name.startsWith('.') || e.isSymbolicLink()) continue;
+        const path = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(path);
+        else if (e.isFile() && e.name.toLowerCase().endsWith('.md')) {
+          const abs = join(root, path);
+          const st = statSync(abs);
+          const head = readFileSync(abs, 'utf8').slice(0, 2000);
+          const field = (k: string) => new RegExp(`^${k}:\\s*"?([^"\\n]*)"?\\s*$`, 'm').exec(/^---\n[\s\S]*?\n---/.exec(head)?.[0] ?? '')?.[1]?.trim() || null;
+          out.push({ place, path, title: field('title') ?? /^#\s+(.+)$/m.exec(head)?.[1]?.trim() ?? e.name.replace(/\.md$/i, ''), date: field('date'), from: field('from'), modified: st.mtime.toISOString(), size: st.size });
+        }
+      }
+    };
+    walk('');
+  }
+  return out.sort((a, b) => b.modified.localeCompare(a.modified));
+}
+
+/** One note's text. Only a Markdown file inside notes/ or inbox/, never through a link. */
+export function readNote(place: Place, path: string, dir?: string): string {
+  const root = placeDir(place, dir);
+  const abs = resolve(root, path);
+  if (!abs.startsWith(`${root}${sep}`) || !abs.toLowerCase().endsWith('.md') || !existsSync(abs) || lstatSync(abs).isSymbolicLink()) throw new Error('There is no such note.');
+  if (statSync(abs).size > 2_000_000) throw new Error('The note is larger than 2 MB.');
+  return readFileSync(abs, 'utf8');
 }
