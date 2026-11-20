@@ -100,7 +100,25 @@ export type ChatEvent =
   | { type: 'done'; model: string; usage: { input: number; output: number; cached: number; steps: number }; note: string | null }
   | { type: 'error'; message: string }
   /** The conversation this message is kept in: sent first. */
-  | { type: 'chat'; id: string; title: string };
+  | { type: 'chat'; id: string; title: string }
+  /** run_command asks the person (server: admin/terminal.ts), and how it went. */
+  | { type: 'approve'; id: string; callId: string; command: string; why: string; cwd: string }
+  | { type: 'decided'; id: string; run: boolean }
+  | { type: 'output'; id: string; text: string }
+  | { type: 'ran'; id: string; exit: number | null; seconds: number };
+
+/** A command the chat asked to run that waits for the person, or runs now. */
+export interface WaitingCommand {
+  id: string;
+  callId: string;
+  command: string;
+  why: string;
+  cwd: string;
+  state: 'waiting' | 'running' | 'done' | 'declined';
+  output: string;
+  exit?: number | null;
+  seconds?: number;
+}
 
 /** A conversation kept on this machine (server: admin/chats.ts). */
 export interface ChatSummary {
@@ -114,6 +132,8 @@ export interface StoredChat {
   title: string;
   updated: string;
   answering: boolean;
+  /** Commands of the answer being written that wait for the person or run now. */
+  commands?: WaitingCommand[];
   turns: Array<{
     role: 'user' | 'assistant';
     text: string;

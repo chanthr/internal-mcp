@@ -16,6 +16,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { backgroundExec, hasTool, type Exec } from '../setup/auto.js';
 import { cloudflaredHome } from './tunnel.js';
+import { plainOutput } from '../core/plain_text.js';
 
 export type CliTool = 'gcloud' | 'gh' | 'cloudflared';
 export type CliAction = 'install' | 'sign-in';
@@ -89,12 +90,11 @@ const runs = new Map<string, Run>();
 const key = (tool: CliTool, action: CliAction) => `${tool} ${action}`;
 
 /** The tools print in colour for a terminal. Asked not to, some still do. Progress bars rewrite their line with \r. */
-const plain = (text: string): string => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[^\n]*\r(?!\n)/g, '');
-const lastLine = (text: string): string => plain(text).split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? '';
+const lastLine = (text: string): string => plainOutput(text).split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? '';
 
 function view(run: Run | undefined): CliRun {
   if (!run) return NONE;
-  const text = plain(run.output);
+  const text = plainOutput(run.output);
   const going = !run.ended;
   const signIn = going && run.action === 'sign-in';
   return {
