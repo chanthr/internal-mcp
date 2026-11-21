@@ -66,14 +66,32 @@ export function cli(command: string, env: NodeJS.ProcessEnv = process.env): stri
 /** One word of a command line for a POSIX shell, quoted when the shell would split or change it. */
 export const shellQuote = (word: string): string => (/[^A-Za-z0-9_@%+=:,./-]/.test(word) ? `'${word.replace(/'/g, `'\\''`)}'` : word);
 
+/**
+ * The TypeScript config tsx is told to use for the project in `dir`: its own tsconfig.json, or none at all (the null
+ * device) when it has none. Left to itself, tsx reads the tsconfig.json of the working directory, which is the project
+ * the person has open in the client: its "paths" can map the import of this package to a file of that repository,
+ * whose code then runs as the server.
+ */
+function tsconfigOf(dir: string, platform: NodeJS.Platform): string {
+  const own = join(dir, 'tsconfig.json');
+  return existsSync(own) ? own : platform === 'win32' ? '\\\\.\\nul' : '/dev/null';
+}
+
+/**
+ * npx with the folder of the settings as its project. Without --prefix, npx runs a copy of this package found in the
+ * node_modules of the working directory, and reads that folder's .npmrc, which can send the download to a registry
+ * of its choosing. The version is not pinned: an entry keeps working, and gets fixes, across releases.
+ */
+const npxArgs = (dir: string): string[] => ['--prefix', dir, '-y', PACKAGE, 'serve', '--stdio'];
+
 /** How an AI client starts this server over stdio from the folder `dir`: the project's own server when there is one. */
-export function stdioCommand(dir: string): string[] {
+export function stdioCommand(dir: string, platform: NodeJS.Platform = process.platform): string[] {
   const tsx = join(dir, 'node_modules', '.bin', 'tsx');
   const own = join(dir, 'src', 'server.ts');
-  if (existsSync(own) && existsSync(tsx)) return [tsx, own, 'serve', '--stdio'];
+  if (existsSync(own) && existsSync(tsx)) return [tsx, '--tsconfig', tsconfigOf(dir, platform), own, 'serve', '--stdio'];
   const built = join(dir, 'dist', 'server.js');
   if (existsSync(built)) return ['node', built, 'serve', '--stdio'];
-  return ['npx', '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'];
+  return ['npx', ...npxArgs(dir)];
 }
 
 /**
@@ -83,22 +101,25 @@ export function stdioCommand(dir: string): string[] {
  * a version manager installed, and the server never starts ("spawn npx ENOENT"). So the entry names this very
  * Node by its full path, and nothing is looked up:
  *
- *   a project with src/server.ts    <node> <dir>/node_modules/tsx/dist/cli.mjs <dir>/src/server.ts serve --stdio
+ *   a project with src/server.ts    <node> <dir>/node_modules/tsx/dist/cli.mjs --tsconfig <dir>/tsconfig.json
+ *                                   <dir>/src/server.ts serve --stdio
  *   a built project                 <node> <dir>/dist/server.js serve --stdio
- *   no project (started by npx)     <node's folder>/npx -y @chnxthr/knowledge-mcp serve --stdio
+ *   no project (started by npx)     <node's folder>/npx --prefix <dir> -y @chnxthr/knowledge-mcp serve --stdio
  *                                   with a PATH that holds node (npx is a script that asks for it)
  *
  * Every entry sets MCP_HOME=<dir>. A client starts the server in the project the person has open, and the settings
  * of that folder are somebody else's: with MCP_HOME they are never read, whatever the folder holds (core/paths.ts).
+ * For the same reason tsx is given the project's tsconfig.json and npx the folder as its project: each would
+ * otherwise look in the working directory for what decides which code runs (tsconfigOf, npxArgs).
  */
 export function stdioEntry(dir: string, node: string = process.execPath, platform: NodeJS.Platform = process.platform): { command: string; args: string[]; env: Record<string, string> } {
   const env = { MCP_HOME: dir };
   const own = join(dir, 'src', 'server.ts');
   const tsx = join(dir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  if (existsSync(own) && existsSync(tsx)) return { command: node, args: [tsx, own, 'serve', '--stdio'], env };
+  if (existsSync(own) && existsSync(tsx)) return { command: node, args: [tsx, '--tsconfig', tsconfigOf(dir, platform), own, 'serve', '--stdio'], env };
   const built = join(dir, 'dist', 'server.js');
   if (existsSync(built)) return { command: node, args: [built, 'serve', '--stdio'], env };
-  const args = ['-y', PACKAGE, 'serve', '--stdio'];
+  const args = npxArgs(dir);
   // Windows starts npx through a .cmd file, and its apps do get the PATH: the plain name is right there.
   if (platform === 'win32') return { command: 'npx', args, env };
   let bin = dirname(node);

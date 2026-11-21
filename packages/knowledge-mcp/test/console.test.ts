@@ -423,9 +423,10 @@ test('activity, the client snippets and the live check', async () => {
   const clients = (await api('GET', '/clients')).json;
   assert.equal(clients.url, `http://localhost:${server.port}/mcp`);
   assert.deepEqual(clients.clients.map((c: { id: string }) => c.id), ['claude-code', 'claude-desktop', 'cursor', 'vscode']);
-  // This folder is not a project, so the server comes through npx and the entry names the folder.
+  // This folder is not a project, so the server comes through npx and the entry names the folder, to npx as well.
   const byHand = clients.clients[0].manual.text as string;
-  assert.match(byHand, new RegExp(`^claude mcp add --scope user ${clients.name} -e MCP_HOME=\\S*${dir.split('/').pop()} .* -- \\S*npx -y @chnxthr/knowledge-mcp serve --stdio$`));
+  const folderName = dir.split('/').pop();
+  assert.match(byHand, new RegExp(`^claude mcp add --scope user ${clients.name} -e MCP_HOME=\\S*${folderName} .* -- \\S*npx --prefix \\S*${folderName} -y @chnxthr/knowledge-mcp serve --stdio$`));
   assert.equal(JSON.parse(clients.clients[1].manual.text).mcpServers[clients.name].env.MCP_HOME, dir);
   assert.match(clients.clients[2].link, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=/);
   // Which client is the only thing a request chooses. (Cursor adds a server itself, through its link.)

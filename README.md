@@ -516,7 +516,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `setup folder <path>` | Adds a local folder of documents to the search index |
 | `setup connection <name> --postgres --env NAME` / `--sqlite <file>` / `--http <base URL>` | Adds a database or an API for tools declared in the config (see [Your data as tools](#your-data-as-tools)) |
 | `setup secret <ENV_NAME>` | Types one secret into `.env` without it being shown |
-| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents. `setup embeddings --api-key` asks for the endpoint's key without showing it; a key saved for another address is not sent to the new one, and is removed |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). Started in a terminal it also serves [the console](#the-console) at `/console/` and restarts itself when the console saves a change; `--open` opens the console in the browser, and so does running with no command at all. `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |
@@ -698,9 +698,15 @@ that depends on the bot's channels and on each person's allowed channels.
 
 A client starts a local server in whatever project you have open, and that folder's settings are not yours: a
 `.env` there could send your documents to another address with your key. So the working directory counts only when
-nothing else holds settings, and every entry the console and `setup` write sets `MCP_HOME` to your folder. A relative
-`MCP_DATA_DIR` or `MCP_CONFIG_PATH` is inside the settings folder. `MCP_CONFIG_JSON` (inline) and `MCP_CONFIG_PATH`
-override the file. The config is read once at startup: restart the server after you change it, the sign-in
+nothing else holds settings, and every entry the console and `setup` write sets `MCP_HOME` to your folder. A server
+started over stdio without `MCP_HOME` does not start when its settings would be the working directory's (always the
+case through npx); it says to add `MCP_HOME=/full/path` to the client's entry. When the working directory holds a
+`.env` or `mcp.config.json` that is not read, the server says which folder it uses.
+
+`MCP_HOME` is a full path. A leading `~` is your home folder: a shell does not expand it inside `-e MCP_HOME=~/x`,
+and a JSON config never does. A relative path, or a folder that does not exist, stops the server. A relative
+`MCP_DATA_DIR`, `MCP_CONFIG_PATH`, `MCP_ENV_FILE` or `GOOGLE_APPLICATION_CREDENTIALS` is inside the settings folder.
+`MCP_CONFIG_JSON` (inline) and `MCP_CONFIG_PATH` override the file. The config is read once at startup: restart the server after you change it, the sign-in
 allowlist included. (A server started in a terminal restarts itself when the console saves a change.)
 
 | Config key | Meaning |
@@ -862,7 +868,8 @@ Node by its full path and the server starts there too.
 | Client | How |
 | --- | --- |
 | Claude Code, local | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
-| Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx --prefix /abs/path/folder -y @chnxthr/knowledge-mcp serve --stdio` |
+| Claude Code, local, a project run from source | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- node /abs/path/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /abs/path/my-mcp/tsconfig.json /abs/path/my-mcp/src/server.ts serve --stdio` |
 | Claude Desktop, Cursor, VS Code, local | The same command and `MCP_HOME` in the client's config file, under `command`, `args` and `env` |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
 | Claude and ChatGPT connectors | Console → Connect: your own address, then **Sign-in for connectors → Turn on**. Add a custom connector with `https://<host>/mcp`; it asks for a key once ([OAUTH_SETUP.md](OAUTH_SETUP.md)) |
@@ -872,6 +879,7 @@ Node by its full path and the server starts there too.
 
 | Change | What to do |
 | --- | --- |
+| A stdio server needs `MCP_HOME` | Unless your project folder holds `.env` or `mcp.config.json`, a stdio server without `MCP_HOME` does not start. Add `-e MCP_HOME=/full/path` to `claude mcp add` (`"env": { "MCP_HOME": "/full/path" }` in a JSON config), or add the server again from the console's **Connect** page. Entries made that way also get `--tsconfig` (tsx) or `--prefix` (npx), which keep the open project from choosing the code that runs |
 | Drive scope is `shared` by default | Documents that a trusted owner shared with the service account outside `drive.roots` can be searched, read and indexed. Nothing changes until you list owners in `drive.trustedOwners` (`knowledge-mcp setup trust acme.com`). Excluded folders stay hidden. `drive.scope: "roots"` turns it off |
 | zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
 | `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |

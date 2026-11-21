@@ -20,7 +20,6 @@ import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { z } from 'zod';
@@ -29,6 +28,7 @@ import { authStore, CONSOLE_EMAIL } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
 import { cli, stdioEntry } from '../core/invocation.js';
+import { expandHome } from '../core/paths.js';
 import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
@@ -520,7 +520,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       if (!mustEdit(res)) return;
       const { path } = z.object({ path: oneLine(1000).min(1) }).parse(req.body);
-      const full = resolve(settingsDir(), path.trim().replace(/^~(?=$|\/)/, homedir()));
+      const full = resolve(settingsDir(), expandHome(path.trim()));
       const r = await setup(['folder', full], settingsDir());
       if (!r.ok) return refuse(res, 422, firstLine(r.lines));
       change(res, { path: full });
@@ -1223,7 +1223,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         conn = { type: 'postgres', urlEnv: envName };
       } else if (b.type === 'sqlite') {
         if (!b.path?.trim()) return refuse(res, 422, 'Enter the path of the database file.');
-        const full = resolve(dir, b.path.trim().replace(/^~(?=$|\/)/, homedir()));
+        const full = resolve(dir, expandHome(b.path.trim()));
         const r = await checkSqliteFile(b.name, full);
         found = `${r.version}, ${r.tables} table${r.tables === 1 ? '' : 's'}`;
         conn = { type: 'sqlite', path: full };

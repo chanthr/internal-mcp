@@ -224,6 +224,39 @@ Changes that affect people who run or extend the server. Dates are release dates
   read from one folder: `MCP_HOME` when it is set, else the project folder when it has `.env` or `mcp.config.json`,
   else the working directory. Every entry the console and `setup` write for a client sets `MCP_HOME`, project
   entries included, and a relative `MCP_DATA_DIR` or `MCP_CONFIG_PATH` is inside the settings folder.
+- **Breaking: a stdio server needs `MCP_HOME` unless its project folder holds the settings.** An entry written by
+  hand without `MCP_HOME` (`npx -y @chnxthr/knowledge-mcp serve --stdio` with only a key in `env`) still read the
+  `.env` and `mcp.config.json` of the repository the client had open, and kept the index there: through npx the
+  working directory is the only folder there is. Such a server now stops with one message before it reads anything.
+  Remedy: add `-e MCP_HOME=/full/path/of/your/settings` to `claude mcp add` (`"env": { "MCP_HOME": "..." }` in a
+  JSON config), or add the server again from the console's Connect page. HTTP and the other commands keep the lookup.
+- **Found by a review of that fix, and closed.** Each let the repository open in a client run its code as this
+  server, or choose its settings, with `MCP_HOME` set. Entries written before this version lack the new flags: add
+  the server to the client again.
+  - *tsx read the repository's `tsconfig.json`.* A project run from source starts through tsx, which looks for
+    `tsconfig.json` in the working directory. A repository whose `paths` mapped `@chnxthr/knowledge-mcp` to a file
+    of its own had that file run as the server. Every entry the console, `setup` and `create-knowledge-mcp` write
+    now passes `--tsconfig` with the project's own file (the null device when the project has none).
+  - *npx used the repository's `node_modules` and `.npmrc`.* A copy of the package in the repository's
+    `node_modules` ran instead of the real one, and its `.npmrc` could send the download to another registry.
+    Entries now run `npx --prefix <settings folder> -y @chnxthr/knowledge-mcp`, so npm's project is that folder.
+  - *A relative `MCP_HOME` was found in the working directory.* `MCP_HOME=~/kmcp` arrives as typed from
+    `-e MCP_HOME=~/kmcp` in zsh and from every JSON config, and pointed into the repository. A leading `~` is now the
+    home folder, and a relative path or a folder that does not exist stops the server. A relative `MCP_ENV_FILE` is
+    inside the settings folder.
+  - *A relative `GOOGLE_APPLICATION_CREDENTIALS` was read from the working directory,* so a repository's key file
+    became the Drive account, and its `token_uri` the address the signed request went to. It is inside the settings
+    folder now, as `setup check` and the console already read it.
+  - *`setup embeddings` and the setup wizard moved the embedding key with the address.* `--base-url` sent the saved
+    `EMBEDDING_API_KEY` to the new address for its check and kept it there, and so did the wizard; choosing OpenAI
+    in the wizard left another provider's key in front of the OpenAI key just typed. Both follow the console now:
+    a saved key is used, and kept, only at its own address. `setup embeddings --api-key` asks for a key unseen.
+  - *The Anthropic key followed `ANTHROPIC_BASE_URL`.* The SDK reads it, and `ANTHROPIC_CUSTOM_HEADERS`, from the
+    environment, which a stdio server inherits from a client set up for a gateway. Claude is now called at
+    `https://api.anthropic.com` only, without those headers.
+- **The server says which settings it uses when the working directory has others.** Run inside a folder with its
+  own `.env` while the program's folder (a checkout linked with `npm link`) holds settings too, the server used the
+  program's folder without a word. It now says on stderr which folder it uses and that `MCP_HOME` picks this one.
 - **The OpenAI key is sent to OpenAI only.** With another embedding address set, it was sent there with every
   request for vectors, and by `setup check`. `EMBEDDING_API_KEY` is used for another address, and the console
   removes it when the address changes and no key is given, as it does for the language model and OCR.

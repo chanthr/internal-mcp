@@ -9,8 +9,9 @@
  *   knowledge-mcp setup drive --key <file>             use an existing key file
  *   knowledge-mcp setup trust <email-or-domain>...     whose shared Drive documents are shown
  *   knowledge-mcp setup github --from-gh               reuse the gh CLI login
- *   knowledge-mcp setup embeddings --base-url URL --model NAME
- *                                                      a keyless OpenAI-compatible endpoint (a local model)
+ *   knowledge-mcp setup embeddings --base-url URL --model NAME [--api-key]
+ *                                                      an OpenAI-compatible endpoint (a local model needs no key;
+ *                                                      --api-key asks for one without showing it)
  *   knowledge-mcp setup connection <name> --postgres --env NAME | --sqlite <file> | --http <base URL>
  *                                                      a database or an API for declared tools (see connections/schema.ts)
  *   knowledge-mcp setup secret <ENV_NAME>              type one secret into .env without showing it (needs a terminal)
@@ -24,8 +25,8 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { railwayAuth, railwaySignedIn } from '../plugins/railway/login.js';
-import { checkDrive, checkDriveCredentials, checkEmbedding, checkGithub, checkRailway, checkSlack } from './checks.js';
-import { updateEnvFile } from './envfile.js';
+import { checkDrive, checkDriveCredentials, checkEmbedding, checkGithub, checkRailway, checkSlack, savedEmbeddingKey } from './checks.js';
+import { readEnvValues, updateEnvFile } from './envfile.js';
 import { ConnectionsSchema, DataToolsSchema, dataConfigProblems, envRefs, exploreToolNames, type ConnectionConfig, type DataToolConfig } from '../connections/schema.js';
 import { checkConnection, closeDataConnections } from '../connections/index.js';
 import { formatValidationError } from '../plugin/result.js';
@@ -61,7 +62,7 @@ export const SETUP_USAGE = `setup                      guided setup (asks questi
        setup drive --key <file>
        setup trust <email-or-domain>...
        setup github --from-gh
-       setup embeddings --base-url URL --model NAME
+       setup embeddings --base-url URL --model NAME [--api-key]
        setup connection <name> --postgres --env NAME [--explore]
        setup connection <name> --sqlite <file> [--explore]
        setup connection <name> --http <base URL> [--header 'Name: value']... [--query key=value]...
@@ -353,12 +354,27 @@ async function github(argv: string[], ctx: CommandContext): Promise<number> {
 }
 
 async function embeddings(argv: string[], ctx: CommandContext): Promise<number> {
-  const { values } = parseArgs({ args: argv, options: { 'base-url': { type: 'string' }, model: { type: 'string' } } });
-  if (!values['base-url'] || !values.model) throw new Error('setup embeddings needs --base-url URL --model NAME');
-  const env = ctx.env ?? process.env;
-  const r = await checkEmbedding({ baseUrl: values['base-url'], model: values.model, apiKey: env.EMBEDDING_API_KEY?.trim() || undefined });
-  updateEnvFile(join(ctx.dir, '.env'), { EMBEDDING_BASE_URL: values['base-url'], EMBEDDING_MODEL: values.model, EMBEDDING_DIM: String(r.dim) });
-  ctx.out(`✓ ${r.model} answers with ${r.dim}-dimension vectors. Saved EMBEDDING_BASE_URL, EMBEDDING_MODEL and EMBEDDING_DIM.`);
+  const { values } = parseArgs({ args: argv, options: { 'base-url': { type: 'string' }, model: { type: 'string' }, 'api-key': { type: 'boolean' } } });
+  if (!values['base-url'] || !values.model) throw new Error('setup embeddings needs --base-url URL --model NAME [--api-key]');
+  const baseUrl = values['base-url'].trim().replace(/\/+$/, '');
+  const envPath = join(ctx.dir, '.env');
+  // The key is typed unseen, never given as an argument (see the top of this file).
+  const typed = values['api-key']
+    ? (await askSecret(
+        ctx,
+        `API key for ${baseUrl} (not shown):`,
+        `setup embeddings --api-key asks for the key without showing it, so it needs a terminal. The person who owns the key runs it themselves: ${cli('setup embeddings')} --base-url ${baseUrl} --model ${values.model} --api-key`,
+      )) || undefined
+    : undefined;
+  // A key already saved is used for the check, and kept, only at the address it was saved for, as in the console.
+  // Kept for a new address, it would be sent there with every request for vectors after the restart.
+  const saved = savedEmbeddingKey(envPath, baseUrl, ctx.env ?? process.env);
+  const r = await checkEmbedding({ baseUrl, model: values.model, apiKey: typed ?? saved });
+  const key = typed ? { EMBEDDING_API_KEY: typed } : saved ? {} : { EMBEDDING_API_KEY: undefined };
+  const removed = !typed && !saved && readEnvValues(envPath).has('EMBEDDING_API_KEY');
+  updateEnvFile(envPath, { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: values.model, EMBEDDING_DIM: String(r.dim), ...key });
+  ctx.out(`✓ ${r.model} answers with ${r.dim}-dimension vectors. Saved EMBEDDING_BASE_URL, EMBEDDING_MODEL${typed ? ', EMBEDDING_DIM and EMBEDDING_API_KEY' : ' and EMBEDDING_DIM'}.`);
+  if (removed) ctx.out('  The key saved for the previous address was removed: a key goes only to the address it was given for. Add one for this address with --api-key.');
   ctx.out('  The server builds the search index by itself the next time it starts.');
   return 0;
 }
@@ -474,27 +490,33 @@ async function connection(argv: string[], ctx: CommandContext): Promise<number> 
   return 0;
 }
 
-async function secret(argv: string[], ctx: CommandContext): Promise<number> {
-  if (argv.length !== 1) throw new Error('setup secret needs one env var name, for example: setup secret SHOP_DATABASE_URL');
-  const name = argv[0];
-  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw new Error('an env var name holds letters, digits and underscores');
+/** A secret typed without being shown: through ctx.readSecret, else the terminal. `noTerminal` is the error without one. */
+async function askSecret(ctx: CommandContext, question: string, noTerminal: string): Promise<string> {
   let read = ctx.readSecret;
   let close = () => {};
   if (!read) {
-    if (!process.stdin.isTTY) {
-      throw new Error(`setup secret asks for the value without showing it, so it needs a terminal. The person who owns the secret runs it themselves: ${cli('setup secret')} ${name}`);
-    }
+    if (!process.stdin.isTTY) throw new Error(noTerminal);
     const { terminalIO } = await import('./terminal.js');
     const io = terminalIO();
     read = (q) => io.secret(q);
     close = () => io.close();
   }
-  let value: string;
   try {
-    value = (await read(`Value for ${name} (not shown):`)).trim();
+    return (await read(question)).trim();
   } finally {
     close();
   }
+}
+
+async function secret(argv: string[], ctx: CommandContext): Promise<number> {
+  if (argv.length !== 1) throw new Error('setup secret needs one env var name, for example: setup secret SHOP_DATABASE_URL');
+  const name = argv[0];
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw new Error('an env var name holds letters, digits and underscores');
+  const value = await askSecret(
+    ctx,
+    `Value for ${name} (not shown):`,
+    `setup secret asks for the value without showing it, so it needs a terminal. The person who owns the secret runs it themselves: ${cli('setup secret')} ${name}`,
+  );
   if (!value) {
     ctx.out('· Nothing was entered, so nothing was changed.');
     return 1;

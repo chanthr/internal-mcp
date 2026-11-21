@@ -9,10 +9,9 @@
  * All prompts go through `SetupIO`, so tests drive the whole flow with scripted answers and fake services.
  */
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { checkDrive, checkEmbedding, checkGithub, checkRailway, checkSlack, type DriveCheck } from './checks.js';
+import { checkDrive, checkEmbedding, checkGithub, checkRailway, checkSlack, savedEmbeddingKey, type DriveCheck } from './checks.js';
 import {
   createDriveServiceAccount,
   gcloudAccount,
@@ -28,7 +27,8 @@ import {
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
-import { cli, shellQuote } from '../core/invocation.js';
+import { cli, shellQuote, stdioCommand } from '../core/invocation.js';
+import { expandHome } from '../core/paths.js';
 
 export interface SetupIO {
   /** Print a line. */
@@ -42,10 +42,10 @@ export interface SetupIO {
 export interface SetupOptions {
   /** Folder that holds .env and mcp.config.json. Default: the working directory. */
   dir?: string;
-  /** Overrides for tests: base URLs of the services, and how the admin key is created. */
-  endpoints?: { drive?: string; slack?: string; github?: string; railway?: string };
+  /** Overrides for tests: base URLs of the services (openai: OpenAI's API), and how the admin key is created. */
+  endpoints?: { drive?: string; slack?: string; github?: string; railway?: string; openai?: string };
   createAdmin?: (email: string) => Promise<{ key: string; existed: boolean }>;
-  /** How the server is started, for the client command. Default: this package's own binary. */
+  /** How the server is started, for the client command. Default: as an AI client starts it from `dir` (stdioCommand). */
   serveCommand?: string[];
   /** Run `claude mcp add` when the user agrees. Tests turn this off. */
   canRunClient?: boolean;
@@ -224,7 +224,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   for (;;) {
     const answer = await io.ask(`  Folder path (Enter to ${currentFolders.length ? 'keep the list' : 'skip'}):`, '');
     if (!answer) break;
-    const path = resolve(dir, answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ').replace(/^~(?=$|\/)/, homedir()));
+    const path = resolve(dir, expandHome(answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ')));
     let count: number | null = null;
     try {
       if (statSync(path).isDirectory()) count = countDocuments(path);
@@ -486,7 +486,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
         io,
         async () => {
           const answer = await io.ask('  Path to the database file:', '');
-          return answer ? resolve(dir, answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' ').replace(/^~(?=$|\/)/, homedir())) : '';
+          return answer ? resolve(dir, expandHome(answer.replace(/^['"]|['"]$/g, '').replace(/\\ /g, ' '))) : '';
         },
         (path) => checkSqliteFile(name, path),
         (r) => `${r.version}, ${r.tables} table${r.tables === 1 ? '' : 's'}`,
@@ -519,27 +519,34 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
     const key = await askChecked(
       io,
       () => io.secret('  OpenAI API key:'),
-      (k) => checkEmbedding({ apiKey: k }),
+      (k) => checkEmbedding({ apiKey: k, baseUrl: opts.endpoints?.openai }),
       (r) => `${r.model} answers (${r.dim} dimensions)`,
     );
     if (key) {
       env.OPENAI_API_KEY = key.value;
+      // EMBEDDING_API_KEY comes first when the server picks a key (embeddingKey): one kept from another provider
+      // would go to OpenAI in place of the key just typed.
+      env.EMBEDDING_API_KEY = undefined;
       env.EMBEDDING_BASE_URL = undefined;
       env.EMBEDDING_MODEL = undefined;
       env.EMBEDDING_DIM = undefined;
       connected.push('search by meaning');
     }
   } else if (choice === '2') {
-    const baseUrl = await io.ask('  Base URL (Ollama: http://localhost:11434/v1):', 'http://localhost:11434/v1');
+    const baseUrl = (await io.ask('  Base URL (Ollama: http://localhost:11434/v1):', 'http://localhost:11434/v1')).replace(/\/+$/, '');
     const model = await io.ask('  Model name:', 'bge-m3');
-    const apiKey = await io.secret('  API key (Enter if the server needs none):');
+    // A key already saved is used again only for the address it was saved for, as in the console: kept for a new
+    // address, it would be sent there with every request for vectors.
+    const saved = savedEmbeddingKey(envPath, baseUrl);
+    const apiKey = await io.secret(saved ? '  API key (Enter keeps the saved one):' : '  API key (Enter if the server needs none):');
     try {
-      const r = await checkEmbedding({ baseUrl, model, apiKey: apiKey || undefined });
+      const r = await checkEmbedding({ baseUrl, model, apiKey: apiKey || saved });
       io.say(`  ✓ ${r.model} answers (${r.dim} dimensions)`);
       env.EMBEDDING_BASE_URL = baseUrl;
       env.EMBEDDING_MODEL = model;
       env.EMBEDDING_DIM = String(r.dim); // read from the answer, so nobody has to look it up
       if (apiKey) env.EMBEDDING_API_KEY = apiKey;
+      else if (!saved) env.EMBEDDING_API_KEY = undefined;
       connected.push('search by meaning');
     } catch (e) {
       io.say(`  ✗ ${e instanceof Error ? e.message : String(e)}`);
@@ -579,7 +586,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   // ── Connect a client ──
   io.say();
   io.say('Connect an AI client');
-  const serve = opts.serveCommand ?? ['npx', 'knowledge-mcp', 'serve', '--stdio'];
+  const serve = opts.serveCommand ?? stdioCommand(dir);
   const name = String(config.branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'knowledge';
   // MCP_HOME names this folder, so the server reads these settings whichever folder Claude Code starts it in.
   const addArgs = ['mcp', 'add', name, '-e', `MCP_HOME=${dir}`, '--', ...serve];

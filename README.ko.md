@@ -482,7 +482,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `setup folder <경로>` | 로컬 문서 폴더를 검색 색인에 넣습니다 |
 | `setup connection <이름> --postgres --env NAME` / `--sqlite <파일>` / `--http <기본 URL>` | 설정에 적은 도구가 쓸 데이터베이스나 API를 추가합니다([내 데이터를 도구로](#내-데이터를-도구로)) |
 | `setup secret <ENV_NAME>` | 비밀값 하나를 화면에 보이지 않게 `.env`에 넣습니다 |
-| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다 |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다. `setup embeddings --api-key`는 그 주소의 키를 화면에 보이지 않게 묻습니다. 다른 주소용으로 저장된 키는 새 주소로 보내지 않고 지웁니다 |
 | `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. 터미널에서 띄우면 `/console/`에서 [콘솔](#콘솔)도 제공하고, 콘솔이 변경을 저장하면 스스로 다시 시작합니다. `--open`을 붙이거나 명령 없이 실행하면 브라우저에서 콘솔을 엽니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
 | `keys list` / `keys revoke <id>` | 키 목록을 봅니다(키 값은 나오지 않음). 또는 키 하나를 끕니다 |
@@ -664,8 +664,15 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 
 클라이언트는 사용자가 열어 둔 프로젝트에서 로컬 서버를 띄웁니다. 그 폴더의 설정은 내 것이 아닙니다. 그곳의 `.env`가
 내 문서를 내 키와 함께 다른 주소로 보낼 수도 있습니다. 그래서 현재 폴더는 다른 곳에 설정이 없을 때만 봅니다. 콘솔과
-`setup`이 쓰는 클라이언트 항목에는 모두 `MCP_HOME`이 들어갑니다. 상대 경로로 적은 `MCP_DATA_DIR`와 `MCP_CONFIG_PATH`는
-설정 폴더 기준입니다. `MCP_CONFIG_JSON`(내용 직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
+`setup`이 쓰는 클라이언트 항목에는 모두 `MCP_HOME`이 들어갑니다. stdio로 띄운 서버에 `MCP_HOME`이 없고 설정을 현재
+폴더에서 읽게 되면 서버는 시작하지 않습니다. npx로 띄우면 늘 이 경우입니다. 이때 서버는 클라이언트 항목에
+`MCP_HOME=/전체/경로`를 넣으라고 알려 줍니다. 현재 폴더에 읽지 않는 `.env`나 `mcp.config.json`이 있으면 어느 폴더를
+쓰는지 알려 줍니다.
+
+`MCP_HOME`은 전체 경로로 적습니다. 맨 앞의 `~`는 홈 폴더입니다. 셸은 `-e MCP_HOME=~/x` 안의 `~`를 풀지 않고, JSON
+설정은 늘 그대로 넘깁니다. 상대 경로나 없는 폴더를 적으면 서버가 멈춥니다. 상대 경로로 적은 `MCP_DATA_DIR`,
+`MCP_CONFIG_PATH`, `MCP_ENV_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`는 설정 폴더 기준입니다. `MCP_CONFIG_JSON`(내용
+직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
 설정은 시작할 때 한 번 읽습니다. 로그인 허용 목록을 포함해 설정을 바꾸면 서버를 다시 시작합니다.
 (터미널에서 띄운 서버는 콘솔이 변경을 저장하면 스스로 다시 시작합니다.)
 
@@ -816,7 +823,8 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 | 클라이언트 | 방법 |
 | --- | --- |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- npx --prefix /절대경로/폴더 -y @chnxthr/knowledge-mcp serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠소⁠스⁠로⁠ ⁠실⁠행⁠하⁠는⁠ ⁠프⁠로⁠젝⁠트 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- node /절대경로/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /절대경로/my-mcp/tsconfig.json /절대경로/my-mcp/src/server.ts serve --stdio` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠D⁠e⁠s⁠k⁠t⁠o⁠p⁠,⁠ ⁠C⁠u⁠r⁠s⁠o⁠r⁠,⁠ ⁠V⁠S⁠ ⁠C⁠o⁠d⁠e | 같은 명령과 `MCP_HOME`을 클라이언트 설정 파일의 `command`, `args`, `env`에 적습니다 |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠원⁠격 | `claude mcp add --transport http my-mcp https://<호스트>/mcp --header "Authorization: Bearer <키>"` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
@@ -826,6 +834,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 
 | 바뀐 것 | 할 일 |
 | --- | --- |
+| stdio 서버에 `MCP_HOME` 필요 | 프로젝트 폴더에 `.env`나 `mcp.config.json`이 없으면 `MCP_HOME` 없는 stdio 서버는 시작하지 않습니다. `claude mcp add`에 `-e MCP_HOME=/전체/경로`를 넣거나(JSON 설정은 `"env": { "MCP_HOME": "/전체/경로" }`), 콘솔의 **Connect** 화면에서 서버를 다시 추가하십시오. 그렇게 만든 항목에는 `--tsconfig`(tsx)나 `--prefix`(npx)도 들어갑니다. 열어 둔 프로젝트가 실행할 코드를 고르지 못하게 막는 옵션입니다 |
 | Drive 범위 기본값이 `shared` | 신뢰하는 소유자가 `drive.roots` 밖에서 서비스 계정에 공유한 문서를 검색하고, 읽고, 색인할 수 있습니다. `drive.trustedOwners`에 소유자를 넣기 전에는 달라지는 것이 없습니다(`knowledge-mcp setup trust acme.com`). 제외 폴더는 계속 숨깁니다. `drive.scope: "roots"`로 끕니다 |
 | zod 4 | 플러그인이 쓰는 `z`가 zod 4가 됩니다. `z.record(값스키마)`는 `z.record(z.string(), 값스키마)`로, 안쪽 기본값에 기대는 객체의 `.default({})`는 `.prefault({})`로 고치십시오 |
 | `source`가 자유 이름 | `dev`와 `biz`는 옛 뜻 그대로 동작합니다. `--dev-only`, `--biz-only`도 그대로 되고, 일반형은 `--source <이름>`입니다 |

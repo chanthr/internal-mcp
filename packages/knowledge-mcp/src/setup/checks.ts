@@ -8,6 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { createDriveClient, credentialsFromJson } from '../plugins/drive/client.js';
+import { readEnvValues } from './envfile.js';
 
 const TIMEOUT_MS = 15_000;
 
@@ -85,6 +86,19 @@ export interface EmbeddingCheck {
   /** Vector size the model returned. Becomes EMBEDDING_DIM. */
   dim: number;
   model: string;
+}
+
+/**
+ * The embedding key already saved for the endpoint `baseUrl` (undefined: OpenAI's own), or undefined when none is
+ * saved or the saved one was given for another address. Read as the server reads it: the environment first, then the
+ * .env file at `envPath`. The setup commands use it for their check, and keep it, only at that address: the console
+ * does the same (admin/routes.ts), and a key is never sent to an address it was not given for.
+ */
+export function savedEmbeddingKey(envPath: string, baseUrl: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const file = readEnvValues(envPath);
+  const saved = (name: string) => env[name]?.trim() || file.get(name)?.trim() || undefined;
+  const trim = (url: string | undefined) => url?.trim().replace(/\/+$/, '') || undefined;
+  return trim(baseUrl) === trim(saved('EMBEDDING_BASE_URL')) ? saved('EMBEDDING_API_KEY') : undefined;
 }
 
 /** Embeddings: embed one word and read the vector size from the answer, so the user never has to look it up. */

@@ -20,7 +20,7 @@ const { consoleToken } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
-const { ask, checkLlm, listLlmModels, llmSettings, searchLlmSettings, anthropicEndpoint, LlmError } = await import('../src/core/llm.js');
+const { ask, checkLlm, listLlmModels, llmSettings, searchLlmSettings, anthropicEndpoint, claude: claudeClient, LlmError } = await import('../src/core/llm.js');
 
 const server = await runHttp(new Registry(builtinPlugins));
 const base = `http://localhost:${server.port}`;
@@ -133,6 +133,27 @@ test('Claude: through Anthropic\'s SDK, with the instructions marked to be kept 
   await assert.rejects(() => ask({ prompt: 'please decline' }, { ...s, model: 'claude-haiku-5-5' }), /The model declined this request \(cyber\)\./);
   await assert.rejects(() => listLlmModels({ kind: 'anthropic', apiKey: 'wrong' }), /Anthropic did not accept the API key\./);
   assert.deepEqual(await checkLlm({ ...s, model: 'claude-haiku-5-5' }), { model: 'claude-haiku-5-5' });
+});
+
+test('a key saved for Claude goes to Anthropic only, whatever ANTHROPIC_BASE_URL the client that started the server has', async (t) => {
+  // Claude Code used through a gateway sets these for itself, and a stdio server inherits them.
+  const gateway = await fake(() => ({ status: 401, json: { type: 'error', error: { type: 'authentication_error', message: 'no' } } }));
+  const anthropic = await fake((r) => (r.url.startsWith('/v1/models') ? { json: { data: [{ type: 'model', id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5', created_at: '2026-01-01T00:00:00Z' }], has_more: false, first_id: 'claude-haiku-5-5', last_id: 'claude-haiku-5-5' } } : { status: 404, json: {} }));
+  const before = anthropicEndpoint.baseURL;
+  Object.assign(process.env, { ANTHROPIC_BASE_URL: gateway.url, ANTHROPIC_CUSTOM_HEADERS: 'X-Gateway-Token: gw-secret\nX-Team: research' });
+  t.after(() => {
+    delete process.env.ANTHROPIC_BASE_URL;
+    delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+    anthropicEndpoint.baseURL = before;
+  });
+  // The gateway's headers are not sent along to Anthropic (here the test's fake of it).
+  anthropicEndpoint.baseURL = anthropic.url;
+  assert.deepEqual(await listLlmModels({ kind: 'anthropic', apiKey: 'sk-ant-person-000000' }), [{ id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5' }]);
+  const sent = anthropic.seen.at(-1)!.headers;
+  assert.deepEqual([sent['x-gateway-token'], sent['x-team'], gateway.seen.length], [undefined, undefined, 0]);
+  // And the address is Anthropic's own unless a test names its fake: never the one in the environment.
+  delete anthropicEndpoint.baseURL;
+  assert.equal(claudeClient({ apiKey: 'sk-ant-person-000000' }).baseURL, 'https://api.anthropic.com');
 });
 
 test('the console connects a model: the provider\'s own list, a live check, and a key that is saved and never shown', async () => {

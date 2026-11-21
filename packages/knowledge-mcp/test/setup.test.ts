@@ -26,6 +26,8 @@ const noTools: Exec = () => ({ status: 127, stdout: '', stderr: 'not found' });
 // first, the runner takes the file for done and runs the `after` hooks, and the tests registered later find the
 // servers closed (ECONNREFUSED). It showed up on a loaded machine, when an import in the middle got slower.
 // One fake for Slack, GitHub, Railway and an embedding endpoint. "good-*" tokens pass.
+/** The Authorization header of every request for vectors, "(none)" when there was none. */
+const embeddingAuth: string[] = [];
 const server = createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -41,6 +43,7 @@ const server = createServer((req, res) => {
     if (req.url === '/github/user') return good ? send(200, { login: 'octo' }) : send(401, { message: 'Bad credentials' });
     if (req.url === '/railway') return send(200, good ? { data: { me: { email: 'me@acme.com' } } } : { errors: [{ message: 'Not Authorized' }] });
     if (req.url === '/emb/v1/embeddings') {
+      embeddingAuth.push(auth || '(none)');
       if (auth && !good) return send(401, { error: { message: 'bad key' } });
       return send(200, { data: [{ index: 0, embedding: Array(1024).fill(0.1) }] });
     }
@@ -614,4 +617,69 @@ test('wizard: a database is connected, checked, and explore is off unless asked 
   const saved = JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).connections;
   assert.deepEqual(saved, { shop: { type: 'sqlite', path: db }, books: { type: 'sqlite', path: db, explore: true } });
   assert.ok(!existsSync(join(dir, '.env')) || !readFileSync(join(dir, '.env'), 'utf8').includes('DATABASE_URL'));
+});
+
+// ── The embedding key goes only to the address it was given for (as in the console) ──
+
+test('setup embeddings: a saved key is not sent to, or kept for, a new address; --api-key types one unseen', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-emb-'));
+  const voyage = { EMBEDDING_BASE_URL: 'https://api.voyage.example/v1', EMBEDDING_API_KEY: 'key-given-for-voyage' };
+  writeFileSync(join(dir, '.env'), 'EMBEDDING_BASE_URL=https://api.voyage.example/v1\nEMBEDDING_API_KEY=key-given-for-voyage\nEMBEDDING_MODEL=voyage-3\n');
+  // As the CLI runs: the .env of the folder is loaded into the environment too.
+  const moved = collect();
+  embeddingAuth.length = 0;
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1/`, '--model', 'bge-m3'], { dir, out: moved.out, env: voyage }), 0, moved.lines.join('\n'));
+  assert.deepEqual(embeddingAuth, ['(none)'], 'the check sends no key to the new address');
+  const after = readEnvValues(join(dir, '.env'));
+  assert.deepEqual([after.get('EMBEDDING_BASE_URL'), after.has('EMBEDDING_API_KEY')], [`${base}/emb/v1`, false]);
+  assert.match(moved.lines.join('\n'), /The key saved for the previous address was removed[\s\S]*--api-key/);
+
+  // At the address it was saved for, the saved key is used for the check and stays.
+  updateEnvFile(join(dir, '.env'), { EMBEDDING_API_KEY: 'good-local' });
+  embeddingAuth.length = 0;
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3'], { dir, out: collect().out, env: {} }), 0);
+  assert.deepEqual([embeddingAuth, readEnvValues(join(dir, '.env')).get('EMBEDDING_API_KEY')], [['Bearer good-local'], 'good-local']);
+
+  // A key for the new address is typed unseen (never an argument), checked, and saved.
+  const typed = collect();
+  embeddingAuth.length = 0;
+  const asked: string[] = [];
+  const readSecret = async (q: string) => (asked.push(q), 'good-typed');
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3', '--api-key'], { dir, out: typed.out, env: {}, readSecret }), 0);
+  assert.deepEqual([embeddingAuth, readEnvValues(join(dir, '.env')).get('EMBEDDING_API_KEY')], [['Bearer good-typed'], 'good-typed']);
+  assert.match(asked[0], /API key for .* \(not shown\)/);
+  assert.match(typed.lines.join('\n'), /EMBEDDING_API_KEY\./);
+  assert.ok(!typed.lines.join('\n').includes('good-typed'), 'the key is not printed');
+  const noTerminal = collect();
+  assert.equal(await runSetupCommand(['embeddings', '--base-url', `${base}/emb/v1`, '--model', 'bge-m3', '--api-key'], { dir, out: noTerminal.out, env: {} }), 1);
+  assert.match(noTerminal.lines.join('\n'), /needs a terminal/);
+});
+
+test('wizard, search by meaning: a saved key stays with its address, and choosing OpenAI drops another provider\'s key', async () => {
+  // The wizard reads the environment as the server does; a key set in the shell that runs the tests is not part of this.
+  for (const k of Object.keys(process.env)) if (/^(EMBEDDING_|OPENAI_)/.test(k)) delete process.env[k];
+  const folder = docsFolder();
+  const wizard = async (env: string, answers: string[]) => {
+    const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+    writeFileSync(join(dir, 'mcp.config.json'), JSON.stringify({ folders: [{ path: folder }] }));
+    writeFileSync(join(dir, '.env'), env);
+    const s = scripted(['', '', ...answers]); // keep the folder list, no services, then the model
+    embeddingAuth.length = 0;
+    await runSetup(s.io, { dir, canRunClient: false, exec: noTools, endpoints: { openai: `${base}/emb/v1` } });
+    assert.equal(s.left.length, 0);
+    return { saved: readEnvValues(join(dir, '.env')), said: s.said.join('\n'), sent: [...embeddingAuth] };
+  };
+  const voyage = 'EMBEDDING_BASE_URL=https://api.voyage.example/v1\nEMBEDDING_API_KEY=key-given-for-voyage\nEMBEDDING_MODEL=voyage-3\n';
+
+  // Another endpoint, no key typed: the voyage key is neither sent there nor kept for it.
+  const moved = await wizard(voyage, ['2', `${base}/emb/v1`, 'bge-m3', '']);
+  assert.deepEqual([moved.sent, moved.saved.get('EMBEDDING_BASE_URL'), moved.saved.has('EMBEDDING_API_KEY')], [['(none)'], `${base}/emb/v1`, false]);
+  assert.match(moved.said, /API key \(Enter if the server needs none\)/);
+  // The same endpoint again: Enter keeps the saved key, which is what the check sends.
+  const same = await wizard(`EMBEDDING_BASE_URL=${base}/emb/v1\nEMBEDDING_API_KEY=good-saved\n`, ['2', `${base}/emb/v1`, 'bge-m3', '']);
+  assert.deepEqual([same.sent, same.saved.get('EMBEDDING_API_KEY')], [['Bearer good-saved'], 'good-saved']);
+  assert.match(same.said, /API key \(Enter keeps the saved one\)/);
+  // OpenAI: the key typed for it is the one the server will send, so another provider's key goes.
+  const openai = await wizard(voyage, ['1', 'good-openai']);
+  assert.deepEqual([openai.sent, openai.saved.get('OPENAI_API_KEY'), openai.saved.has('EMBEDDING_API_KEY'), openai.saved.has('EMBEDDING_BASE_URL')], [['Bearer good-openai'], 'good-openai', false, false]);
 });
