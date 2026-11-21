@@ -30,6 +30,17 @@ const ms = (f: () => unknown): number => {
 const trueTokens = (text: string) => encode(text, { disallowedSpecial: new Set<string>() }).length;
 /** A profile with these sizes and no overlap, so that a passage is only what was cut. */
 const sized = (maxTokens: number, minTokens = Math.min(50, maxTokens / 4)) => ({ ...DEFAULT_PROFILE, maxTokens, minTokens, overlapTokens: 0 });
+/** A seeded generator of whole numbers below n (mulberry32), to make the same documents a review found. */
+const seeded = (seed: number) => {
+  let a = seed >>> 0;
+  return (n: number) => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
+  };
+};
 /** Korean syllables that do not repeat, with no space between them. */
 const korean = (n: number) => Array.from({ length: n }, (_, i) => String.fromCharCode(0xac00 + ((i * 7919) % 11172))).join('');
 
@@ -258,7 +269,13 @@ test('chunker: no passage is over the cap, read whole as the embedding model rea
 test('chunker: paragraphs and rows with no word end between them are joined in time', () => {
   // A passage built up one paragraph at a time read again, for each paragraph, all of it after its last word end;
   // between paragraphs of "/" or rows of "|" and "-" after spaces there is none. 66,000 paragraphs of "/" took nine
-  // seconds at 4,000 tokens a passage, two at 800.
+  // seconds at 4,000 tokens a passage, two at 800. Then each paragraph was still read with the end of the passage
+  // before it: paragraphs of one to three "/" took a second at 800 (found by review).
+  const rnd = seeded(5);
+  let slashes = '';
+  while (slashes.length < 200_000) slashes += `${'/'.repeat(1 + rnd(3))}\n\n`;
+  const atCap800 = ms(() => chunkMarkdown(slashes, sized(800)));
+  assert.ok(atCap800 < 500, `paragraphs of one to three "/": ${Math.round(atCap800)} ms`);
   for (const [name, md] of [
     ['paragraphs of "/"', `# T\n\n${'/\n\n'.repeat(66_000)}`],
     ['paragraphs of "/="', `# T\n\n${'/=\n\n'.repeat(50_000)}`],
@@ -298,17 +315,74 @@ test('chunker: words not seen before do not slow the documents after them', () =
   assert.ok(took < 500, `${Math.round(took)} ms`);
 });
 
-test('chunker: a long run of one digit is not counted short', () => {
-  // Digits are read in groups of three from where a run of them begins. Pieces of a run of one digit cut by force were
-  // counted as if they read as the run does: "０" over and over was 11 tokens over the cap at 800, 53 at 4,000.
-  for (const digit of ['０', '0', '१', '০', '۰']) {
-    for (const max of [800, 4000]) {
-      for (const c of chunkMarkdown(digit.repeat(20_000), sized(max))) {
+test('chunker: a long run of digits is not counted short', () => {
+  // Digits are read in groups of three from where a run of them begins. Pieces of a run cut every 32 characters were
+  // counted as if they read as the run does: "０" over and over was 11 tokens over the cap at 800, 53 at 4,000, and
+  // digits of several scripts mixed ("0６0") 136 at 800 (found by review).
+  for (const digits of ['０', '0', '१', '০', '0６0', '8๒23🯵2', '286𝟽0𑯴']) {
+    const md = `# Serial numbers\n\nThe list follows.\n\n${digits.repeat(Math.ceil(20_000 / digits.length))}`;
+    for (const max of [256, 800, 4000]) {
+      for (const c of chunkMarkdown(md, sized(max))) {
         const t = trueTokens(c.content);
-        assert.ok(t <= max && c.tokens >= t, `${digit} at a cap of ${max}: a passage of ${t} tokens, reported ${c.tokens}`);
+        assert.ok(t <= max && c.tokens >= t, `${digits} at a cap of ${max}: a passage of ${t} tokens, reported ${c.tokens}`);
       }
     }
   }
+});
+
+test('chunker: a run of one character is not counted short where it ends', () => {
+  // A run of one character cut by force, with fewer than 33 characters after the last cut: ">" 33 times is six tokens,
+  // 32 and 1 are five (found by review: a passage of 802 tokens at a cap of 801).
+  for (const [run, max] of [['>'.repeat(6401), 801], ['<'.repeat(6401), 801], ['!'.repeat(2049), 255]] as const) {
+    for (const c of chunkMarkdown(run, sized(max))) assert.ok(trueTokens(c.content) <= max, `${run[0]} at a cap of ${max}: ${trueTokens(c.content)} tokens`);
+  }
+});
+
+test('chunker: no character is lost where a sentence is cut', () => {
+  // A cut could fall between the two halves of an emoji or a rare Chinese character, and both halves were dropped
+  // (found by review: 4,182 of 1,095,507).
+  const count = (t: string) => [...t].filter((c) => c.codePointAt(0)! > 0xffff).length;
+  const rnd = seeded(3);
+  const astral = ['😀', '👍', '🎉', '𝐀', '𠀀'];
+  for (let d = 0; d < 15; d++) {
+    let s = '';
+    while (s.length < 3000 + rnd(8000)) s += rnd(3) ? ` ${'word'.slice(rnd(3))}` : rnd(2) ? astral[rnd(5)] : astral[rnd(5)].repeat(1 + rnd(40));
+    for (const max of [100, 256, 800]) {
+      const chunks = chunkMarkdown(s, sized(max));
+      assert.equal(chunks.reduce((n, c) => n + count(c.content), 0), count(s), `document ${d}, cap ${max}`);
+      assert.equal(chunks.map((c) => c.content).join('').replace(/\s+/g, ''), s.replace(/\s+/g, ''), `document ${d}, cap ${max}`);
+    }
+  }
+});
+
+test('chunker: a picture with no text at the end of a passage is not counted short', () => {
+  // Paragraphs that end in a picture with no alt text: the passage was counted without the space the picture left,
+  // and stored with it (found by review: 6 of 93,564 passages one token over the cap).
+  const pictures = seeded(11);
+  for (let d = 0; d <= 182; d++) {
+    const paras = Array.from({ length: 40 }, () => 'word '.repeat(5 + pictures(60)) + (pictures(2) ? '![](https://example.com/a.png)' : 'end.'));
+    if (d !== 142 && d !== 182) continue;
+    const max = d === 142 ? 100 : 256;
+    for (const c of chunkMarkdown(`# Title\n\n${paras.join('\n\n')}`, sized(max))) assert.ok(trueTokens(c.content) <= max, `document ${d}: ${trueTokens(c.content)} tokens at a cap of ${max}`);
+  }
+});
+
+test('chunker: documents cut are let go', async () => {
+  // A part of a document kept to count it (a word not seen before, kept by the tokenizer) is a slice of it, and kept
+  // the whole document alive: 233 MB after 60 logs of 4 MB (found by review).
+  const { setFlagsFromString } = await import('node:v8');
+  const { runInNewContext } = await import('node:vm');
+  setFlagsFromString('--expose-gc');
+  const gc = runInNewContext('gc') as () => void;
+  const held = () => {
+    gc();
+    gc();
+    return process.memoryUsage().heapUsed / 1e6;
+  };
+  const base = held();
+  const unit = 'The index keeps every passage. ';
+  for (let i = 0; i < 8; i++) chunkMarkdown(`${unit.repeat(Math.ceil(1_000_000 / unit.length))} Unterscheidungsmerkmal${String.fromCharCode(97 + i)}xyz.`, DEFAULT_PROFILE);
+  assert.ok(held() - base < 4, `${(held() - base).toFixed(1)} MB held after 8 documents of 1 MB`);
 });
 
 test('chunker: small sections are not joined past the cap', () => {
@@ -400,31 +474,33 @@ test('extraction: pictures embedded in a Markdown or text file are dropped befor
   assert.equal((await extractLocalFile(txt, 'text/plain')).text, 'Summary');
 });
 
-test('extraction: in a file someone wrote, pictures in code and small pictures are kept', async () => {
-  // Examples of how to embed a picture, inline or in a code block, were deleted and left an empty fence or ``.
+test('extraction: in a file someone wrote, small pictures are kept and large ones go wherever they are', async () => {
+  // Examples of how to embed a picture, inline or in a code block, were deleted and left an empty fence or ``: a
+  // picture whose data is under 1 KB is kept, in code or not.
   const doc =
     'How to embed a picture without a file:\n\n```md\n![dot](data:image/png;base64,iVBORw0KGgo=)\n```\n\n' +
     'Inline: `![dot](data:image/gif;base64,R0lGOD==)` works in most viewers.\n\nReference style:\n\n' +
     '```md\n![logo][l]\n\n[l]: data:image/png;base64,iVBORw0KGgo=\n```\n\nA small one: ![dot](data:image/png;base64,iVBORw0KGgo=).\n';
   assert.equal(stripEmbeddedImages(doc, { written: true }), doc);
-  // A picture of real size outside code goes, with its definition and its reference.
+  // A picture of real size goes, with its definition and its reference, in code too.
   const big = 'iVBORw0KGgo'.repeat(200);
   const pictures = `Intro\n\n![chart](data:image/png;base64,${big})\n\n\`![chart](data:image/png;base64,${big})\`\n\n![ref][big]\n\n[big]: <data:image/png;base64,${big}>\n`;
-  assert.equal(stripEmbeddedImages(pictures, { written: true }), `Intro\n\n\`![chart](data:image/png;base64,${big})\`\n\n`);
+  assert.equal(stripEmbeddedImages(pictures, { written: true }), 'Intro\n\n``\n\n');
+  // A step of a numbered list, indented as code is, was taken for code and kept (found by review: a picture of 1 MB
+  // became 855 passages). So were nested lists, and a picture after a heading or a list item with a backtick.
+  const pic = `![Settings](data:image/png;base64,${big})`;
+  for (const [text, left] of [
+    [`1. Open settings.\n\n    ${pic}\n\n2. Save.`, '1. Open settings.\n\n    \n\n2. Save.'],
+    [`- Step\n    - Sub step\n\n      ${pic}\n`, '- Step\n    - Sub step\n\n      \n'],
+    [`## The \` key\n${pic}\nPress \` again`, '## The ` key\n\nPress ` again'],
+    [`Use \`\` ${pic} \`\` to embed.`, 'Use ``  `` to embed.'],
+  ]) {
+    assert.equal(stripEmbeddedImages(text, { written: true }), left);
+  }
   // From a Google Doc, every picture of data goes, as before.
   assert.equal(stripEmbeddedImages('Text ![dot](data:image/png;base64,iVBORw0KGgo=) here.'), 'Text  here.');
-  // Code as CommonMark reads it (found by review): inline code between runs of two backticks, inline code over the
-  // lines of a paragraph, and a block indented by four spaces. A backtick in the text of a picture does not make
-  // the picture code.
-  const pic = `![chart](data:image/png;base64,${big})`;
-  for (const example of [`Use \`\` ${pic} \`\` to embed.`, `Use \`the form\n${pic}\` to embed.`, `Example:\n\n    ${pic}\n\nEnd.`, `- item\n  \`\`\`md\n  ${pic}\n  \`\`\`\n`]) {
-    assert.equal(stripEmbeddedImages(example, { written: true }), example);
-  }
-  assert.equal(stripEmbeddedImages(`See ![a \`b](data:image/png;base64,${big}) and \`x\``, { written: true }), 'See  and `x`');
-  assert.equal(stripEmbeddedImages(`Use \`one\n\nand\` ${pic}`, { written: true }), 'Use `one\n\nand` '); // not across a blank line
-  assert.equal(stripEmbeddedImages(`Text\n    ${pic}`, { written: true }), 'Text\n    '); // indented, but within a paragraph
-  // In time, with backticks that never close and runs of every length.
-  for (const text of ['` `` ``` ````'.repeat(20_000) + pic, `${'a `b\n'.repeat(50_000)}${pic}`, `${'    x\n'.repeat(40_000)}${pic}`]) {
+  // In time, with "![" that never closes and backticks.
+  for (const text of ['` `` ``` ````'.repeat(20_000) + pic, `${'![a `b\n'.repeat(50_000)}${pic}`, `${'![x](data:image/png;base64,'.repeat(8_000)}`]) {
     const took = ms(() => stripEmbeddedImages(text, { written: true }));
     assert.ok(took < 500, `${Math.round(took)} ms`);
   }
@@ -455,15 +531,17 @@ test('workbook: what a sheet says of its size is not believed past what is read,
     return { text, took: performance.now() - at };
   };
   // Said to be 200,000 rows by 100 columns: 20 million commas and four seconds before. A million rows by 16,384
-  // columns would have run for an hour. What is past the rows that are read is not looked at, and the text says so.
+  // columns would have run for an hour.
   for (const ref of ['A1:CV200000', 'A1:XFD1048576']) {
     const { text, took } = await timed(workbook(ref));
-    assert.equal(text, '## S\nonly\n(Only rows up to 100,000 are read.)', ref);
+    assert.equal(text, '## S\nonly', ref);
     assert.ok(took < 500, `${ref}: ${Math.round(took)} ms`);
   }
-  // Rows past the one after the last read were dropped without a word when that row was empty (found by review).
-  assert.equal(await workbookText(workbook('A1:A100002', { 100002: ['A'] })), '## S\nonly\n(Only rows up to 100,000 are read.)');
-  assert.equal(await workbookText(workbook('A1:A150000', { 5000: ['A'], 150000: ['A'] })), '## S\nonly\nfar\n(Only rows up to 100,000 are read.)');
+  // What a tab says of its rows is believed when its rows run to the last that is read: rows past the one after it
+  // were dropped without a word when that row was empty. A tab of a few rows that says it has 200,000 has no note
+  // (found by review: it did).
+  assert.equal(await workbookText(workbook('A1:A100002', { 100000: ['A'], 100002: ['A'] })), '## S\nonly\nfar\n(Only rows up to 100,000 are read.)');
+  assert.equal(await workbookText(workbook('A1:C200000', { 5: ['A', 'C'], 10: ['B'] })), '## S\nonly,,\nfar,,far\n,far,');
   // A real cell at the far edge: read, and only the rows that hold a cell are visited.
   const far = await timed(workbook('A1:XFD90000', { 90000: ['XFD'] }));
   assert.ok(far.took < 500, `${Math.round(far.took)} ms`);
@@ -485,12 +563,14 @@ test('workbook: what a sheet says of its size is not believed past what is read,
   assert.ok(!(await workbookText(workbook('A1:A100000', { 100000: ['A'] }))).includes('Only rows'));
   assert.match(await workbookText(workbook('A1:A100001', { 100001: ['A'] })), /\n\(Only rows up to 100,000 are read\.\)$/);
   // Cells can share one text of 32,767 characters: 3,000 of them in a workbook of 44 KB were 98 MB of text. The text
-  // written stops at 10 million characters, and says so.
-  const long = 'Lorem ipsum dolor sit amet '.repeat(1214).slice(0, 32_767);
-  const shared = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(shared, XLSX.utils.aoa_to_sheet(Array.from({ length: 3000 }, () => [long])), 'S');
-  const sharedText = await timed(XLSX.write(shared, { type: 'buffer', bookType: 'xlsx', bookSST: true, compression: true }) as Buffer);
-  assert.ok(sharedText.text.length <= 10_000_100, `${sharedText.text.length} characters`);
-  assert.match(sharedText.text, /\n\(Only rows up to 305 are read\.\)$/);
-  assert.ok(sharedText.took < 500, `${Math.round(sharedText.took)} ms`);
+  // written stops at 10 million characters, and says so. Counted as CSV is written: quotes are written twice, and
+  // 300 cells of 32,767 quotes became 19.7 million characters (found by review).
+  for (const [cell, rows, read] of [['Lorem ipsum dolor sit amet '.repeat(1214).slice(0, 32_767), 3000, 305], ['"'.repeat(32_767), 300, 152]] as const) {
+    const shared = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(shared, XLSX.utils.aoa_to_sheet(Array.from({ length: rows }, () => [cell])), 'S');
+    const sharedText = await timed(XLSX.write(shared, { type: 'buffer', bookType: 'xlsx', bookSST: true, compression: true }) as Buffer);
+    assert.ok(sharedText.text.length <= 10_000_100, `${sharedText.text.length} characters`);
+    assert.match(sharedText.text, new RegExp(`\\n\\(Only rows up to ${read} are read\\.\\)$`));
+    assert.ok(sharedText.took < 500, `${Math.round(sharedText.took)} ms`);
+  }
 });

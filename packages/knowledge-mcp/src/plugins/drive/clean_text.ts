@@ -54,181 +54,33 @@ export function cleanExtractedText(text: string): string {
  * definitions, the references to them, and inline `![alt](data:image/...)`. Pictures with a real address
  * (`![alt](https://...)`) are kept.
  *
- * With `written` (a Markdown or text file someone wrote): what is inside a code block or `inline code` is an example
- * and is kept as it is, and so is a picture of less than LARGE_PICTURE characters (a dot, an icon), which costs
- * little to index. A picture of real size is dropped as from a Google Doc: one of 1.6 MB became 374 passages of letters.
- * Code is found as CommonMark finds it: a block fenced with ``` or ~~~, a block indented by four spaces after a blank
- * line, and inline code from a run of backticks to the next run as long, over the lines of its paragraph.
+ * With `written` (a Markdown or text file someone wrote): a picture whose data is less than LARGE_PICTURE characters
+ * (a dot, an icon, an example in code) is kept, and costs little to index; a larger one is dropped wherever it is, as
+ * from a Google Doc. One of 1.6 MB became 374 passages of letters. Code is not looked for: a picture of 1 MB in a
+ * numbered step, indented as code is, was taken for code, kept and cut into 855 passages.
  */
 export function stripEmbeddedImages(text: string, opts: { written?: boolean } = {}): string {
   if (!text || !text.includes('data:image/')) return text;
-  if (!opts.written) return dropPictures(text, 0);
-  const lines = text.split('\n');
-  const block = codeBlocks(lines);
-  // Where inline code is in each line of a paragraph that holds a picture of data: [from, to) pairs.
-  const spans: Array<Array<[number, number]>> = lines.map(() => []);
-  for (let i = 0; i < lines.length; ) {
-    if (block[i] || BLANK.test(lines[i])) {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (j < lines.length && !block[j] && !BLANK.test(lines[j])) j++;
-    const paragraph = lines.slice(i, j).join('\n');
-    if (paragraph.includes('data:image/')) {
-      let line = i;
-      let start = 0; // where that line begins in the paragraph
-      for (const [from, to] of inlineCode(paragraph)) {
-        while (from >= start + lines[line].length + 1) start += lines[line++].length + 1;
-        // A span over several lines is cut at their ends.
-        for (let k = line, s = start; k < j && s < to; s += lines[k++].length + 1) spans[k].push([Math.max(from, s) - s, Math.min(to, s + lines[k].length) - s]);
-      }
-    }
-    i = j;
-  }
-  // Definitions first (a reference can come before its definition), then references and inline pictures.
-  const labels = new Set<string>();
-  const kept: number[] = [];
-  lines.forEach((line, i) => {
-    const m = block[i] || line.length < LARGE_PICTURE || inside(spans[i], line.length - line.trimStart().length) ? null : DEFINITION.exec(line);
-    if (m) labels.add(m[1]);
-    else kept.push(i);
-  });
-  const out = kept.map((i) => (block[i] || !lines[i].includes('![') ? lines[i] : outside(lines[i], spans[i], (part) => dropInline(part, labels, LARGE_PICTURE))));
-  const joined = out.join('\n');
-  return joined === text ? text : joined.replace(/\n{3,}/g, '\n\n');
+  return dropPictures(text, opts.written ? LARGE_PICTURE : 0);
 }
 
-/** A picture of data, of at least this many characters, written into a Markdown or text file is dropped. */
+/** A picture of data written into a Markdown or text file is dropped when its data has this many characters. */
 const LARGE_PICTURE = 1024;
-const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
-const BLANK = /^[ \t\r]*$/;
-const DEFINITION = /^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,/;
-/** The text of a picture of data, up to where its data begins. */
-const PICTURE_ALT = /!\[([^[\]\n]*)\]\(<?data:image\//g;
 
 /**
- * Which lines are code blocks: fenced with ``` or ~~~ (closed as CommonMark closes them), or indented by four columns
- * where a paragraph cannot go on (after a blank line, a heading, a fence or another such line).
+ * Pictures of data in text whose data has at least `least` characters: definitions, references to them and inline
+ * pictures. A reference or a picture does not read past the next "[": a line of "![" over and over was read to its
+ * end from every one of them. Base64 has no "[" in it.
  */
-function codeBlocks(lines: string[]): boolean[] {
-  const code: boolean[] = [];
-  let fence: string | null = null;
-  // The line before may be followed by an indented code block.
-  let open = true;
-  for (const line of lines) {
-    const f = FENCE.exec(line);
-    if (fence !== null) {
-      code.push(true);
-      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) {
-        fence = null;
-        open = true;
-      }
-    } else if (f) {
-      code.push(true);
-      fence = f[1];
-    } else if (BLANK.test(line)) {
-      code.push(false);
-      open = true;
-    } else if (open && indent(line) >= 4) {
-      code.push(true);
-    } else {
-      code.push(false);
-      open = /^ {0,3}#{1,6}(?:[ \t]|$)/.test(line);
-    }
-  }
-  return code;
-}
-
-/** Columns of white space a line begins with (a tab goes on to the next multiple of four). */
-function indent(line: string): number {
-  let n = 0;
-  for (const c of line) {
-    if (c === ' ') n++;
-    else if (c === '\t') n += 4 - (n % 4);
-    else break;
-    if (n >= 4) break;
-  }
-  return n;
-}
-
-/**
- * Inline code in a paragraph, as [from, to) pairs that take in the backticks: from a run of backticks to the next run
- * of as many, or none when there is no such run. A backtick in the text of a picture of data does not begin or end
- * one (`![a \`b](data:...) and \`x\`` is a picture). Each run is looked at once: the next run of each length is
- * kept as a place in a list of runs of that length.
- */
-function inlineCode(paragraph: string): Array<[number, number]> {
-  const alt: Array<[number, number]> = [];
-  for (const m of paragraph.matchAll(PICTURE_ALT)) alt.push([m.index! + 2, m.index! + 2 + m[1].length]);
-  const runs: Array<[at: number, length: number]> = [];
-  let a = 0;
-  for (let i = 0; i < paragraph.length; ) {
-    if (paragraph.charCodeAt(i) !== 96) {
-      i++;
-      continue;
-    }
-    let j = i;
-    while (paragraph.charCodeAt(j) === 96) j++;
-    while (a < alt.length && alt[a][1] <= i) a++;
-    if (!(a < alt.length && alt[a][0] <= i)) runs.push([i, j - i]);
-    i = j;
-  }
-  const byLength = new Map<number, number[]>();
-  runs.forEach(([, n], k) => {
-    const same = byLength.get(n);
-    if (same) same.push(k);
-    else byLength.set(n, [k]);
-  });
-  const next = new Map<number, number>(); // for each length, where in its list the runs not yet passed begin
-  const spans: Array<[number, number]> = [];
-  for (let k = 0; k < runs.length; k++) {
-    const [at, n] = runs[k];
-    if (spans.length > 0 && at < spans[spans.length - 1][1]) continue;
-    const same = byLength.get(n)!;
-    let p = next.get(n) ?? 0;
-    while (p < same.length && same[p] <= k) p++;
-    next.set(n, p);
-    if (p < same.length) spans.push([at, runs[same[p]][0] + n]);
-  }
-  return spans;
-}
-
-/** Whether `at` is in one of the [from, to) pairs. */
-function inside(spans: Array<[number, number]>, at: number): boolean {
-  return spans.some(([from, to]) => at >= from && at < to);
-}
-
-/** `f` applied to the parts of a line outside the [from, to) pairs, which are in order. */
-function outside(line: string, spans: Array<[number, number]>, f: (part: string) => string): string {
-  let out = '';
-  let at = 0;
-  for (const [from, to] of spans) {
-    out += f(line.slice(at, from)) + line.slice(from, to);
-    at = to;
-  }
-  return out + f(line.slice(at));
-}
-
-/** Every picture of data in text: definitions, references to them and inline pictures. */
 function dropPictures(text: string, least: number): string {
   const labels = new Set<string>();
-  const t = text.replace(/^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,[^\n]*\n?/gm, (m, label: string) => {
-    if (m.length < least) return m;
+  let t = text.replace(/^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,([^\n]*)\n?/gm, (m, label: string, data: string) => {
+    if (data.length < least) return m;
     labels.add(label);
     return '';
   });
-  return dropInline(t, labels, least).replace(/\n{3,}/g, '\n\n');
-}
-
-/**
- * References to dropped definitions, and inline pictures of data of at least `least` characters. A reference or a
- * picture does not read past the next "[": a line of "![" over and over was read to its end from every one of them.
- * Base64 has no "[" in it.
- */
-function dropInline(text: string, labels: Set<string>, least: number): string {
-  let t = text;
   if (labels.size > 0) t = t.replace(/!\[[^[\]\n]*\]\[([^[\]\n]+)\]/g, (m, label: string) => (labels.has(label) ? '' : m));
-  return t.replace(/!\[[^[\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,[^)[\n]*\)/g, (m) => (m.length < least ? m : ''));
+  t = t.replace(/!\[[^[\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,([^)[\n]*)\)/g, (m, data: string) => (data.length < least ? m : ''));
+  // A file someone wrote with nothing dropped is left as it is.
+  return least > 0 && t === text ? text : t.replace(/\n{3,}/g, '\n\n');
 }
-

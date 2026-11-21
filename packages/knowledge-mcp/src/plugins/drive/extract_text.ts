@@ -52,10 +52,34 @@ const SHEET_ROWS = 100_000;
 /** Cells written out from one workbook, filled or empty, over all its tabs. */
 const WORKBOOK_CELLS = 2_000_000;
 /**
- * Characters of cell text written out from one workbook. Cells can share one text of up to 32,767 characters: a
- * workbook of 44 KB whose 3,000 cells all held the same one became 98 MB of text.
+ * Characters of CSV written out from one workbook, as SheetJS writes them (quotes and commas included). Cells can
+ * share one text of up to 32,767 characters: a workbook of 44 KB whose 3,000 cells all held the same one became 98 MB
+ * of text, and quotes are written twice (300 cells of 32,767 quotes: 19.7 million characters, counted as 9.8).
  */
 const WORKBOOK_CHARS = 10_000_000;
+
+/**
+ * Characters of one row as CSV: each cell as SheetJS writes it (in quotes, with its quotes doubled, when it holds a
+ * comma, a quote or a line break), a comma between cells, a line break after. Read no further than just past `most`.
+ */
+function csvRowLength(row: Array<Cell | undefined>, from: number, to: number, most: number): number {
+  let n = to - from + 1;
+  for (const k of Object.keys(row)) {
+    const cell = row[Number(k)];
+    if (!cell || Number(k) < from || Number(k) > to) continue;
+    const text = cell.v != null ? (cell.w ?? String(cell.v)) : cell.f != null ? `=${cell.f}` : '';
+    let quotes = 0;
+    let quoted = false;
+    for (let i = 0; i < text.length && n + i <= most; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 34) quotes++;
+      if (c === 34 || c === 44 || c === 10) quoted = true;
+    }
+    n += text.length + (quoted ? quotes + 2 : 0);
+    if (n > most) break;
+  }
+  return n;
+}
 
 type Cell = import('xlsx').CellObject;
 
@@ -72,8 +96,7 @@ type Cell = import('xlsx').CellObject;
  */
 export async function workbookText(buffer: Buffer): Promise<string> {
   const XLSX = await import('xlsx');
-  // One row more than is read: whether it is there says whether the tab has more (or, when the tab says it has
-  // more rows than that, SheetJS keeps what it says in !fullref).
+  // One row more than is read: whether it is there says whether the tab has more.
   const wb = XLSX.read(buffer, { type: 'buffer', dense: true, sheetRows: SHEET_ROWS + 1 });
   let left = WORKBOOK_CELLS;
   let chars = WORKBOOK_CHARS;
@@ -89,9 +112,7 @@ export async function workbookText(buffer: Buffer): Promise<string> {
     // The rows that hold a cell, and where the cells are. A dense sheet has holes where there are none; its keys are
     // the rows and cells that are there (walking the indexes visited every empty row: 100,000 per tab).
     const rows: number[] = [];
-    const sizes: number[] = []; // characters of cell text in each of those rows
-    // Rows past SHEET_ROWS + 1 are not kept: row 100,002 alone with row 100,001 empty was dropped without a word.
-    let more = Boolean(ws['!fullref']);
+    let more = false;
     let first = Infinity;
     let last = -1;
     for (const key of Object.keys(data)) {
@@ -103,22 +124,20 @@ export async function workbookText(buffer: Buffer): Promise<string> {
         continue;
       }
       let any = false;
-      let size = 0;
       for (const k of Object.keys(row)) {
         const col = Number(k);
-        const cell = row[col];
-        if (!Number.isInteger(col) || !cell) continue;
+        if (!Number.isInteger(col) || !row[col]) continue;
         any = true;
-        size += (cell.w ?? String(cell.v ?? '')).length;
         first = Math.min(first, col);
         last = Math.max(last, col);
       }
-      if (any) {
-        rows.push(r);
-        sizes.push(size);
-      }
+      if (any) rows.push(r);
     }
     if (rows.length === 0) continue;
+    // Rows past SHEET_ROWS + 1 are not kept, and a tab that says it has more (SheetJS keeps what it says in !fullref)
+    // may have them: row 100,002 with row 100,001 empty was dropped without a word. What a tab says is believed only
+    // when its rows run to the last that is read: a tab of 10 rows that said 200,000 got the note.
+    if (ws['!fullref'] && rows[rows.length - 1] >= SHEET_ROWS - 1) more = true;
     if (left <= 0 || chars <= 0) {
       out.push(notRead(name));
       continue;
@@ -132,14 +151,15 @@ export async function workbookText(buffer: Buffer): Promise<string> {
     const taken: Array<Array<Cell | undefined>> = [];
     let stopped = false;
     let lastRow = 0;
-    for (const [i, r] of rows.entries()) {
+    for (const r of rows) {
       if (believed && (r < said.s.r || r > said.e.r)) continue;
-      if (width > left || sizes[i] > chars) {
+      const size = width > left ? Infinity : csvRowLength(data[r]!, from, to, chars);
+      if (size > chars) {
         stopped = true;
         break;
       }
       left -= width;
-      chars -= sizes[i];
+      chars -= size;
       taken.push(data[r]!);
       lastRow = r + 1;
     }

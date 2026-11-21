@@ -198,15 +198,17 @@ const WORD_PIECE = 32;
  * (the tokenizer joins letters across the cut differently): "la" over and over was 14% short in 32-character pieces,
  * two tokens a piece. Each such cut counts as two tokens more, so that what is counted is not less than what is there;
  * except between two pieces of one character over and over (a rule of "─", a run of spaces), which read whole never
- * come to more tokens than apart (every character of the basic plane tried, in runs of 1,100), and are counted as they
- * are. Not a digit: a run of digits is read in groups of three from where it begins, and pieces of 32 are grouped
- * otherwise ("０" over and over came to fewer tokens apart).
+ * come to more tokens than apart (every character of the basic plane tried, in runs of 769, 801, 1,100 and 1,117),
+ * and are counted as they are. Not so when fewer than WORD_PIECE + 1 characters follow the cut: what comes after is
+ * not known to be the same character (">" 33 times is six tokens, 32 and 1 are five). Not a digit either (see
+ * stretchPlaces).
  */
 const PIECE_MARGIN = 2;
 const NUMBER_AT = /\p{N}/uy;
 
 /** The margin of a cut by force at `at` (see PIECE_MARGIN). */
 function marginAt(text: string, at: number): number {
+  if (at + WORD_PIECE + 1 > text.length) return PIECE_MARGIN;
   const c = text.charCodeAt(at);
   const from = Math.max(0, at - WORD_PIECE - 1);
   const to = Math.min(text.length, at + WORD_PIECE + 1);
@@ -227,30 +229,106 @@ function utf8Bytes(text: string, from: number, to: number, most: number): number
   return n;
 }
 
+/** Whether `at` is between the two halves of a character outside the basic plane. */
+function splitsPair(text: string, at: number): boolean {
+  const high = text.charCodeAt(at - 1);
+  const low = text.charCodeAt(at);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
+/** UTF-16 units of the digit (any number character) that begins at `at`, or 0 when there is none. */
+function numberAt(text: string, at: number): number {
+  if (at >= text.length || splitsPair(text, at)) return 0;
+  NUMBER_AT.lastIndex = at;
+  return NUMBER_AT.test(text) ? NUMBER_AT.lastIndex - at : 0;
+}
+
+/** UTF-16 units of the digit that ends at `at`, or 0 when there is none. */
+function numberBefore(text: string, at: number): number {
+  if (at <= 0) return 0;
+  const high = text.charCodeAt(at - 2);
+  const low = text.charCodeAt(at - 1);
+  const start = at >= 2 && high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff ? at - 2 : at - 1;
+  return numberAt(text, start) === at - start ? at - start : 0;
+}
+
 /**
- * The places text is cut for counting, in order: where a word ends, and every WORD_PIECE characters of a longer
- * stretch with no such place (`must`).
+ * Digits are read in groups of three from the first of a run ("0６0" is one group), so a run is cut every DIGIT_PIECE
+ * digits from there: where the whole ends a group too, and the pieces count as the whole does. Cut every 32
+ * characters, the groups of each piece were not those of the whole, and "0６0" over and over came to 931 tokens in a
+ * passage counted as 800.
+ */
+const DIGIT_PIECE = 30;
+
+/**
+ * The places a stretch with no word end is cut at, from `from` to `to`. A stretch with a digit in it is white space,
+ * then digits (a word ends after a digit, and before one after anything but white space): the white space is cut
+ * every WORD_PIECE characters (`must`), and the digits every DIGIT_PIECE digits, where a cut is exact.
+ */
+function* stretchPlaces(text: string, from: number, to: number): Generator<[at: number, must: boolean]> {
+  let digits = to;
+  for (let n = numberBefore(text, digits); n > 0 && digits - n >= from; n = numberBefore(text, digits)) digits -= n;
+  let at = from;
+  while (digits - at > WORD_PIECE) {
+    at += WORD_PIECE;
+    // Not between the two halves of a character outside the basic plane (an emoji).
+    const c = text.charCodeAt(at - 1);
+    if (c >= 0xd800 && c <= 0xdbff) at--;
+    yield [at, true];
+  }
+  for (let p = digits, k = 0; p < to; ) {
+    p += numberAt(text, p) || 1;
+    if (++k % DIGIT_PIECE === 0 && p < to) yield [p, false];
+  }
+}
+
+/**
+ * The places text is cut for counting, in order: where a word ends, and inside a stretch with no such place that is
+ * longer than a word can be (stretchPlaces).
  */
 export function* cutPlaces(text: string): Generator<[at: number, must: boolean]> {
   let last = 0;
   // Three bytes at most to a UTF-16 unit: a stretch of no more than a third of LONGEST_WORD units is never long.
   const long = (to: number) => to - last > LONGEST_WORD / 3 && utf8Bytes(text, last, to, LONGEST_WORD) > LONGEST_WORD;
-  function* inside(to: number): Generator<[number, boolean]> {
-    let at = last;
-    while (to - at > WORD_PIECE) {
-      at += WORD_PIECE;
-      // Not between the two halves of a character outside the basic plane (an emoji).
-      const c = text.charCodeAt(at - 1);
-      if (c >= 0xd800 && c <= 0xdbff) at--;
-      yield [at, true];
-    }
-  }
   for (const m of text.matchAll(WORD_END)) {
-    if (long(m.index!)) yield* inside(m.index!);
+    if (long(m.index!)) yield* stretchPlaces(text, last, m.index!);
     yield [m.index!, false];
     last = m.index!;
   }
-  if (long(text.length)) yield* inside(text.length);
+  if (long(text.length)) yield* stretchPlaces(text, last, text.length);
+}
+
+/**
+ * Where text may be cut for a passage to begin: not between the two halves of a character, and not inside a group of
+ * three digits in a run cut into pieces (`c`, stretchPlaces), whose pieces the passage would group otherwise than they
+ * were counted. (Inside a run that is one piece, the part of it is counted as it is.) The returned function gives the
+ * nearest such place at or before `at` (with `later`, at or after it). Read once: for every step of a search, a run of
+ * 30,000 digits was read back to where it began.
+ */
+function cutter(text: string, c: Counted): (at: number, later?: boolean) => number {
+  // For each place between two digits, how many digits of its run come before it, of three: 0 where a group begins.
+  let phase: Uint8Array | null = null;
+  if (/\p{N}/u.test(text)) {
+    phase = new Uint8Array(text.length + 1);
+    for (let i = 0, k = 0; i < text.length; ) {
+      const n = numberAt(text, i);
+      k = n > 0 ? k + 1 : 0;
+      i += n || 1;
+      phase[i] = k % 3;
+    }
+  }
+  // Whether the piece `at` is in ends between two digits: it is a piece of a run cut into pieces.
+  const cutRun = (at: number) => {
+    const end = c.starts[partAt(c, at) + 1];
+    return end < text.length && numberBefore(text, end) > 0 && numberAt(text, end) > 0;
+  };
+  return (at, later = false) => {
+    if (splitsPair(text, at)) at += later ? 1 : -1;
+    if (phase && phase[at] > 0 && numberAt(text, at) > 0 && cutRun(at)) {
+      for (let r = phase[at]; r > 0 && r < 3; r += later ? 1 : -1) at += later ? numberAt(text, at) : -numberBefore(text, at);
+    }
+    return at;
+  };
 }
 
 /**
@@ -263,6 +341,14 @@ export function* cutPlaces(text: string): Generator<[at: number, must: boolean]>
 let seenParts: Map<string, number> | null = null;
 const PARTS_KEPT = 250_000;
 
+/**
+ * A copy of a part that holds only its own characters. A part is a slice of the text it was cut from, and V8 keeps a
+ * slice of 13 characters or more as a pointer into that text: kept here or in the tokenizer's cache, it kept the
+ * whole document alive (4 MB a document, 233 MB after 60 logs). Joined to a space, the part is copied whole; the copy
+ * without the space points into the copy only.
+ */
+const own = (part: string): string => (part.length >= 13 ? ` ${part}`.slice(1) : part);
+
 /** Tokens of text the tokenizer is given whole: a piece between two cut places, or a part of one. */
 function tokensOf(part: string): number {
   let n = seenParts?.get(part);
@@ -272,10 +358,11 @@ function tokensOf(part: string): number {
       clearMergeCache();
       partsGiven = charsGiven = 0;
     }
-    n = encode(part, AS_TEXT).length;
+    const copy = own(part);
+    n = encode(copy, AS_TEXT).length;
     if (seenParts) {
       if (seenParts.size >= PARTS_KEPT) seenParts.clear();
-      seenParts.set(part, n);
+      seenParts.set(copy, n);
     }
   }
   return n;
@@ -313,15 +400,15 @@ function lastWordEnd(text: string, from = 1): number {
 
 /**
  * The tokens of a passage built up one piece after another (sentences, paragraphs, rows, small sections), counted as
- * the passage is stored: with picture addresses taken out (extractImages), and without the white space at its end.
+ * the passage is stored: with picture addresses taken out (extractImages), and without the white space at its ends.
  * What lies before the last word end is counted once and kept as a number, so that a passage that grows one paragraph
  * at a time is not counted again from its start every time.
  *
- * A stretch with no word end in it is counted in pieces of WORD_PIECE characters from where it begins, as countTokens
- * counts it, once it is longer than a word can be, or once it runs on past one piece added (paragraphs of nothing but
- * "/" and other signs, table rows of nothing but "|" and "-" after spaces: no prose does). The pieces whose places can
- * no longer change are counted then and kept as a number too. Kept as text, such a stretch was read again from its
- * start for every paragraph added: 66,000 paragraphs of "/" took nine seconds at 4,000 tokens a passage.
+ * A stretch with no word end in it is counted at the places stretchPlaces cuts it at, as countTokens counts it, once it
+ * is longer than a word can be, or once it runs on past one piece added (paragraphs of nothing but "/" and other
+ * signs, table rows of nothing but "|" and "-" after spaces: no prose does). The pieces whose places can no longer
+ * change are counted then and kept as a number too. Kept as text, such a stretch was read again from its start for
+ * every paragraph added: 66,000 paragraphs of "/" took nine seconds at 4,000 tokens a passage.
  */
 class Joined {
   private settled = 0;
@@ -332,13 +419,23 @@ class Joined {
   constructor(first: string) {
     this.add(first);
   }
-  /** The tokens the passage would have with `more` after it, as stored. */
-  with(more: string): number {
-    return this.settled + countTokens((this.tail + stored(more)).trimEnd());
+  /** What follows the places counted once `more` is added, as stored (white space before the passage begins goes). */
+  private next(more: string): string {
+    const t = this.tail + stored(more);
+    return this.settled === 0 && this.tail === '' ? t.trimStart() : t;
+  }
+  /**
+   * Whether the passage with `more` after it is within max tokens, as stored. A token is at least one byte: when the
+   * bytes are within what is left, the text is not read (a passage of paragraphs of "/" was read again for each one).
+   */
+  fits(more: string, max: number): boolean {
+    const t = this.next(more).trimEnd();
+    const left = max - this.settled;
+    return utf8Bytes(t, 0, t.length, left) <= left || countTokens(t, left) <= left;
   }
   add(more: string): void {
     const from = this.tail.length;
-    let t = this.tail + stored(more);
+    let t = this.next(more);
     const end = lastWordEnd(t, from);
     if (end > 0) {
       this.settled += countTokens(t.slice(0, end));
@@ -349,15 +446,13 @@ class Joined {
     }
     if (!this.forced && t.length > LONGEST_WORD / 3 && utf8Bytes(t, 0, t.length, LONGEST_WORD) > LONGEST_WORD) this.forced = true;
     if (this.forced) {
-      // A place is settled once the characters its margin is read from (WORD_PIECE + 1 after it) are there.
+      // A place cut by force is settled once the characters its margin is read from (WORD_PIECE + 1 after it) are
+      // there; a place between groups of digits is exact.
       let at = 0;
-      for (;;) {
-        let next = at + WORD_PIECE;
-        if (next + WORD_PIECE + 1 > t.length) break;
-        const c = t.charCodeAt(next - 1);
-        if (c >= 0xd800 && c <= 0xdbff) next--;
-        this.settled += tokensOf(t.slice(at, next)) + marginAt(t, next);
-        at = next;
+      for (const [place, must] of stretchPlaces(t, 0, t.length)) {
+        if (must && place + WORD_PIECE + 1 > t.length) break;
+        this.settled += tokensOf(t.slice(at, place)) + (must ? marginAt(t, place) : 0);
+        at = place;
       }
       t = t.slice(at);
     }
@@ -446,7 +541,7 @@ function splitTable(table: string, maxTokens: number): string[] {
   let joined = new Joined(header);
   for (const row of bodyRows) {
     const rt = countTokens(row);
-    if ((bufTok + rt > maxTokens || joined.with(`\n${row}`) > maxTokens) && buf.length > 1) {
+    if ((bufTok + rt > maxTokens || !joined.fits(`\n${row}`, maxTokens)) && buf.length > 1) {
       out.push(buf.join('\n'));
       buf = [header, row];
       bufTok = headerTok + rt;
@@ -606,9 +701,17 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
   for (let i = text.length - 1; i >= 0; i--) spaceTo[i] = SPACE.test(text[i]) ? spaceTo[i + 1] : i;
   let at = 0;
   let from = spaceTo[0];
+  const cutAt = cutter(text, c);
+  // Where a piece that begins at `at` can end at or before `to` (cutter): after `at`, or else just after `to`.
+  const place = (to: number) => {
+    if (to >= text.length) return text.length;
+    const end = cutAt(to);
+    return end > at ? end : cutAt(to, true);
+  };
   const within = (to: number, estimate = false) => {
-    const end = Math.max(from, spaceFrom[to]);
-    return fits(c, at, to, maxTokens, estimate) && ((from === at && end === to) || fits(c, from, end, maxTokens, estimate));
+    const p = place(to);
+    const end = Math.max(from, spaceFrom[p]);
+    return fits(c, at, p, maxTokens, estimate) && ((from === at && end === p) || fits(c, from, end, maxTokens, estimate));
   };
   if (within(text.length)) return [text];
   const out: string[] = [];
@@ -638,8 +741,9 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
     const j = partAt(c, at + cut);
     if ((c.piece[j] || searchWork <= 0) && c.starts[j] > from && c.starts[j] < at + cut) cut = c.starts[j] - at;
     if (!within(at + cut)) cut = longestFitting(c, at, cut, within);
-    out.push(text.slice(at, at + cut));
-    at += cut;
+    const end = place(at + cut);
+    out.push(text.slice(at, end));
+    at = end;
   }
   return out;
 }
@@ -665,16 +769,23 @@ function longestFitting(c: Counted, at: number, cut: number, within: (to: number
   return best;
 }
 
-/** The suffix of text that fits in the last maxTokens tokens (for the overlap, binary search, counted as above). */
+/**
+ * The suffix of text that fits in the last maxTokens tokens (for the overlap, binary search, counted as above). It
+ * begins where a passage may (cutter): an emoji cut in half lost both halves, and digits begun inside a group were
+ * grouped otherwise than counted.
+ */
 function tailByTokens(text: string, maxTokens: number): string {
   const c = counted(text);
   if (fits(c, 0, text.length, maxTokens)) return text;
+  const cutAt = cutter(text, c);
+  const start = (at: number) => cutAt(at, true);
+  const within = (at: number, estimate = false) => fits(c, start(at), text.length, maxTokens, estimate);
   let lo = 0;
   let hi = text.length - 1;
   let cut = text.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (fits(c, mid, text.length, maxTokens, true)) {
+    if (within(mid, true)) {
       cut = mid;
       hi = mid - 1;
     } else {
@@ -683,16 +794,16 @@ function tailByTokens(text: string, maxTokens: number): string {
   }
   // Checked exactly. Moved on while it holds too much: to where the next piece begins inside a stretch that is not
   // prose, otherwise to the nearest start within the piece that fits.
-  if (!fits(c, cut, text.length, maxTokens)) {
+  if (!within(cut)) {
     const k = partAt(c, cut);
     let lo = cut + 1;
     let hi = Math.min(text.length - 1, c.starts[k + 1]);
-    if (c.piece[k] || !fits(c, hi, text.length, maxTokens)) {
-      while (cut < text.length - 1 && !fits(c, cut, text.length, maxTokens)) cut = c.starts[partAt(c, cut) + 1] ?? cut + 1;
+    if (c.piece[k] || !within(hi)) {
+      while (cut < text.length - 1 && !within(cut)) cut = c.starts[partAt(c, cut) + 1] ?? cut + 1;
     } else {
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        if (fits(c, mid, text.length, maxTokens)) {
+        if (within(mid)) {
           cut = mid;
           hi = mid - 1;
         } else {
@@ -701,7 +812,7 @@ function tailByTokens(text: string, maxTokens: number): string {
       }
     }
   }
-  return text.slice(Math.min(cut, text.length));
+  return text.slice(Math.min(start(cut), text.length));
 }
 
 /**
@@ -735,7 +846,7 @@ function splitLongText(text: string, maxTokens: number): string[] {
       continue;
     }
     // Packed by the sum of the sentences, as before, and never past the cap once they are joined.
-    if (buf.length > 0 && (bufTokens + st > maxTokens || (joined ??= new Joined(buf.join(' '))).with(` ${sentence}`) > maxTokens)) flush();
+    if (buf.length > 0 && (bufTokens + st > maxTokens || !(joined ??= new Joined(buf.join(' '))).fits(` ${sentence}`, maxTokens))) flush();
     joined?.add(` ${sentence}`);
     buf.push(sentence);
     bufTokens += st;
@@ -827,9 +938,45 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
   // Hard cap for one unit (paragraph or sentence). Larger units are force-split to avoid an embedding API Bad Request.
   const HARD_MAX_TOKENS = MAX_TOKENS;
 
+  const out: RawChunk[] = [];
+  // The passage before, as stored with its own overlap: the overlap of the next one comes from its end (and reaches
+  // into the overlap of the one before when it is short, as it always has).
+  let before = '';
+  /**
+   * A passage made final: its picture addresses separated, its metadata taken from its own content (taken after the
+   * overlap, the passage before's pictures and code would leak into it), the overlap put before it, and counted. Each
+   * is made final as soon as the next passage is not joined to it, while its pieces are still in seenParts: made final
+   * all at the end, a document large enough for seenParts to be let go was counted again from its start, and took two
+   * to three times as long.
+   */
+  const finish = (c: PreChunk) => {
+    const { content: imgStripped, image_urls } = extractImages(c.content);
+    // Trimmed again: a picture with no text at an end of the passage leaves white space there, and the passage was
+    // counted without it.
+    const kept = stripLoneSurrogates(imgStripped).trim();
+    // The overlap is a suffix with picture addresses already taken out. Strip lone surrogates once more on the whole
+    // (an embedding service or Qdrant answers 400 to one).
+    const overlap = before && OVERLAP_TOKENS > 0 ? tailByTokens(before, OVERLAP_TOKENS) : '';
+    before = overlap ? `…${overlap}\n\n${kept}` : kept;
+    const content = stripLoneSurrogates(before);
+    out.push({ heading: c.heading, content, tokens: countTokens(content), image_urls, table_count: countTables(c.content), has_code_block: /```/.test(c.content), ...docMeta });
+  };
+  // Chunks under MIN_TOKENS are joined to the one before, unless that would take it over the cap: 4,000 short
+  // sections in a row made one passage of 62,000 tokens, more than an embedding model takes.
+  let pending: (PreChunk & { joined?: Joined }) | null = null;
+  const emit = (c: PreChunk) => {
+    if (c.tokens < MIN_TOKENS && pending && (pending.joined ??= new Joined(pending.content)).fits(`\n\n${c.content}`, MAX_TOKENS)) {
+      pending.content = `${pending.content}\n\n${c.content}`;
+      pending.tokens += c.tokens;
+      pending.joined.add(`\n\n${c.content}`);
+    } else {
+      if (pending) finish(pending);
+      pending = { ...c };
+    }
+  };
+
   // "windows": the document is one run of paragraphs. Headings stay in the text and are not cut at.
   const sections = profile.cut === 'windows' ? [body] : splitSections(body);
-  const chunks: PreChunk[] = [];
   const headingStack: string[] = []; // index = (heading level - 1), keeps the parent > child breadcrumb context
   let currentHeading = ''; // body before the first heading has no heading (older versions used a Korean placeholder here)
 
@@ -845,11 +992,12 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
     }
 
     // Kept whole when it is within the cap as before, and as it is stored (trimmed: "!;" can be more tokens than
-    // "!;\n", and a word more without the space before it).
+    // "!;\n", and a word more without the space before it; and without picture addresses).
     const content = section.trim();
+    const kept = stored(content).trim();
     const tokens = countTokens(section, MAX_TOKENS);
-    if (tokens <= MAX_TOKENS && (content.length === section.length || countTokens(content, MAX_TOKENS) <= MAX_TOKENS)) {
-      chunks.push({ heading: currentHeading, content, tokens });
+    if (tokens <= MAX_TOKENS && (kept === section || countTokens(kept, MAX_TOKENS) <= MAX_TOKENS)) {
+      emit({ heading: currentHeading, content, tokens });
       continue;
     }
 
@@ -862,8 +1010,8 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
     for (const para of paragraphs) {
       const pt = countTokens(para);
       // Packed by the sum of the paragraphs, as before, and never past the cap once they are joined.
-      if (buf.length > 0 && (bufTokens + pt > MAX_TOKENS || (joined ??= new Joined(buf.join('\n\n').trimStart())).with(`\n\n${para}`) > MAX_TOKENS)) {
-        chunks.push({ heading: currentHeading, content: buf.join('\n\n').trim(), tokens: bufTokens });
+      if (buf.length > 0 && (bufTokens + pt > MAX_TOKENS || !(joined ??= new Joined(buf.join('\n\n'))).fits(`\n\n${para}`, MAX_TOKENS))) {
+        emit({ heading: currentHeading, content: buf.join('\n\n').trim(), tokens: bufTokens });
         buf = [];
         bufTokens = 0;
         joined = null;
@@ -873,59 +1021,10 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
       bufTokens += pt;
     }
     if (buf.length > 0) {
-      chunks.push({ heading: currentHeading, content: buf.join('\n\n').trim(), tokens: bufTokens });
+      emit({ heading: currentHeading, content: buf.join('\n\n').trim(), tokens: bufTokens });
     }
   }
-
-  // Merge chunks under MIN_TOKENS into the one before, unless that would take it over the cap: 4,000 short sections
-  // in a row made one passage of 62,000 tokens, more than an embedding model takes.
-  const merged: Array<PreChunk & { joined?: Joined }> = [];
-  for (const c of chunks) {
-    const prev = merged[merged.length - 1];
-    if (c.tokens < MIN_TOKENS && prev && (prev.joined ??= new Joined(prev.content)).with(`\n\n${c.content}`) <= MAX_TOKENS) {
-      prev.content = `${prev.content}\n\n${c.content}`;
-      prev.tokens += c.tokens;
-      prev.joined.add(`\n\n${c.content}`);
-    } else {
-      merged.push({ ...c });
-    }
-  }
-
-  // 1. Separate image URLs, strip surrogates and compute metadata from each chunk's own content, before the overlap.
-  //    (Computing after the overlap would leak the previous chunk's images and code into the next chunk's metadata.)
-  const withMeta = merged.map((c) => {
-    const tableCount = countTables(c.content);
-    const hasCode = /```/.test(c.content);
-    const { content: imgStripped, image_urls } = extractImages(c.content);
-    return {
-      heading: c.heading,
-      content: stripLoneSurrogates(imgStripped),
-      image_urls,
-      table_count: tableCount,
-      has_code_block: hasCode,
-    };
-  });
-
-  // 2. Prepend the overlap: a text suffix with image URLs already removed (no URL gets into the overlap).
-  //    Warning: tailByTokens cuts on a token boundary, so it can cut an emoji (surrogate pair) in half.
-  //    If that lone surrogate reaches the Qdrant payload content, the JSON is invalid UTF-8 and the upsert returns 400.
-  //    Step 3 below strips the final content once more to remove it.
-  for (let i = 1; i < withMeta.length; i++) {
-    const overlap = OVERLAP_TOKENS > 0 ? tailByTokens(withMeta[i - 1].content, OVERLAP_TOKENS) : '';
-    if (overlap) withMeta[i].content = `…${overlap}\n\n${withMeta[i].content}`;
-  }
-
-  // 3. Final RawChunk: strip lone surrogates created by the overlap again (prevents Qdrant 400), attach front matter.
-  return withMeta.map((c) => {
-    const content = stripLoneSurrogates(c.content);
-    return {
-      heading: c.heading,
-      content,
-      tokens: countTokens(content),
-      image_urls: c.image_urls,
-      table_count: c.table_count,
-      has_code_block: c.has_code_block,
-      ...docMeta,
-    };
-  });
+  if (pending) finish(pending);
+  return out;
 }
+
