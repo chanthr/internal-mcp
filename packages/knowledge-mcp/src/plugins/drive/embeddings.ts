@@ -63,13 +63,6 @@ const queryPolicy = (): EmbedPolicy => ({
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  let t: ReturnType<typeof setTimeout>;
-  const timer = new Promise<never>((_, reject) => {
-    t = setTimeout(() => reject(new Error(`${label}: 504 deadline (timeout ${ms}ms)`)), ms);
-  });
-  return Promise.race([p, timer]).finally(() => clearTimeout(t)) as Promise<T>;
-}
 
 function getApiKey(): string | undefined {
   const key = process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
@@ -103,21 +96,22 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
 
   for (let attempt = 0; ; attempt++) {
     try {
-      const resp = await withTimeout(
-        fetch(`${baseUrl()}/embeddings`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
-          body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs, ...(SEND_DIMENSIONS ? { dimensions: EMBEDDING_DIM } : {}) }),
-        }),
-        policy.timeoutMs,
-        '[embeddings] request',
-      );
+      // The deadline covers reading the answer too, and cancels the request when it passes. A race on the headers
+      // alone let an endpoint that sent its headers and then stalled hold a query for five minutes, and left each
+      // timed-out request running on a slow local model while the retries sent the same batch again.
+      const resp = await fetch(`${baseUrl()}/embeddings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) },
+        body: JSON.stringify({ model: EMBEDDING_MODEL, input: inputs, ...(SEND_DIMENSIONS ? { dimensions: EMBEDDING_DIM } : {}) }),
+        signal: AbortSignal.timeout(policy.timeoutMs),
+      });
 
       if (!resp.ok) {
         const body = await resp.text();
         const retryable = parseRetryable(resp.status, body);
         if (!retryable || attempt >= policy.maxRetries) {
-          throw new Error(`embeddings ${resp.status} (${EMBEDDING_MODEL}): ${body.slice(0, 200)}`);
+          // The status goes with the error: a 400 can mean that the endpoint refuses one passage (indexer.ts embedEach).
+          throw Object.assign(new Error(`embeddings ${resp.status} (${EMBEDDING_MODEL}): ${body.slice(0, 200)}`), { status: resp.status });
         }
         const m = body.match(/try again in ([\d.]+)s/i);
         const base = m ? Math.ceil(parseFloat(m[1]) * 1000) : Math.min(60_000, 1000 * 2 ** attempt);
@@ -137,7 +131,8 @@ async function embedBatch(texts: string[], policy: EmbedPolicy): Promise<number[
         );
       }
       return vecs;
-    } catch (err) {
+    } catch (caught) {
+      const err = caught instanceof Error && caught.name === 'TimeoutError' ? new Error(`[embeddings] request: 504 deadline (timeout ${policy.timeoutMs}ms)`) : caught;
       const msg = err instanceof Error ? err.message : String(err);
       if (attempt >= policy.maxRetries || !parseRetryable(null, msg)) throw err;
       const base = Math.min(60_000, 1000 * 2 ** attempt);

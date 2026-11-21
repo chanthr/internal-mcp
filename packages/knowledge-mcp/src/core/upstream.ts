@@ -129,9 +129,11 @@ class Upstream {
     this.connected = false;
     if (prev) await prev.close().catch(() => {});
 
+    let opened: { client: Client; transport: StreamableHTTPClientTransport } | null = null;
     try {
       const transport = transportFor(this.spec);
       const client = new Client({ name: 'knowledge-mcp-gateway', version: VERSION }, { capabilities: {} });
+      opened = { client, transport };
       await client.connect(transport);
       const res = await client.listTools();
 
@@ -144,6 +146,7 @@ class Upstream {
       this.client = client;
       this.connected = true;
       this.lastError = null;
+      opened = null;
       const hidden = res.tools.length - this.tools.length;
       this.hidden = hidden;
       console.error(
@@ -154,6 +157,12 @@ class Upstream {
       this.lastError = e instanceof Error ? e.message : String(e);
       this.connected = false;
       console.error(`[upstream:${this.spec.name}] connect failed (skipped): ${this.lastError}`);
+      // A connection made before the failure (the remote answered, then could not list its tools) is closed: kept by
+      // nobody, it held its stream to the remote open, and a broken remote is tried again on every call to it.
+      if (opened) {
+        const { client, transport } = opened;
+        await client.close().catch(() => transport.close().catch(() => {}));
+      }
     }
   }
 

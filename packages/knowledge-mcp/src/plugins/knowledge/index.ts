@@ -174,10 +174,11 @@ export const knowledgePlugin = definePlugin({
           process.exitCode = 1;
           return;
         }
+        const refused = r.refused ? ` ${r.refused} passage(s) were refused by the model (too long for it, for example) and are found by keywords only.` : '';
         console.log(
-          r.withVectors === r.passages
-            ? `Done: ${r.withVectors} passage(s) have vectors (${r.dropped} old vector(s) dropped).`
-            : `${r.withVectors} of ${r.passages} passage(s) have vectors. Another process is filling the rest, or run this again.`,
+          r.withVectors + r.refused === r.passages
+            ? `Done: ${r.withVectors} passage(s) have vectors (${r.dropped} old vector(s) dropped).${refused}`
+            : `${r.withVectors} of ${r.passages} passage(s) have vectors. Another process is filling the rest, or run this again.${refused}`,
         );
       },
     },

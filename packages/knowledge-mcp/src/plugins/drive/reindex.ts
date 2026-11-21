@@ -21,7 +21,7 @@
 import type { DriveClient } from './client.js';
 import { getDriveClient } from './client.js';
 import { chunkMarkdown } from './chunker.js';
-import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
+import { embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
 import { isExcludedName } from './exclude.js';
 import { classifyAndPath, ownerEmails } from './path.js';
@@ -40,6 +40,7 @@ import {
   DRIVE_ROOTS,
   MAX_FILE_BYTES,
   noteVectorModel,
+  storeChunks,
   vectorsUsable,
 } from './indexer.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
@@ -379,14 +380,6 @@ export async function runReindex(argv: string[]): Promise<void> {
       // Embed with the heading breadcrumb (embedInputForChunk), the same input as the incremental path (indexFile).
       // No embedding model: the text is stored for keyword search and vectors are added later (backfillVectors).
       const form = useVectors ? await vectorForm() : null;
-      const vectors = form ? await embedTexts(chunks.map((c) => embedInputForChunk(c, file.name, form))) : null;
-
-      // Qdrant upsert: the payload is built by buildChunkPayload, shared with indexer.ts
-      const points = chunks.map((c, idx) => ({
-        id: makeChunkId(file.id, idx),
-        vector: vectors?.[idx],
-        payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash),
-      }));
 
       const qdrant = await getQdrantClient();
       // Delete all existing chunks of this file, then upsert the new ones (no ghost chunks left when the count shrinks).
@@ -396,9 +389,15 @@ export async function runReindex(argv: string[]): Promise<void> {
         wait: false,
         filter: { must: [{ key: 'file_id', match: { value: file.id } }] },
       });
-      await qdrant.upsert(DRIVE_COLLECTION, {
+      // Embedded and stored a batch at a time (storeChunks); the payload is built by buildChunkPayload, shared with indexer.ts.
+      // Nothing of the file is left from before (deleted above), so there is nothing past the new count to look for.
+      await storeChunks(qdrant, {
+        fileId: file.id,
+        chunks,
+        pointOf: (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
+        embedInput: form ? (c) => embedInputForChunk(c, file.name, form) : null,
         wait: false,
-        points,
+        sweep: false,
       });
       if (form) await noteVectorModel(form);
 

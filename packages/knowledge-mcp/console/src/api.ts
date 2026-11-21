@@ -250,6 +250,8 @@ export interface State {
     chunks: number;
     withVectors: number;
     documents: number;
+    /** Passages the embedding model refused (too long for it, say): found by keywords only, not waiting for a vector. */
+    refused?: number;
     meaning: boolean;
     /** Set when the vectors in the index were made by another model than the one configured. */
     problem: string | null;

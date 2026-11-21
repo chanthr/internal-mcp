@@ -66,3 +66,38 @@ test('embeddings: a vector of another size is an error that names EMBEDDING_DIM'
     size = 4;
   }
 });
+
+test('embeddings: the deadline covers an answer that stalls after its headers, and cancels the request before a retry', { timeout: 30_000 }, async () => {
+  // Headers at once, then nothing: undici alone would wait five minutes for the body.
+  let open = 0;
+  let mostOpen = 0;
+  let requests = 0;
+  const stalling = createServer((req, res) => {
+    requests++;
+    mostOpen = Math.max(mostOpen, ++open);
+    req.on('close', () => open--);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.write('{"data":[');
+  });
+  await new Promise<void>((r) => stalling.listen(0, '127.0.0.1', r));
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    EMBEDDING_BASE_URL: `http://127.0.0.1:${(stalling.address() as AddressInfo).port}/v1`,
+    EMBED_QUERY_TIMEOUT_MS: '300',
+    EMBED_QUERY_RETRIES: '1',
+  });
+  try {
+    const started = Date.now();
+    await assert.rejects(embedQuery('q'), /504 deadline \(timeout 300ms\)/);
+    assert.ok(Date.now() - started < 10_000, `${Date.now() - started} ms`);
+    // Two tries, never both open: the first was cancelled, not left running beside the retry.
+    assert.deepEqual([requests, mostOpen], [2, 1]);
+  } finally {
+    for (const k of ['EMBEDDING_BASE_URL', 'EMBED_QUERY_TIMEOUT_MS', 'EMBED_QUERY_RETRIES']) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    stalling.closeAllConnections();
+    stalling.close();
+  }
+});

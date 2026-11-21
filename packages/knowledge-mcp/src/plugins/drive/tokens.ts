@@ -49,8 +49,12 @@ export function queryTerms(question: string): string[] {
  * more of them and rarer ones. Returns null when the question has nothing to search for.
  */
 export function ftsQuery(question: string): string | null {
-  const tokens = queryTerms(question);
-  if (tokens.length === 0) return null;
+  return matchExpression(queryTerms(question));
+}
+
+/** The FTS5 MATCH expression for terms already chosen (see local_vectors.ts keywordTerms): any of them may match. */
+export function matchExpression(terms: string[]): string | null {
+  if (terms.length === 0) return null;
   // Quoted so that a token is never read as FTS5 syntax (AND, OR, NEAR, a column name, …).
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+  return terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(' OR ');
 }

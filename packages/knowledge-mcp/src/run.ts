@@ -226,16 +226,18 @@ async function cmdDoctor(registry: Registry): Promise<void> {
     const local = await getLocalIndex();
     if (local) {
       const s = await local.stats(DRIVE_COLLECTION);
+      const refused = await local.refusedVectors(DRIVE_COLLECTION);
       const problem = embeddingsConfigured() ? await vectorProblem() : null;
       const how = !embeddingsConfigured()
         ? 'keywords (add an embedding model for search by meaning)'
         : problem
           ? 'keywords'
-          : s.withVectors < s.chunks
-            ? `keywords + meaning (${s.chunks - s.withVectors} passages still waiting for vectors)`
+          : s.withVectors + refused < s.chunks
+            ? `keywords + meaning (${s.chunks - s.withVectors - refused} passages still waiting for vectors)`
             : 'keywords + meaning';
       out(`index     ${s.documents} documents, ${s.chunks} passages · search by ${how}`);
       if (problem) out(`          search by meaning is off: ${problem}`);
+      else if (refused && embeddingsConfigured()) out(`          ${refused} passage(s) were refused by the embedding model and are found by keywords only`);
     }
   } catch (e) {
     out(`index     FAILED: ${e instanceof Error ? e.message : String(e)}`);

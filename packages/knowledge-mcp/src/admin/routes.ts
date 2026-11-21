@@ -395,6 +395,8 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         const profile = indexProfile();
         index = {
           ...s,
+          // Passages without a vector because the model refused them: not waiting, so not counted as being made.
+          refused: await local.refusedVectors(DRIVE_COLLECTION),
           meaning: embeddingsConfigured() && !problem,
           problem,
           vectorsFrom: made && made.vectors > 0 ? made.model ?? 'another model' : null,
