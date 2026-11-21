@@ -29,7 +29,7 @@ const inputSchema = z.object({
 
 const PER_HOUR = 60;
 const saved = new Map<string, number[]>();
-/** Who is writing, as a folder name under inbox/: the person (the part of the email before the @), else the key. As POST /inbox. */
+/** Who is writing: the person's whole email, else the key. Their folder under inbox/ is made from it (notes.ts fromName). As POST /inbox. */
 const whoOf = (auth: AuthContext): string => auth.email ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : 'local');
 
 export const saveNoteTool = defineTool({

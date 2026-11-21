@@ -114,6 +114,7 @@ again. With a model set, passage text is sent to that model's endpoint; say so b
 | --- | --- |
 | A local model server (Ollama, LM Studio) | `npm run setup -- embeddings --base-url http://localhost:11434/v1 --model bge-m3`. The vector size is detected |
 | An OpenAI API key | They run `npm run setup` in their terminal and enter the key at the "Search by meaning" question |
+| A key for another provider's endpoint | They run `npm run setup -- embeddings --base-url <URL> --model <name> --api-key` in their terminal and type the key there, unseen |
 | Neither | Skip it. It can be added later |
 
 After changing to another model, run `npm run knowledge -- reembed`. It makes new vectors from the stored text.
@@ -199,8 +200,12 @@ npm run doctor                   # which tools are on
 Connect it to the person's AI client. For Claude Code on this machine, no key is needed:
 
 ```bash
-claude mcp add __NAME__ -- "$PWD/node_modules/.bin/tsx" "$PWD/src/server.ts" serve --stdio
+claude mcp add __NAME__ -e MCP_HOME="$PWD" -- "$(node -p process.execPath)" "$PWD/node_modules/tsx/dist/cli.mjs" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio
 ```
+
+Keep the line as it is. The client starts the server in whatever project the person has open. Without `MCP_HOME`
+the server would read that project's `.env`; without `--tsconfig` tsx would read its `tsconfig.json`, which can
+replace the code that runs; and a `node` looked up there could be that project's own.
 
 The console's page **Connect a client** has the entry for Claude Desktop, Cursor and VS Code as well.
 

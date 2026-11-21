@@ -26,12 +26,15 @@ const cleanEnv = (): Record<string, string> => {
   return env;
 };
 
+// A stdio server needs MCP_HOME here: the test project holds no settings, so they would be the working directory's.
+const settings = mkdtempSync(join(tmpdir(), 'kmcp-stdio-home-'));
+
 test('stdio without a key runs as the local admin and serves plugin tools', async () => {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', TSX, server, 'serve', '--stdio'],
     cwd: elsewhere,
-    env: cleanEnv(),
+    env: { ...cleanEnv(), MCP_HOME: settings },
     stderr: 'pipe',
   });
   const client = new Client({ name: 'test', version: '1.0.0' });
@@ -89,7 +92,7 @@ test('MCP_HOME names the folder of the settings and the data, whatever folder th
 test('stdio with a wrong MCP_API_KEY exits with a clear message', () => {
   const r = spawnSync(process.execPath, ['--import', TSX, server, 'serve', '--stdio'], {
     cwd: elsewhere,
-    env: { ...cleanEnv(), MCP_API_KEY: 'kmcp_not_a_real_key_000000000000000000000' },
+    env: { ...cleanEnv(), MCP_HOME: settings, MCP_API_KEY: 'kmcp_not_a_real_key_000000000000000000000' },
     encoding: 'utf8',
     timeout: 60_000,
   });

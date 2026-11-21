@@ -134,8 +134,14 @@ async function main() {
   }
   // The line a person pastes into a shell: a path with a space in it ("My Projects/my-mcp") must stay one word,
   // or the client is given half a path to start. Node is named by its full path, so nothing is looked up when a
-  // client starts the server from somewhere else.
-  const addToClaude = ['claude', 'mcp', 'add', '--scope', 'user', name, '--', process.execPath, join(target, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(target, 'src', 'server.ts'), 'serve', '--stdio']
+  // client starts the server from somewhere else. The client starts it in whatever project is open, which may be
+  // somebody else's: MCP_HOME names this folder for the settings, and --tsconfig names this project's TypeScript
+  // config, since tsx would otherwise read that project's tsconfig.json, whose "paths" can swap the framework's import
+  // for a file of theirs.
+  const addToClaude = [
+    'claude', 'mcp', 'add', '--scope', 'user', name, '-e', `MCP_HOME=${target}`, '--',
+    process.execPath, join(target, 'node_modules', 'tsx', 'dist', 'cli.mjs'), '--tsconfig', join(target, 'tsconfig.json'), join(target, 'src', 'server.ts'), 'serve', '--stdio',
+  ]
     .map(shellWord)
     .join(' ');
   const steps = [

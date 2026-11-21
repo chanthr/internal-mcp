@@ -20,7 +20,6 @@ import { autoView, maybeRunWiki, setAuto } from '../plugins/knowledge/wiki_auto.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express, { type Express, type Request, type Response } from 'express';
 import { z } from 'zod';
@@ -28,8 +27,9 @@ import { configSource, getConfig, settingsDir } from '../core/config.js';
 import { authStore, CONSOLE_EMAIL } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
-import { cli, stdioEntry } from '../core/invocation.js';
-import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
+import { cli, installCommandLine, stdioEntry } from '../core/invocation.js';
+import { expandHome } from '../core/paths.js';
+import { addToClient, CLIENT_IDS, cursorLink, describeClients, installForEntry, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
 import { isOAuthConfigured, OAUTH_ISSUER_URL, oauthGoogleProblems, oauthSignIns } from '../core/oauth.js';
@@ -338,12 +338,14 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     }, 'a full address that starts with http:// or https://');
 
   const modelName = visible(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, 'a model name');
+  /** The embedding endpoint saved now, without a trailing slash: undefined for OpenAI's own. */
+  const savedEmbeddingBase = (): string | undefined => process.env.EMBEDDING_BASE_URL?.trim().replace(/\/+$/, '') || undefined;
   /**
    * The embedding key that is already saved, for the endpoint it was saved for and no other: a key is never sent
    * to an address it was not given for.
    */
   const savedEmbeddingKey = (baseUrl: string | undefined): string | undefined => {
-    const savedBase = process.env.EMBEDDING_BASE_URL?.trim().replace(/\/+$/, '') || undefined;
+    const savedBase = savedEmbeddingBase();
     if (!baseUrl) return process.env.OPENAI_API_KEY?.trim() || (savedBase ? undefined : process.env.EMBEDDING_API_KEY?.trim()) || undefined;
     return baseUrl === savedBase ? process.env.EMBEDDING_API_KEY?.trim() || undefined : undefined;
   };
@@ -518,7 +520,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     wrap(async (req, res) => {
       if (!mustEdit(res)) return;
       const { path } = z.object({ path: oneLine(1000).min(1) }).parse(req.body);
-      const full = resolve(settingsDir(), path.trim().replace(/^~(?=$|\/)/, homedir()));
+      const full = resolve(settingsDir(), expandHome(path.trim()));
       const r = await setup(['folder', full], settingsDir());
       if (!r.ok) return refuse(res, 422, firstLine(r.lines));
       change(res, { path: full });
@@ -823,11 +825,15 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         if (!baseUrl && !apiKey) return refuse(res, 422, 'OpenAI needs an API key.');
         const r = await checkEmbedding({ baseUrl, model: body.model || undefined, apiKey });
         const standard = !baseUrl && r.model === 'text-embedding-3-small';
+        // The saved key stays only for the address it was given for, as for the language model and OCR above. Kept
+        // for a new address, it would be sent there with every request for vectors after the restart.
+        const moved = baseUrl !== savedEmbeddingBase();
+        const ownKey = typed && baseUrl ? { EMBEDDING_API_KEY: typed } : moved ? { EMBEDDING_API_KEY: undefined } : {};
         updateEnvFile(
           envPath,
           baseUrl
-            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...(typed ? { EMBEDDING_API_KEY: typed } : {}) }
-            : { ...(typed ? { OPENAI_API_KEY: typed } : {}), EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: standard ? undefined : r.model, EMBEDDING_DIM: standard ? undefined : String(r.dim) },
+            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...ownKey }
+            : { ...(typed ? { OPENAI_API_KEY: typed } : {}), ...ownKey, EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: standard ? undefined : r.model, EMBEDDING_DIM: standard ? undefined : String(r.dim) },
         );
         return change(res, { found: `${r.model} (${r.dim} dimensions)` });
       }
@@ -1217,7 +1223,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         conn = { type: 'postgres', urlEnv: envName };
       } else if (b.type === 'sqlite') {
         if (!b.path?.trim()) return refuse(res, 422, 'Enter the path of the database file.');
-        const full = resolve(dir, b.path.trim().replace(/^~(?=$|\/)/, homedir()));
+        const full = resolve(dir, expandHome(b.path.trim()));
         const r = await checkSqliteFile(b.name, full);
         found = `${r.version}, ${r.tables} table${r.tables === 1 ? '' : 's'}`;
         conn = { type: 'sqlite', path: full };
@@ -1601,6 +1607,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.json({
         name: entry.name,
         url,
+        // The entry runs a copy of the server installed in the settings folder, and it is not there yet: Add
+        // installs it first. This is the same install, to type by hand.
+        install: entry.install ? installCommandLine(entry.install) : null,
         clients: describeClients(entry),
         http: JSON.stringify({ mcpServers: { [entry.name]: { url, headers: { Authorization: 'Bearer <key>' } } } }, null, 2),
       });
@@ -1610,7 +1619,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/clients/:id/add',
     wrap(async (req, res) => {
       const id = z.enum(CLIENT_IDS).parse(req.params.id);
-      res.json({ ok: true, message: addToClient(id, clientEntry()) });
+      const entry = clientEntry();
+      // Nothing is installed for a client that is not on this machine: addToClient says so instead.
+      const installed = describeClients(entry).find((c) => c.id === id)?.installed ? await installForEntry(entry) : null;
+      // Cursor adds a server through its own link, which the page opens once the copy is in place.
+      if (id === 'cursor') return res.json({ ok: true, link: cursorLink(entry), message: `${installed ?? ''} Confirm in Cursor.`.trim() });
+      res.json({ ok: true, message: [installed, addToClient(id, entry)].filter(Boolean).join(' ') });
     }),
   );
 

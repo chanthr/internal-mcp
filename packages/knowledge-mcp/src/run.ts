@@ -20,7 +20,8 @@ import { VERSION } from './version.js';
 import type { Plugin } from './plugin/define.js';
 import { Registry } from './plugin/registry.js';
 import { builtinPlugins } from './plugins/index.js';
-import { cli, stdioCommand } from './core/invocation.js';
+import { cli } from './core/invocation.js';
+import { keepOpenFolderOffPath, stdioProblem } from './core/paths.js';
 import { superviseIfServing } from './admin/launch.js';
 
 export interface RunOptions {
@@ -54,7 +55,7 @@ Usage: knowledge-mcp <command> [options]
   setup connection <name> ...         Connect a database or an API for tools declared in mcp.config.json
   setup secret <ENV_NAME>             Type one secret into .env without showing it
   setup drive --gcloud [--project ID] [--yes] | setup drive --key <file>
-  setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME
+  setup trust <email-or-domain>... | setup github --from-gh | setup embeddings --base-url URL --model NAME [--api-key]
                                       Setup steps that ask nothing (for scripts and AI agents)
   serve [--stdio] [--open]            Start the server (HTTP on $PORT, default 8080). Started in a terminal it also
                                       serves the console at /console/ (--open opens it; KNOWLEDGE_CONSOLE=on or off decides it)
@@ -75,6 +76,11 @@ async function cmdServe(registry: Registry, argv: string[]): Promise<void> {
   if (values.stdio) process.env.MCP_TRANSPORT = 'stdio';
   const transport = (process.env.MCP_TRANSPORT || 'http').toLowerCase();
   if (transport === 'stdio') {
+    // bootstrap.ts stopped a stdio server that reads the working directory's settings before reading them. Checked
+    // again here for the cases it could not see: MCP_TRANSPORT set by that very .env, or argv given to run().
+    const problem = stdioProblem();
+    if (problem) throw new Error(problem);
+    keepOpenFolderOffPath();
     const { runStdio } = await import('./server/stdio.js');
     await runStdio(registry);
   } else {
@@ -289,7 +295,6 @@ async function cmdSetup(argv: string[]): Promise<void> {
   try {
     await runSetup(io, {
       dir,
-      serveCommand: stdioCommand(dir),
       createAdmin: async (email) => {
         const store = await getStore();
         const existing = await store.getUser(email);

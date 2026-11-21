@@ -1,7 +1,7 @@
 /** Generator unit tests: names, package-manager detection, and what scaffold() writes. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -52,10 +52,24 @@ test('a path with a space in it stays one word in the commands that are printed'
   assert.ok(line, run.stdout);
   if (process.platform !== 'win32') {
     const words = spawnSync('sh', ['-c', `printf '%s\\n' ${line.trim()}`], { encoding: 'utf8' }).stdout.trim().split('\n');
-    assert.deepEqual(words.slice(0, 7), ['claude', 'mcp', 'add', '--scope', 'user', 'team-mcp', '--']);
-    assert.equal(words[7], process.execPath);
-    assert.ok(words[8].endsWith(join('My Projects', 'team-mcp', 'node_modules', 'tsx', 'dist', 'cli.mjs')), words[8]);
-    assert.ok(words[9].endsWith(join('My Projects', 'team-mcp', 'src', 'server.ts')), words[9]);
-    assert.deepEqual(words.slice(10), ['serve', '--stdio']);
+    // The generator names the folder by its real path (the system's temporary folder may be a link).
+    const project = join(realpathSync(parent), 'team-mcp');
+    // The client starts the server in whatever project is open: MCP_HOME names this one for the settings, and tsx is
+    // told this project's tsconfig.json, not the one of the working directory (whose "paths" could swap the import).
+    assert.deepEqual(words.slice(0, 9), ['claude', 'mcp', 'add', '--scope', 'user', 'team-mcp', '-e', `MCP_HOME=${project}`, '--']);
+    assert.equal(words[9], process.execPath);
+    assert.equal(words[10], join(project, 'node_modules', 'tsx', 'dist', 'cli.mjs'));
+    assert.deepEqual(words.slice(11, 13), ['--tsconfig', join(project, 'tsconfig.json')]);
+    assert.equal(words[13], join(project, 'src', 'server.ts'));
+    assert.deepEqual(words.slice(14), ['serve', '--stdio']);
   }
+});
+
+test('the documents of a new project give the same entry: MCP_HOME and the project\'s own tsconfig.json', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'kmcp-create-')), 'team-mcp');
+  scaffold(dir, { name: 'team-mcp', coreSpec: '^9.9.9' });
+  const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8').split('\n').find((l) => l.startsWith('claude mcp add'));
+  // Node's real path, not a name looked up when the client starts it in another project (nor a version manager's shim).
+  assert.equal(agents, 'claude mcp add team-mcp -e MCP_HOME="$PWD" -- "$(node -p process.execPath)" "$PWD/node_modules/tsx/dist/cli.mjs" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio');
+  assert.ok(readFileSync(join(dir, 'README.md'), 'utf8').includes('claude mcp add team-mcp -e MCP_HOME=/absolute/path/team-mcp -- "$(node -p process.execPath)" /absolute/path/team-mcp/dist/server.js serve --stdio'));
 });

@@ -197,11 +197,11 @@ Markdown 파일로 저장되고, 다른 폴더처럼 검색되고 위키로 읽�
 | 폴더 | 들어가는 것 |
 | --- | --- |
 | `notes/` | 콘솔 채팅이 저장한 것. 직접 고쳐도 됩니다 |
-| `inbox/<보낸 계정>/` | 다른 AI 클라이언트(Claude, ChatGPT, Cursor)가 `save_note`로 저장한 것, 프로그램이 `POST /inbox`로 보낸 것. 폴더는 노트가 스스로 밝힌 출처가 아니라, 보낸 키의 계정으로 정해집니다 |
+| `inbox/<보낸 계정>/` | 다른 AI 클라이언트(Claude, ChatGPT, Cursor)가 `save_note`로 저장한 것, 프로그램이 `POST /inbox`로 보낸 것. 폴더는 노트가 스스로 밝힌 출처가 아니라, 보낸 키의 계정 전체(`kim@example.com`)로 정해집니다. 두 사람이 한 폴더를 나눠 쓰는 일은 없습니다 |
 
-노트는 다른 파일을 덮어쓰지 않고, `save_note`가 바꿀 수 있는 것은 부른 쪽 자기 폴더의 노트뿐입니다. 사용자의 문서는
-바뀌지 않고, 링크를 따라 쓰지도 않습니다. 바뀐 노트의 이전 내용은 옆의 숨김 폴더 `.versions/`에 남습니다. viewer는
-저장할 수 없습니다. 채팅은 읽기 도구와 `save_note`만 씁니다. `inbox/`는 검색되지만 위키에는 넣지 않습니다. 다른
+노트는 다른 파일을 덮어쓰지 않고, `save_note`가 바꿀 수 있는 것은 부른 쪽 자기 폴더에 있으면서 머리말(`from`)에 그
+계정이 적힌 노트뿐입니다. 사용자의 문서는 바뀌지 않고, 링크를 따라 쓰지도 않습니다. 바뀐 노트의 이전 내용은 옆의
+숨김 폴더 `.versions/`에 남습니다. viewer는 저장할 수 없습니다. 채팅은 읽기 도구와 `save_note`만 씁니다. `inbox/`는 검색되지만 위키에는 넣지 않습니다. 다른
 프로그램이 보낸 내용을 사용자의 문서가 말한 것처럼 정리하지 않기 위해서입니다. 설정 폴더에 쓸 수 없으면(설정을 읽기
 전용으로 붙인 컨테이너) 두 폴더는 데이터 폴더에 둡니다. `notes`, `inbox`라는 이름은 이 폴더 몫이라, 같은 이름으로
 설정한 폴더에는 번호가 붙습니다(`notes-2`).
@@ -482,7 +482,7 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | `setup folder <경로>` | 로컬 문서 폴더를 검색 색인에 넣습니다 |
 | `setup connection <이름> --postgres --env NAME` / `--sqlite <파일>` / `--http <기본 URL>` | 설정에 적은 도구가 쓸 데이터베이스나 API를 추가합니다([내 데이터를 도구로](#내-데이터를-도구로)) |
 | `setup secret <ENV_NAME>` | 비밀값 하나를 화면에 보이지 않게 `.env`에 넣습니다 |
-| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다 |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | 질문 없이 도는 설정 단계. 스크립트와 AI 에이전트용입니다. `setup embeddings --api-key`는 그 주소의 키를 화면에 보이지 않게 묻습니다. 다른 주소용으로 저장된 키는 새 주소로 보내지 않고 지웁니다 |
 | `serve` | `$PORT`(기본 8080)에서 HTTP 서버를 띄웁니다. 터미널에서 띄우면 `/console/`에서 [콘솔](#콘솔)도 제공하고, 콘솔이 변경을 저장하면 스스로 다시 시작합니다. `--open`을 붙이거나 명령 없이 실행하면 브라우저에서 콘솔을 엽니다. `serve --stdio`는 표준 입출력으로 대화합니다 |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | API 키를 만들고 한 번만 보여 줍니다. 해시만 저장합니다 |
 | `keys list` / `keys revoke <id>` | 키 목록을 봅니다(키 값은 나오지 않음). 또는 키 하나를 끕니다 |
@@ -654,10 +654,25 @@ await run({ plugins: [...builtinPlugins, ...mine] });
 | 비⁠밀⁠값 | 환경변수(로컬은 `.env`, 운영은 호스트 환경변수) | 키와 토큰. [`.env.example`](.env.example)에 모두 있습니다 |
 | 볼⁠ ⁠대⁠상 | `mcp.config.json` | Drive 폴더, 제외 폴더, 로그인 허용 목록, viewer 권한, 플러그인 설정, 원격 MCP 서버. [`mcp.config.example.json`](mcp.config.example.json) 참고 |
 
-`.env`와 `mcp.config.json`은 현재 폴더를 먼저 보고, 없으면 프로젝트 폴더를 봅니다. 클라이언트가 다른 폴더에서
-서버를 띄워도 찾습니다. `MCP_CONFIG_JSON`(내용 직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
-`MCP_HOME`은 설정과 데이터가 있는 폴더를 직접 정합니다. 이때 현재 폴더는 보지 않습니다. npx로 서버를 띄우는
-클라이언트 설정에 필요합니다(클라이언트가 실행되는 폴더는 남의 프로젝트이기 때문입니다).
+`.env`와 `mcp.config.json`은 한 폴더에서만 읽습니다. 이 폴더를 설정 폴더라고 부릅니다.
+
+| 조건 | 설정 폴더 |
+| --- | --- |
+| `MCP_HOME`이 있음 | 그 폴더. 현재 폴더는 보지 않습니다 |
+| 프로젝트 폴더(서버의 `package.json`이 있는 폴더)에 `.env`나 `mcp.config.json`이 있음 | 프로젝트 폴더 |
+| 둘 다 아님 | 현재 폴더 |
+
+클라이언트는 사용자가 열어 둔 프로젝트에서 로컬 서버를 띄웁니다. 그 폴더의 설정은 내 것이 아닙니다. 그곳의 `.env`가
+내 문서를 내 키와 함께 다른 주소로 보낼 수도 있습니다. 그래서 현재 폴더는 다른 곳에 설정이 없을 때만 봅니다. 콘솔과
+`setup`이 쓰는 클라이언트 항목에는 모두 `MCP_HOME`이 들어갑니다. stdio로 띄운 서버에 `MCP_HOME`이 없고 설정을 현재
+폴더에서 읽게 되면 서버는 시작하지 않습니다. npx로 띄우면 늘 이 경우입니다. 이때 서버는 클라이언트 항목에
+`MCP_HOME=/전체/경로`를 넣으라고 알려 줍니다. 현재 폴더에 읽지 않는 `.env`나 `mcp.config.json`이 있으면 어느 폴더를
+쓰는지 알려 줍니다.
+
+`MCP_HOME`은 전체 경로로 적습니다. 맨 앞의 `~`는 홈 폴더입니다. 셸은 `-e MCP_HOME=~/x` 안의 `~`를 풀지 않고, JSON
+설정은 늘 그대로 넘깁니다. 상대 경로나 없는 폴더를 적으면 서버가 멈춥니다. 상대 경로로 적은 `MCP_DATA_DIR`,
+`MCP_CONFIG_PATH`, `MCP_ENV_FILE`, `GOOGLE_APPLICATION_CREDENTIALS`는 설정 폴더 기준입니다. `MCP_CONFIG_JSON`(내용
+직접)과 `MCP_CONFIG_PATH`가 있으면 그쪽이 먼저입니다.
 설정은 시작할 때 한 번 읽습니다. 로그인 허용 목록을 포함해 설정을 바꾸면 서버를 다시 시작합니다.
 (터미널에서 띄운 서버는 콘솔이 변경을 저장하면 스스로 다시 시작합니다.)
 
@@ -802,13 +817,17 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 ## 클라이언트 연결
 
 콘솔의 **Connect a client** 화면이 대신 해 줍니다. 클라이언트마다 버튼이 하나 있고, 내 폴더와 서버 이름에 맞춘
-항목을 넣습니다. 데스크톱 앱에는 터미널의 PATH가 없습니다. 그래서 콘솔이 쓰는 항목은 Node를 전체 경로로
-가리키고, 서버가 거기서도 시작됩니다.
+항목을 넣습니다. 모든 항목은 Node와 실행할 파일을 둘 다 전체 경로로 적습니다. 데스크톱 앱에는 터미널의 PATH가
+없습니다. 클라이언트는 사용자가 열어 둔 프로젝트에서 서버를 띄웁니다. 그곳에서 무언가를 찾는 항목(`npx`, 경로 없는
+`node`, 버전 관리자의 shim)은 그 프로젝트의 파일을 실행할 수 있습니다. 프로젝트가 없으면 항목은 설정 폴더에 고정해
+설치한 서버 사본을 실행합니다. 처음 **Add**를 누를 때 설치합니다. 손으로 적을 때 아래의 `"$(node -p process.execPath)"`는
+지금 쓰는 Node의 실제 경로입니다.
 
 | 클라이언트 | 방법 |
 | --- | --- |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- "$(node -p process.execPath)" /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `npm install --prefix /절대경로/폴더 --save-exact --ignore-scripts @chnxthr/knowledge-mcp@<버전>` 다음에 `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- "$(node -p process.execPath)" /절대경로/폴더/node_modules/@chnxthr/knowledge-mcp/dist/cli.js serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠소⁠스⁠로⁠ ⁠실⁠행⁠하⁠는⁠ ⁠프⁠로⁠젝⁠트 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- "$(node -p process.execPath)" /절대경로/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /절대경로/my-mcp/tsconfig.json /절대경로/my-mcp/src/server.ts serve --stdio` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠D⁠e⁠s⁠k⁠t⁠o⁠p⁠,⁠ ⁠C⁠u⁠r⁠s⁠o⁠r⁠,⁠ ⁠V⁠S⁠ ⁠C⁠o⁠d⁠e | 같은 명령과 `MCP_HOME`을 클라이언트 설정 파일의 `command`, `args`, `env`에 적습니다 |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠원⁠격 | `claude mcp add --transport http my-mcp https://<호스트>/mcp --header "Authorization: Bearer <키>"` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
@@ -818,6 +837,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 
 | 바뀐 것 | 할 일 |
 | --- | --- |
+| stdio 서버에 `MCP_HOME` 필요 | 프로젝트 폴더에 `.env`나 `mcp.config.json`이 없으면 `MCP_HOME` 없는 stdio 서버는 시작하지 않습니다. `claude mcp add`에 `-e MCP_HOME=/전체/경로`를 넣거나(JSON 설정은 `"env": { "MCP_HOME": "/전체/경로" }`), 콘솔의 **Connect** 화면에서 서버를 다시 추가하십시오. 그렇게 만든 항목은 Node와 파일을 전체 경로로 적고(`npx` 없음), tsx에는 `--tsconfig`를 줍니다. 열어 둔 프로젝트가 실행할 코드를 고르지 못하게 막습니다 |
 | Drive 범위 기본값이 `shared` | 신뢰하는 소유자가 `drive.roots` 밖에서 서비스 계정에 공유한 문서를 검색하고, 읽고, 색인할 수 있습니다. `drive.trustedOwners`에 소유자를 넣기 전에는 달라지는 것이 없습니다(`knowledge-mcp setup trust acme.com`). 제외 폴더는 계속 숨깁니다. `drive.scope: "roots"`로 끕니다 |
 | zod 4 | 플러그인이 쓰는 `z`가 zod 4가 됩니다. `z.record(값스키마)`는 `z.record(z.string(), 값스키마)`로, 안쪽 기본값에 기대는 객체의 `.default({})`는 `.prefault({})`로 고치십시오 |
 | `source`가 자유 이름 | `dev`와 `biz`는 옛 뜻 그대로 동작합니다. `--dev-only`, `--biz-only`도 그대로 되고, 일반형은 `--source <이름>`입니다 |
@@ -840,7 +860,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 1. `.env`, 서비스 계정 JSON, `mcp.config.json`, `data/`는 커밋하지 않습니다. 모두 gitignore와 이미지 제외 목록에 있습니다.
 2. 데이터 파일에는 키 해시와 OAuth 클라이언트 비밀값이 있습니다. 소유자만 읽게 만들어지니 볼륨도 비공개로 둡니다.
 3. 기본 플러그인은 Drive, Slack, GitHub, Railway를 바꾸지 않습니다. 게이트웨이는 `expose`를 바꿀 때만 원격 쓰기 도구를 엽니다. 기본 도구 가운데 쓰는 것은 `save_note` 하나이고, 이것과 `POST /inbox`는 설정 옆 `notes/`, `inbox/`에 새 Markdown 파일만 씁니다(또는 그 안의 노트를 바꿉니다). member와 admin만 쓸 수 있고 viewer는 못 씁니다.
-4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다.
+4. Drive 색인은 임베딩을 위해 문서 본문을 임베딩 제공자로 보냅니다(기본 OpenAI, `EMBEDDING_BASE_URL`을 정하면 그 서버). OCR을 켜면 스캔 파일을 Mathpix로 보냅니다. `OPENAI_API_KEY`는 OpenAI로만 보냅니다. 다른 임베딩 주소에는 `EMBEDDING_API_KEY`를 보내고, 콘솔에서 키 없이 주소를 바꾸면 이 키를 지웁니다.
    Models 화면에서 연결한 언어 모델에는 채팅하거나 위키를 쓰는 동안에만 문서의 글이 전달됩니다. 연결할 때는 키를 확인하는 짧은 질문 하나만 보냅니다. 키는 `.env`에 있고(`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) 화면으로 다시 보내지 않습니다. 검색 도우미의 모델에는 찾는 동안(`find_documents`, 또는 그것을 재는 동안) 문서의 발췌와 일부가 전달됩니다. 검색용으로 따로 정한 모델은 `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL`, `SEARCH_LLM_MODEL`에 있습니다. 저장한 키는 그 키를 받은 제공자와 주소로만 보냅니다.
 5. 서비스 계정 주소를 아는 사람은 누구나 그 계정에 문서를 공유할 수 있습니다. Drive는 받는 쪽에 묻지 않습니다. 그래서 root 밖 공유 문서는 공유된 맨 위 항목의 소유자가 `drive.trustedOwners`에 있을 때만 보여 줍니다. 이 목록에는 자기 조직만 넣고 `*`는 쓰지 마십시오. 신뢰하는 소유자가 공유한 문서는 `drive` 도구를 쓸 수 있는 모든 사용자에게 보입니다. 민감한 폴더 이름은 `drive.excludeFolders`에 넣으십시오.
 6. 토큰은 자기가 읽을 수 있는 곳까지 닿습니다. Slack 봇, GitHub 토큰, Railway 토큰은 모든 사용자가 봐도 되는 범위로만 줍니다.

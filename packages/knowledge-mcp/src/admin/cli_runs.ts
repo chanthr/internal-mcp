@@ -90,7 +90,8 @@ const key = (tool: CliTool, action: CliAction) => `${tool} ${action}`;
 
 /** The tools print in colour for a terminal. Asked not to, some still do. Progress bars rewrite their line with \r. */
 const plain = (text: string): string => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/[^\n]*\r(?!\n)/g, '');
-const lastLine = (text: string): string => plain(text).split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? '';
+/** The last line a tool printed, as plain text: what an install has got to, or why it stopped. */
+export const lastLine = (text: string): string => plain(text).split('\n').map((l) => l.trim()).filter(Boolean).pop() ?? '';
 
 function view(run: Run | undefined): CliRun {
   if (!run) return NONE;

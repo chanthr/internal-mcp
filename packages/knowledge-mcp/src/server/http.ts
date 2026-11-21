@@ -24,7 +24,7 @@ import {
   OAUTH_ISSUER_URL, OAUTH_RESOURCE, OAUTH_SCOPES, CONSENT_COOKIE, CONSENT_PATH, LOGIN_COOKIE, GOOGLE_CALLBACK_PATH,
 } from '../core/oauth.js';
 import { maskedSecretCount } from '../core/log_mask.js';
-import { getConfig, configSource } from '../core/config.js';
+import { getConfig, configSource, settingsDir } from '../core/config.js';
 import { getStore, scheduleToolLogPrune } from '../store/index.js';
 import { VERSION } from '../version.js';
 import { consoleOpenUrl, consoleUrl, mountConsole } from '../admin/routes.js';
@@ -136,7 +136,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
   if (configSource() === 'defaults') {
     console.error(
       '[knowledge-mcp] ⚠️ no config found, running on defaults (no Drive roots, no excluded folders, no login allowlist). ' +
-        'Set MCP_CONFIG_JSON or put mcp.config.json in the working directory (/app/mcp.config.json in the container).',
+        `Set MCP_CONFIG_JSON or put mcp.config.json in ${settingsDir()} (/app/mcp.config.json in the container).`,
     );
   }
   logSecretFingerprints(); // fingerprints of high-privilege keys (values not shown), to verify a rotation
@@ -468,7 +468,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     try {
       const { saveNote, INBOX } = await import('../plugins/knowledge/notes.js');
       const { scanFoldersSoon } = await import('../plugins/knowledge/folders.js');
-      // The folder is who sent it (the key's owner), whatever the note calls itself: that goes in as `via`.
+      // The folder is who sent it (the key's owner, one folder each), whatever the note calls itself: that goes in as `via`.
       const who = auth.email ?? (auth.key_id ? `key-${auth.key_id.slice(0, 8)}` : 'other');
       const { from: via, ...note } = body.data;
       const r = saveNote({ ...note, via, place: INBOX, from: who });

@@ -21,6 +21,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { SignJWT, importPKCS8 } from 'jose';
+import { settingsFile } from '../../core/paths.js';
 
 const DRIVE_READONLY_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
@@ -124,7 +125,10 @@ export function credentialsFromJson(raw: string, source: string): Credentials {
 export function resolveCredentials(env: NodeJS.ProcessEnv = process.env): Credentials {
   if (env.GOOGLE_SERVICE_ACCOUNT_KEY) return credentialsFromJson(env.GOOGLE_SERVICE_ACCOUNT_KEY, 'GOOGLE_SERVICE_ACCOUNT_KEY');
   if (env.GOOGLE_APPLICATION_CREDENTIALS) {
-    const path = env.GOOGLE_APPLICATION_CREDENTIALS;
+    // A relative path is in the settings folder, as setup and the console read it (.env.example suggests
+    // ./google-service-account.json). Read from the working directory, a repository's own key file would become the
+    // Drive account, and its token_uri the address the signed request goes to.
+    const path = settingsFile(env.GOOGLE_APPLICATION_CREDENTIALS);
     let raw: string;
     try {
       raw = readFileSync(path, 'utf8');

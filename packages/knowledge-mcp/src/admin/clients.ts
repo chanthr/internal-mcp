@@ -16,8 +16,9 @@ import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { shellQuote } from '../core/invocation.js';
+import { installPackage, shellQuote, type PackageInstall } from '../core/invocation.js';
 import type { SyncExec } from '../setup/auto.js';
+import { lastLine } from './cli_runs.js';
 
 /** How a client starts this server over stdio. */
 export interface Entry {
@@ -25,6 +26,8 @@ export interface Entry {
   command: string;
   args: string[];
   env?: Record<string, string>;
+  /** The copy of the server the entry runs, when it has to be installed first (core/invocation.ts stdioEntry). */
+  install?: PackageInstall;
 }
 
 export const CLIENT_IDS = ['claude-code', 'claude-desktop', 'cursor', 'vscode'] as const;
@@ -172,6 +175,17 @@ export function describeClients(entry: Entry, ctx: ClientContext = systemContext
       manual: { text: `code --add-mcp ${shellQuote(vscodeJson(entry))}`, language: 'bash' },
     },
   ];
+}
+
+/**
+ * Install the copy of the server an entry runs, when it needs one, before the entry is given to a client. Returns a
+ * sentence when something was installed. Throws with npm's last line when it could not be.
+ */
+export async function installForEntry(entry: Entry, install: typeof installPackage = installPackage): Promise<string | null> {
+  if (!entry.install) return null;
+  const r = await install(entry.install);
+  if (!r.ok) throw new Error(`Installing ${entry.install.spec} into ${entry.install.prefix} did not work: ${lastLine(r.output) || 'npm ended with an error'}`);
+  return `Installed ${entry.install.spec} into ${entry.install.prefix}.`;
 }
 
 const said = (r: { stdout: string; stderr: string }) => (r.stderr.trim() || r.stdout.trim()).split('\n').slice(-3).join(' ').slice(0, 300);

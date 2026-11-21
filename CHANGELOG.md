@@ -217,6 +217,69 @@ Changes that affect people who run or extend the server. Dates are release dates
     this machine.
   - *`linked_documents` told a document that is hidden from one that is not there.* For someone limited to some
     folders, a link out of them is now listed exactly like a link to a document that does not exist.
+- **A repository opened in an AI client could change this server's settings.** A client starts a local server in
+  the project the person has open, and `.env` and `mcp.config.json` were read from that folder first. A repository
+  holding only a `.env` could then send the text of every document, with the person's OpenAI key, to an address of
+  its choosing, and keep the index inside itself; its `mcp.config.json` replaced the whole config. Settings are now
+  read from one folder: `MCP_HOME` when it is set, else the project folder when it has `.env` or `mcp.config.json`,
+  else the working directory. Every entry the console and `setup` write for a client sets `MCP_HOME`, project
+  entries included, and a relative `MCP_DATA_DIR` or `MCP_CONFIG_PATH` is inside the settings folder.
+- **Breaking: a stdio server needs `MCP_HOME` unless its project folder holds the settings.** An entry written by
+  hand without `MCP_HOME` (`npx -y @chnxthr/knowledge-mcp serve --stdio` with only a key in `env`) still read the
+  `.env` and `mcp.config.json` of the repository the client had open, and kept the index there: through npx the
+  working directory is the only folder there is. Such a server now stops with one message before it reads anything.
+  Remedy: add `-e MCP_HOME=/full/path/of/your/settings` to `claude mcp add` (`"env": { "MCP_HOME": "..." }` in a
+  JSON config), or add the server again from the console's Connect page. HTTP and the other commands keep the lookup.
+- **Found by a review of that fix, and closed.** Each let the repository open in a client run its code as this
+  server, or choose its settings, with `MCP_HOME` set. Entries written before this version are not safe this way:
+  add the server to each client again (console, Connect).
+  - *An entry could look something up in the working directory.* Every entry the console, `setup` and
+    `create-knowledge-mcp` write is now Node by its full path and the file it runs by its full path. The setup
+    wizard printed a bare `node`, or `node_modules/.bin/tsx`, whose `#!/usr/bin/env node` takes the first node on
+    the PATH; a version manager's shim picks one by the files of the working directory. A stdio server also takes
+    the working directory's folders, and relative entries, off its own PATH, so a program it starts by name (git,
+    gh, cloudflared) never comes from the repository.
+  - *tsx read the repository's `tsconfig.json`.* A project run from source starts through tsx, which looks for
+    `tsconfig.json` in the working directory. A repository whose `paths` mapped `@chnxthr/knowledge-mcp` to a file
+    of its own had that file run as the server. Every entry the console, `setup` and `create-knowledge-mcp` write
+    now passes `--tsconfig` with the project's own file (the null device when the project has none).
+  - *npx ran the repository's programs.* npm exec runs a package's bin in the working directory, through a shell,
+    with every `node_modules/.bin` of that folder and its parents first on the PATH. A repository's
+    `node_modules/.bin/node`, `sh` or `knowledge-mcp` ran in place of the server, its `node_modules` copy of the
+    package did too, and its `.npmrc` could send the download to another registry; `--prefix` changed none of the
+    first three. No entry goes through npx now. Without a project, the entry runs this package's own `cli.js`: the
+    running copy when it is installed to stay (globally, or a linked checkout), else a copy of this very version
+    that **Add** (and the wizard) installs into the settings folder with npm, run in that folder, without install
+    scripts. A copy in npx's cache is never used: every `npx @chnxthr/knowledge-mcp` shares it, including runs a
+    repository's `.npmrc` sent to another registry.
+  - *A relative `MCP_HOME` was found in the working directory.* `MCP_HOME=~/kmcp` arrives as typed from
+    `-e MCP_HOME=~/kmcp` in zsh and from every JSON config, and pointed into the repository. A leading `~` is now the
+    home folder, and a relative path or a folder that does not exist stops the server. A relative `MCP_ENV_FILE` is
+    inside the settings folder.
+  - *A relative `GOOGLE_APPLICATION_CREDENTIALS` was read from the working directory,* so a repository's key file
+    became the Drive account, and its `token_uri` the address the signed request went to. It is inside the settings
+    folder now, as `setup check` and the console already read it.
+  - *`setup embeddings` and the setup wizard moved the embedding key with the address.* `--base-url` sent the saved
+    `EMBEDDING_API_KEY` to the new address for its check and kept it there, and so did the wizard; choosing OpenAI
+    in the wizard left another provider's key in front of the OpenAI key just typed. Both follow the console now:
+    a saved key is used, and kept, only at its own address. `setup embeddings --api-key` asks for a key unseen.
+  - *The Anthropic key followed `ANTHROPIC_BASE_URL`.* The SDK reads it, and `ANTHROPIC_CUSTOM_HEADERS`, from the
+    environment, which a stdio server inherits from a client set up for a gateway. Claude is now called at
+    `https://api.anthropic.com` only, without those headers: a line there for `Authorization` or
+    `anthropic-version` neither replaces nor removes the saved key or the SDK's own version.
+- **The server says which settings it uses when the working directory has others.** Run inside a folder with its
+  own `.env` while the program's folder (a checkout linked with `npm link`) holds settings too, the server used the
+  program's folder without a word. It now says on stderr which folder it uses and that `MCP_HOME` picks this one.
+- **The OpenAI key is sent to OpenAI only.** With another embedding address set, it was sent there with every
+  request for vectors, and by `setup check`. `EMBEDDING_API_KEY` is used for another address, and the console
+  removes it when the address changes and no key is given, as it does for the language model and OCR.
+- **Two people no longer share an inbox folder.** The folder was the part of the email before the @, so
+  `kim@example.com` and `kim@example.org` wrote into `inbox/kim/` and could replace each other's notes. Each caller
+  now has a folder named after the whole account, a note records that account in `from`, and only that caller may
+  replace it. Notes already in a folder named the old way stay there and are searched; no caller can replace them.
+- **A link inside a folder no longer opens what the exclusions or a person's scope hide.** `read_document` judged a
+  path such as `docs/public/team/pay.md` by its name, while `team` could be a link to `../HR`. An id with a link at
+  any step below the configured folder is refused, as the scan already skipped it.
 - **When gcloud's sign-in has expired the console says what to run.** With an organization account Google asks
   for the sign-in again after a while, and gcloud, started by the console, has no terminal to ask in. Pressing
   *Account with gcloud* then showed gcloud's own sentence ("Reauthentication failed. cannot prompt during

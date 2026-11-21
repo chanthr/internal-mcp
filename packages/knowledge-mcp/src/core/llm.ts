@@ -109,7 +109,30 @@ export const host = (url: string): string => {
 
 // ── Claude, through Anthropic's SDK ──
 
-export const claude = (s: Pick<LlmSettings, 'apiKey'>): Anthropic => new Anthropic({ apiKey: s.apiKey, ...(anthropicEndpoint.baseURL ? { baseURL: anthropicEndpoint.baseURL } : {}) });
+/** Anthropic's own API: where a key saved for Claude goes, and nowhere else. */
+export const ANTHROPIC_API = 'https://api.anthropic.com';
+
+/**
+ * A client for Claude that talks to Anthropic's own address, with the SDK's own headers and nothing else. Left to
+ * itself the SDK takes the address from ANTHROPIC_BASE_URL and extra headers from ANTHROPIC_CUSTOM_HEADERS, and a
+ * stdio server inherits the environment of the client that starts it: Claude Code used through a company gateway sets
+ * both for itself. The key saved here was given for Anthropic, so it must not go to that gateway, and the gateway's
+ * headers are not ours to send.
+ *
+ * The SDK reads ANTHROPIC_CUSTOM_HEADERS once, while the client is made, and adds those headers after its own, so a
+ * line such as "Authorization: Bearer <gateway token>" would replace the saved key. Setting each named header to
+ * null instead would remove the SDK's own Authorization or anthropic-version. So the variable is out of the
+ * environment for that one synchronous step, and put back.
+ */
+export function claude(s: Pick<LlmSettings, 'apiKey'>): Anthropic {
+  const inherited = process.env.ANTHROPIC_CUSTOM_HEADERS;
+  delete process.env.ANTHROPIC_CUSTOM_HEADERS;
+  try {
+    return new Anthropic({ apiKey: s.apiKey, baseURL: anthropicEndpoint.baseURL ?? ANTHROPIC_API });
+  } finally {
+    if (inherited !== undefined) process.env.ANTHROPIC_CUSTOM_HEADERS = inherited;
+  }
+}
 
 /** What went wrong, from the SDK's own error classes, in words for the page. */
 export function claudeError(e: unknown): LlmError {

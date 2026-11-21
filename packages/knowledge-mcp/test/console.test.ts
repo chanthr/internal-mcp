@@ -43,6 +43,8 @@ const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
 const { getStore } = await import('../src/store/index.js');
+const { shellQuote } = await import('../src/core/invocation.js');
+const { VERSION } = await import('../src/version.js');
 
 const server = await runHttp(new Registry(builtinPlugins));
 const base = `http://localhost:${server.port}`;
@@ -423,14 +425,23 @@ test('activity, the client snippets and the live check', async () => {
   const clients = (await api('GET', '/clients')).json;
   assert.equal(clients.url, `http://localhost:${server.port}/mcp`);
   assert.deepEqual(clients.clients.map((c: { id: string }) => c.id), ['claude-code', 'claude-desktop', 'cursor', 'vscode']);
-  // This folder is not a project, so the server comes through npx and the entry names the folder.
+  // This folder is not a project, and this server runs from source: the entry is Node and a copy of this version
+  // in this folder, which Add installs first (the page shows the same install to run by hand). Never npx.
+  const copy = join(dir, 'node_modules', '@chnxthr', 'knowledge-mcp', 'dist', 'cli.js');
   const byHand = clients.clients[0].manual.text as string;
-  assert.match(byHand, new RegExp(`^claude mcp add --scope user ${clients.name} -e MCP_HOME=\\S*${dir.split('/').pop()} .* -- \\S*npx -y @chnxthr/knowledge-mcp serve --stdio$`));
-  assert.equal(JSON.parse(clients.clients[1].manual.text).mcpServers[clients.name].env.MCP_HOME, dir);
+  assert.equal(byHand, ['claude', 'mcp', 'add', '--scope', 'user', clients.name, '-e', `MCP_HOME=${dir}`, '--', process.execPath, copy, 'serve', '--stdio'].map(shellQuote).join(' '));
+  assert.equal(clients.install, `npm install --prefix ${shellQuote(dir)} --save-exact --ignore-scripts --no-audit --no-fund @chnxthr/knowledge-mcp@${VERSION}`);
+  const desktop = JSON.parse(clients.clients[1].manual.text).mcpServers[clients.name];
+  assert.deepEqual(desktop, { command: process.execPath, args: [copy, 'serve', '--stdio'], env: { MCP_HOME: dir } });
   assert.match(clients.clients[2].link, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=/);
-  // Which client is the only thing a request chooses. (Cursor adds a server itself, through its link.)
+  // Once the copy is there, nothing is installed again.
+  mkdirSync(join(copy, '..'), { recursive: true });
+  writeFileSync(copy, '');
+  writeFileSync(join(copy, '..', '..', 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: VERSION }));
+  assert.equal((await api('GET', '/clients')).json.install, null);
+  // Which client is the only thing a request chooses. Cursor gets its own link back, which the page opens.
   assert.equal((await api('POST', '/clients/terminal/add')).status, 400);
-  assert.match((await api('POST', '/clients/cursor/add')).json.error, /use the link/);
+  assert.match((await api('POST', '/clients/cursor/add')).json.link, /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=/);
 
   const check = (await api('GET', '/check')).json.lines;
   assert.ok(check.some((l: { ok: boolean | null; what: string; text: string }) => l.ok === true && l.what === 'shop' && /SQLite/.test(l.text)));
@@ -439,6 +450,18 @@ test('activity, the client snippets and the live check', async () => {
 });
 
 // ── The supervisor: a saved change restarts the server, and the server never outlives it ──
+test('Add installs the copy the entry runs first, and says what npm said when it could not', async () => {
+  const { installForEntry } = await import('../src/admin/clients.js');
+  const entry = { name: 'team', command: '/opt/node/bin/node', args: ['/srv/kmcp/node_modules/@chnxthr/knowledge-mcp/dist/cli.js', 'serve', '--stdio'], env: { MCP_HOME: '/srv/kmcp' } };
+  const asked: unknown[] = [];
+  const npm = (ok: boolean, output: string) => async (install: unknown) => (asked.push(install), { ok, output });
+  assert.equal(await installForEntry(entry, npm(true, '')), null); // nothing to install
+  const install = { spec: '@chnxthr/knowledge-mcp@9.9.9', prefix: '/srv/kmcp' };
+  assert.equal(await installForEntry({ ...entry, install }, npm(true, 'added 1 package')), 'Installed @chnxthr/knowledge-mcp@9.9.9 into /srv/kmcp.');
+  await assert.rejects(() => installForEntry({ ...entry, install }, npm(false, 'npm error code E404\n\x1b[31mnpm error 404 Not Found\x1b[0m\n')), /did not work: npm error 404 Not Found$/);
+  assert.deepEqual(asked, [install, install]);
+});
+
 test('clients: what is on this machine, and adding the server to each without disturbing what is there', async () => {
   const { describeClients, addToClient, cursorLink, claudeDesktopConfig } = await import('../src/admin/clients.js');
   const home = mkdtempSync(join(tmpdir(), 'kmcp-clients-'));
@@ -538,6 +561,22 @@ test('embedding model: the models of an endpoint are listed, and a saved key goe
     assert.match(envFile(), new RegExp(`^EMBEDDING_BASE_URL=${fake.base}$`, 'm'));
     assert.match(envFile(), /^EMBEDDING_MODEL=bge-m3$\n^EMBEDDING_DIM=3$/m);
     assert.ok(!envFile().includes('key-of-another-endpoint'), 'a key that was not typed in is not written');
+
+    // A new address saved without a key: the key saved for the old one is removed, or every request for vectors
+    // would carry it to the new address after the restart.
+    const { updateEnvFile } = await import('../src/setup/envfile.js');
+    const keyFor = (endpoint: string, key: string) => {
+      updateEnvFile(join(dir, '.env'), { EMBEDDING_BASE_URL: endpoint, EMBEDDING_API_KEY: key });
+      Object.assign(process.env, { EMBEDDING_BASE_URL: endpoint, EMBEDDING_API_KEY: key });
+    };
+    keyFor('https://embeddings.example.com/v1', 'key-of-the-old-endpoint-000');
+    assert.equal((await api('POST', '/services/embeddings', { baseUrl: fake.base, model: 'bge-m3' })).status, 200);
+    assert.equal(fake.seen.at(-1)!.auth, undefined);
+    assert.doesNotMatch(envFile(), /^EMBEDDING_API_KEY=/m);
+    // The same address again without a key keeps the key saved for it.
+    keyFor(fake.base, 'key-of-this-endpoint-000');
+    assert.equal((await api('POST', '/services/embeddings', { baseUrl: fake.base, model: 'bge-m3' })).status, 200);
+    assert.match(envFile(), /^EMBEDDING_API_KEY=key-of-this-endpoint-000$/m);
   } finally {
     delete process.env.EMBEDDING_API_KEY;
     delete process.env.EMBEDDING_BASE_URL;

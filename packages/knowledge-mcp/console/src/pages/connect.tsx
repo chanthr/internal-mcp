@@ -22,6 +22,8 @@ interface Client {
 interface Clients {
   name: string;
   url: string;
+  /** The npm install that Add runs first, when the entry's copy of the server is not in the settings folder yet. */
+  install: string | null;
   clients: Client[];
   http: string;
 }
@@ -47,6 +49,17 @@ export function Connect() {
         <div className="rows">
           {failed && <Row title="The clients could not be listed" help={failed} />}
           {!data && !failed && <Row title={<span className="actions"><Spinner /> Looking for clients</span>} />}
+          {data?.install && (
+            <Row
+              title="Add installs the server first"
+              help="A copy of the server goes into the settings folder, and clients run that copy. It takes about a minute, once. By hand, run this before adding the entry:"
+            />
+          )}
+          {data?.install && (
+            <div className="row-form">
+              <CodeBlock code={data.install} language="bash" wrap />
+            </div>
+          )}
           {data?.clients.map((c) => <ClientRow key={c.id} client={c} onChanged={load} />)}
         </div>
       </Section>
@@ -232,7 +245,10 @@ function ClientRow({ client: c, onChanged }: { client: Client; onChanged: () => 
   const add = useAction();
   const run = () =>
     void add.run(async () => {
-      setDone((await call<{ message: string }>('POST', `/clients/${c.id}/add`)).message);
+      const r = await call<{ message: string; link?: string }>('POST', `/clients/${c.id}/add`);
+      setDone(r.message);
+      // Cursor: its own link, once the server has the copy the entry runs.
+      if (r.link) window.location.href = r.link;
       await onChanged();
     });
 
@@ -244,7 +260,7 @@ function ClientRow({ client: c, onChanged }: { client: Client; onChanged: () => 
         <LinkButton expanded={open} onClick={() => setOpen((o) => !o)}>{open ? 'Hide the entry' : 'Show the entry'}</LinkButton>
         {c.how === 'link' ? (
           // Cursor adds a server through its own link, and asks the person there.
-          <Button size="sm" variant="secondary" disabled={!c.installed} onClick={() => c.link && (window.location.href = c.link)}>Open in Cursor</Button>
+          <Button size="sm" variant="secondary" loading={add.busy} disabled={!c.installed} onClick={run}>Open in Cursor</Button>
         ) : (
           <Button size="sm" variant="secondary" loading={add.busy} disabled={!c.installed} onClick={run}>{c.added ? 'Add again' : 'Add'}</Button>
         )}

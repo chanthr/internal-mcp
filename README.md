@@ -225,11 +225,11 @@ Obsidian:
 | Folder | What goes there |
 | --- | --- |
 | `notes/` | What the console's chat saves. Yours to edit as well |
-| `inbox/<who>/` | What other assistants save with `save_note` (Claude, ChatGPT, Cursor), and what programs send to `POST /inbox`. `<who>` is the account of the key that sent it, whatever the note says it is from |
+| `inbox/<who>/` | What other assistants save with `save_note` (Claude, ChatGPT, Cursor), and what programs send to `POST /inbox`. `<who>` is the whole account of the key that sent it (`kim@example.com`), whatever the note says it is from: two people never share a folder |
 
-A note is never written over another file, and `save_note` can replace only a note in the caller's own folder: your
-documents are not changed, and nothing is written through a link. What a replaced note said before is kept in a
-hidden `.versions/` folder beside it. Viewers may not save. The chat offers `save_note` and the tools that only read.
+A note is never written over another file, and `save_note` can replace only a note in the caller's own folder whose
+front matter names that caller (`from`): your documents are not changed, and nothing is written through a link. What
+a replaced note said before is kept in a hidden `.versions/` folder beside it. Viewers may not save. The chat offers `save_note` and the tools that only read.
 `inbox/` is searched but not read into the wiki: what other programs send is not written up as if your documents said
 it. When the settings folder cannot be written (a container with its configuration mounted read-only), both folders
 are in the data directory instead. The names `notes` and `inbox` are kept for these folders: a configured folder
@@ -244,7 +244,7 @@ curl -X POST https://<your address>/inbox \
   -d '{"title": "Course page, week 4", "content": "Assignment 2 is due on Friday.", "from": "aside", "url": "https://school.example/week-4"}'
 ```
 
-It answers `201 {"saved": "inbox/<who>/2026-11-20 Course page, week 4.md"}`, `<who>` being the key's account. Fields:
+It answers `201 {"saved": "inbox/<who>/2026-11-20 Course page, week 4.md"}`, `<who>` being the key's whole account. Fields:
 `title`, `content` (Markdown, up to 200,000 characters), and optionally `from` (kept as `via` in the note), `url` and
 `tags`. In an Aside routine,
 end the task with this step: *"Send what you found to Knowledge MCP: POST it to https://<your address>/inbox with
@@ -516,7 +516,7 @@ The `knowledge-mcp` binary, the Docker image entrypoint, and your own `server.ts
 | `setup folder <path>` | Adds a local folder of documents to the search index |
 | `setup connection <name> --postgres --env NAME` / `--sqlite <file>` / `--http <base URL>` | Adds a database or an API for tools declared in the config (see [Your data as tools](#your-data-as-tools)) |
 | `setup secret <ENV_NAME>` | Types one secret into `.env` without it being shown |
-| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents |
+| `setup drive --key <file>` / `setup github --from-gh` / `setup embeddings --base-url URL --model NAME` | Setup steps that ask nothing, for scripts and AI agents. `setup embeddings --api-key` asks for the endpoint's key without showing it; a key saved for another address is not sent to the new one, and is removed |
 | `serve` | Starts the HTTP server on `$PORT` (default 8080). Started in a terminal it also serves [the console](#the-console) at `/console/` and restarts itself when the console saves a change; `--open` opens the console in the browser, and so does running with no command at all. `serve --stdio` talks over stdin and stdout instead |
 | `keys create [--email E] [--role R] [--label L] [--expires 90d]` | Creates an API key and prints it once. Only its hash is stored |
 | `keys list` / `keys revoke <id>` | Lists keys (never the key itself) or deactivates one |
@@ -688,12 +688,26 @@ that depends on the bot's channels and on each person's allowed channels.
 | Secrets | Env vars (`.env` locally, host env in production) | Keys and tokens. [`.env.example`](.env.example) lists them all |
 | What to look at | `mcp.config.json` | Drive folders, exclusions, sign-in allowlist, viewer access, plugin settings, remote MCP servers. See [`mcp.config.example.json`](mcp.config.example.json) |
 
-`.env` and `mcp.config.json` are read from the working directory first, then from your project folder, so a
-client that starts the server from elsewhere still finds them. `MCP_CONFIG_JSON` (inline) and
-`MCP_CONFIG_PATH` override the file. `MCP_HOME` names the folder of the settings and the data outright; the
-working directory is then not looked at, which is what a client's entry needs when the server is started through
-npx from somebody else's project. The config is read once at startup: restart the server after you change it, the
-sign-in allowlist included. (A server started in a terminal restarts itself when the console saves a change.)
+`.env` and `mcp.config.json` are read from one folder, the settings folder:
+
+| When | Settings folder |
+| --- | --- |
+| `MCP_HOME` is set | That folder. The working directory is never read |
+| Your project folder (the one with the server's `package.json`) has `.env` or `mcp.config.json` | Your project folder |
+| Neither | The working directory |
+
+A client starts a local server in whatever project you have open, and that folder's settings are not yours: a
+`.env` there could send your documents to another address with your key. So the working directory counts only when
+nothing else holds settings, and every entry the console and `setup` write sets `MCP_HOME` to your folder. A server
+started over stdio without `MCP_HOME` does not start when its settings would be the working directory's (always the
+case through npx); it says to add `MCP_HOME=/full/path` to the client's entry. When the working directory holds a
+`.env` or `mcp.config.json` that is not read, the server says which folder it uses.
+
+`MCP_HOME` is a full path. A leading `~` is your home folder: a shell does not expand it inside `-e MCP_HOME=~/x`,
+and a JSON config never does. A relative path, or a folder that does not exist, stops the server. A relative
+`MCP_DATA_DIR`, `MCP_CONFIG_PATH`, `MCP_ENV_FILE` or `GOOGLE_APPLICATION_CREDENTIALS` is inside the settings folder.
+`MCP_CONFIG_JSON` (inline) and `MCP_CONFIG_PATH` override the file. The config is read once at startup: restart the server after you change it, the sign-in
+allowlist included. (A server started in a terminal restarts itself when the console saves a change.)
 
 | Config key | Meaning |
 | --- | --- |
@@ -848,13 +862,17 @@ you delete it in the Cloudflare dashboard (My Profile, API Tokens).
 ## Connect a client
 
 The console's **Connect** page does this for you: one button per client, with the entry made for your
-folder and your server name. A desktop app does not have the PATH of your terminal, so the entry it writes names
-Node by its full path and the server starts there too.
+folder and your server name. Every entry is Node by its full path and the file it runs by its full path. A desktop
+app does not have the PATH of your terminal, and a client starts the server in whatever project you have open: an
+entry that looks anything up there (`npx`, a bare `node`, a version manager's shim) can run that project's files.
+Without a project, the entry runs a copy of the server pinned in your settings folder; **Add** installs it the first
+time. By hand, `"$(node -p process.execPath)"` below is your Node's real path.
 
 | Client | How |
 | --- | --- |
-| Claude Code, local | `claude mcp add my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
-| Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx -y @chnxthr/knowledge-mcp serve --stdio` |
+| Claude Code, local | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- "$(node -p process.execPath)" /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
+| Claude Code, local, without a project | `npm install --prefix /abs/path/folder --save-exact --ignore-scripts @chnxthr/knowledge-mcp@<version>`, then `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- "$(node -p process.execPath)" /abs/path/folder/node_modules/@chnxthr/knowledge-mcp/dist/cli.js serve --stdio` |
+| Claude Code, local, a project run from source | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- "$(node -p process.execPath)" /abs/path/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /abs/path/my-mcp/tsconfig.json /abs/path/my-mcp/src/server.ts serve --stdio` |
 | Claude Desktop, Cursor, VS Code, local | The same command and `MCP_HOME` in the client's config file, under `command`, `args` and `env` |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
 | Claude and ChatGPT connectors | Console → Connect: your own address, then **Sign-in for connectors → Turn on**. Add a custom connector with `https://<host>/mcp`; it asks for a key once ([OAUTH_SETUP.md](OAUTH_SETUP.md)) |
@@ -864,6 +882,7 @@ Node by its full path and the server starts there too.
 
 | Change | What to do |
 | --- | --- |
+| A stdio server needs `MCP_HOME` | Unless your project folder holds `.env` or `mcp.config.json`, a stdio server without `MCP_HOME` does not start. Add `-e MCP_HOME=/full/path` to `claude mcp add` (`"env": { "MCP_HOME": "/full/path" }` in a JSON config), or add the server again from the console's **Connect** page. Entries made that way are Node and a file by full paths (no `npx`), with `--tsconfig` for tsx, which keeps the open project from choosing the code that runs |
 | Drive scope is `shared` by default | Documents that a trusted owner shared with the service account outside `drive.roots` can be searched, read and indexed. Nothing changes until you list owners in `drive.trustedOwners` (`knowledge-mcp setup trust acme.com`). Excluded folders stay hidden. `drive.scope: "roots"` turns it off |
 | zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
 | `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |
@@ -886,7 +905,7 @@ Node by its full path and the server starts there too.
 1. Never commit `.env`, service-account JSON, `mcp.config.json` or `data/`. All are gitignored and kept out of the image.
 2. The data file holds key hashes and OAuth client secrets. It is created owner-only; keep the volume private.
 3. Built-in plugins never change Drive, Slack, GitHub or Railway. The gateway exposes remote write tools only if you set `expose`. The one built-in tool that writes, `save_note`, and `POST /inbox` write only new Markdown files into `notes/` and `inbox/` beside the settings (or replace a note there); members and admins may, viewers may not.
-4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on.
+4. Drive indexing sends document text to the embedding provider (OpenAI by default; your own server when `EMBEDDING_BASE_URL` is set), and scanned files to Mathpix when OCR is on. `OPENAI_API_KEY` is sent to OpenAI only: another embedding address is sent `EMBEDDING_API_KEY`, which the console removes when the address changes and no key is given.
    A language model connected on the Models page is sent the text of your documents while you chat or the wiki is written, and at no other time. The search assistant's model is sent excerpts and parts of them while it searches (`find_documents`, or measuring it); a model set for it alone is in `SEARCH_LLM_PROVIDER`, `SEARCH_LLM_API_KEY`, `SEARCH_LLM_BASE_URL` and `SEARCH_LLM_MODEL`. A saved key is sent only to the provider and address it was given for. Connecting it sends one short question to check the key. The key is in `.env` (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) and is never sent back to the page. A ChatGPT sign-in is kept in `chatgpt-account.json` in the data directory (owner only), and never sent to the page either.
 5. Anyone who knows the service account's address can share a document with it; Drive asks nobody. So a document shared outside the roots is shown only when the top shared item belongs to an owner in `drive.trustedOwners`. Keep that list to your own organization, never `*`. What a trusted owner shares is visible to every user who may use the `drive` tools: list sensitive folder names in `drive.excludeFolders`.
 6. A token reaches whatever it can read. Scope the Slack bot, the GitHub token and the Railway token to what every user may see.

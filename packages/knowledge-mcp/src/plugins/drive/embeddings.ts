@@ -6,7 +6,8 @@
  *                        another provider or a local model (Ollama, vLLM, LM Studio, text-embeddings-inference, …).
  *   EMBEDDING_MODEL      model name, default text-embedding-3-small.
  *   EMBEDDING_DIM        vector size the model returns, default 1536. The Qdrant collection is created with it.
- *   EMBEDDING_API_KEY    bearer token. Falls back to OPENAI_API_KEY. May be empty for a local server.
+ *   EMBEDDING_API_KEY    bearer token. Falls back to OPENAI_API_KEY at OpenAI's own address only (embeddingKey).
+ *                        May be empty for a local server.
  *
  * Vectors from different models are not comparable: after changing the model, run a full reindex into a new
  * collection (`knowledge-mcp drive reindex --recreate`, or a new QDRANT_COLLECTION).
@@ -72,9 +73,21 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 }
 
 function getApiKey(): string | undefined {
-  const key = process.env.EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
+  const key = embeddingKey();
   if (!key && baseUrl() === DEFAULT_BASE_URL) throw new Error('[embeddings] set OPENAI_API_KEY (or EMBEDDING_API_KEY)');
-  return key || undefined;
+  return key;
+}
+
+/**
+ * The key for the embedding endpoint: EMBEDDING_API_KEY, else OPENAI_API_KEY when the endpoint is OpenAI's own.
+ * OPENAI_API_KEY was given for OpenAI, so it is never sent to another address: when only the address was changed,
+ * every request for vectors used to carry it there. `env` is for the setup check, which reads the .env file.
+ */
+export function embeddingKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const own = env.EMBEDDING_API_KEY?.trim();
+  if (own) return own;
+  const openai = (env.EMBEDDING_BASE_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '') === DEFAULT_BASE_URL;
+  return (openai && env.OPENAI_API_KEY?.trim()) || undefined;
 }
 
 /** Whether the error is retryable (429 rate limit, or 5xx/timeout). */
