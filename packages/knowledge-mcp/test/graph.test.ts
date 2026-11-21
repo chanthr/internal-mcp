@@ -43,7 +43,7 @@ Object.assign(process.env, {
   PORT: '0',
 });
 
-const { extractLinks, buildGraph, getGraph, readLinkMap } = await import('../src/plugins/knowledge/graph.js');
+const { extractLinks, buildGraph, getGraph, readLinkMap, writeLinkMap } = await import('../src/plugins/knowledge/graph.js');
 const { scanFolders, folderReading } = await import('../src/plugins/knowledge/folders.js');
 const { handleLinkedDocuments } = await import('../src/plugins/knowledge/tools/linked_documents.js');
 const { handleSearchKnowledge } = await import('../src/plugins/knowledge/tools/search_knowledge.js');
@@ -315,4 +315,62 @@ test('a dropped file goes into uploads/ and nowhere else, is searchable at once,
   const firstTime = await api('POST', '/uploads/done');
   assert.deepEqual([firstTime.status, firstTime.json.restartNeeded], [200, true]);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'mcp.config.json'), 'utf8')).folders.at(-1), { path: uploads, name: 'uploads' });
+});
+
+test('the graph is built again when the links change, not when a file is only saved again', () => {
+  // A scan writes links.json again whenever a file's modified time changes; building the graph again for that took a
+  // quarter of a second at 20,000 documents, on the next search.
+  const saved = readLinkMap();
+  const map = (modified: string, aLinks: Array<{ to: string }>) => ({
+    version: 1 as const,
+    folders: { notes: { 'a.md': { modified, title: 'A', links: aLinks }, 'b.md': { modified, links: [] } } },
+  });
+  try {
+    writeLinkMap(map('2026-01-01T00:00:00.000Z', [{ to: 'b' }]));
+    const first = getGraph();
+    assert.deepEqual(first.out.get('local:notes/a.md')?.map((e) => e.to), ['local:notes/b.md']);
+    // Saved again, links as they were: the same graph, not a new one. (The later time is written longer, so that the
+    // file differs in size even when both writes fall in the same millisecond.)
+    writeLinkMap(map('2026-02-02T10:30:00.123456Z', [{ to: 'b' }]));
+    assert.equal(getGraph(), first);
+    // A link changed: built again.
+    writeLinkMap(map('2026-03-03T00:00:00.000Z', []));
+    assert.notEqual(getGraph(), first);
+    assert.equal(getGraph().out.get('local:notes/a.md'), undefined);
+    // A file with no fingerprint at its head (written before it was kept) is read as it is.
+    writeFileSync(join(dir, 'data', 'links.json'), JSON.stringify(map('2026-04-04T00:00:00.000Z', [{ to: 'b' }])));
+    assert.deepEqual(getGraph().out.get('local:notes/a.md')?.map((e) => e.to), ['local:notes/b.md']);
+  } finally {
+    writeLinkMap(saved);
+  }
+});
+
+test('the graph is what links.json holds, also when the file was changed by hand', () => {
+  // The fingerprint at the head of the file was taken for what the graph was built from: a hand edit that kept it
+  // gave a graph that was not the file's, and it stayed after the next scan wrote the true map.
+  const saved = readLinkMap();
+  const path = join(dir, 'data', 'links.json');
+  const truth = { version: 1 as const, folders: { notes: { 'a.md': { modified: '1', links: [{ to: 'b' }] }, 'b.md': { modified: '1', links: [] }, 'c.md': { modified: '1', links: [] } } } };
+  const edges = () => [...getGraph().out.values()].flat().map((e) => `${e.from.split('/').pop()}->${e.to.split('/').pop()}`).join(',');
+  try {
+    writeLinkMap(truth);
+    const key = /"key":"([0-9a-f]{40})"/.exec(readFileSync(path, 'utf8'))![1];
+    const edited = { version: 1, key, folders: { notes: { ...truth.folders.notes, 'a.md': { modified: '1', links: [{ to: 'c' }] } } } };
+    writeFileSync(path, `${JSON.stringify(edited)} \n`);
+    assert.equal(edges(), 'a.md->c.md');
+    writeLinkMap(truth);
+    assert.equal(edges(), 'a.md->b.md');
+    // With the graph of the true map built, a hand edit that keeps the whole head as it was written (found by review:
+    // the graph built before was kept).
+    const head = /^\{"version":1,"key":"[0-9a-f]{40}","sum":"[0-9a-f]{40}",/.exec(readFileSync(path, 'utf8'))![0];
+    writeFileSync(path, `${head}"folders":${JSON.stringify({ notes: { ...truth.folders.notes, 'a.md': { modified: '10', links: [{ to: 'c' }] } } })}}\n`);
+    assert.equal(edges(), 'a.md->c.md');
+    // A map written again with the same links (a file was saved) keeps the graph: the same object, not built again.
+    writeLinkMap(truth);
+    const built = getGraph();
+    writeLinkMap({ version: 1, folders: { notes: { ...truth.folders.notes, 'a.md': { modified: '2', links: [{ to: 'b' }] } } } });
+    assert.equal(getGraph(), built);
+  } finally {
+    writeLinkMap(saved);
+  }
 });

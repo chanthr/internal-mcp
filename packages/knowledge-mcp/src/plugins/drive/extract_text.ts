@@ -47,14 +47,140 @@ async function downloadBuffer(drive: DriveClient, fileId: string): Promise<Buffe
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-/** A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs are left out. */
+/** Rows read from one tab. */
+const SHEET_ROWS = 100_000;
+/** Cells written out from one workbook, filled or empty, over all its tabs. */
+const WORKBOOK_CELLS = 2_000_000;
+/**
+ * Characters of CSV written out from one workbook, as SheetJS writes them (quotes and commas included). Cells can
+ * share one text of up to 32,767 characters: a workbook of 44 KB whose 3,000 cells all held the same one became 98 MB
+ * of text, and quotes are written twice (300 cells of 32,767 quotes: 19.7 million characters, counted as 9.8).
+ */
+const WORKBOOK_CHARS = 10_000_000;
+
+/**
+ * Characters of one row as CSV: each cell as SheetJS writes it (in quotes, with its quotes doubled, when it holds a
+ * comma, a quote or a line break), a comma between cells, a line break after. Read no further than just past `most`.
+ */
+function csvRowLength(row: Array<Cell | undefined>, from: number, to: number, most: number): number {
+  let n = to - from + 1;
+  for (const k of Object.keys(row)) {
+    const cell = row[Number(k)];
+    if (!cell || Number(k) < from || Number(k) > to) continue;
+    const text = cell.v != null ? (cell.w ?? String(cell.v)) : cell.f != null ? `=${cell.f}` : '';
+    let quotes = 0;
+    let quoted = false;
+    for (let i = 0; i < text.length && n + i <= most; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 34) quotes++;
+      if (c === 34 || c === 44 || c === 10) quoted = true;
+    }
+    n += text.length + (quoted ? quotes + 2 : 0);
+    if (n > most) break;
+  }
+  return n;
+}
+
+type Cell = import('xlsx').CellObject;
+
+/**
+ * A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs and empty rows are left out.
+ *
+ * A tab is written over the range it says it has (its <dimension>), as before, when that is no larger than what is
+ * left of WORKBOOK_CELLS; a larger one is not believed (a file of 1.5 KB with one cell said 200,000 rows by 100
+ * columns and became 20 million commas, and one that says a million rows by 16,384 columns would have run for an
+ * hour), and the range comes from the cells that are there. Only rows that hold a cell are visited, and what is
+ * written over all tabs stops at WORKBOOK_CELLS cells or WORKBOOK_CHARS characters of cell text: a workbook of 1,000
+ * tabs with two cells far apart took 12 seconds. Where reading stops, a line says so. Other work is let in between
+ * tabs.
+ */
 export async function workbookText(buffer: Buffer): Promise<string> {
   const XLSX = await import('xlsx');
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  return wb.SheetNames.map((n) => ({ n, csv: XLSX.utils.sheet_to_csv(wb.Sheets[n]).trim() }))
-    .filter((s) => s.csv)
-    .map((s) => `## ${s.n}\n${s.csv}`)
-    .join('\n\n');
+  // One row more than is read: whether it is there says whether the tab has more.
+  const wb = XLSX.read(buffer, { type: 'buffer', dense: true, sheetRows: SHEET_ROWS + 1 });
+  let left = WORKBOOK_CELLS;
+  let chars = WORKBOOK_CHARS;
+  const notRead = (name: string) =>
+    `## ${name}\n(Not read: the workbook holds more than is read, ${WORKBOOK_CELLS.toLocaleString('en-US')} cells or ${WORKBOOK_CHARS.toLocaleString('en-US')} characters.)`;
+  const out: string[] = [];
+  for (const name of wb.SheetNames) {
+    await new Promise((resolve) => setImmediate(resolve));
+    const ws = wb.Sheets[name];
+    const ref = ws?.['!ref'];
+    const data = (ws?.['!data'] ?? []) as Array<Array<Cell | undefined> | undefined>;
+    if (!ws || !ref) continue;
+    // The rows that hold a cell, and where the cells are. A dense sheet has holes where there are none; its keys are
+    // the rows and cells that are there (walking the indexes visited every empty row: 100,000 per tab).
+    const rows: number[] = [];
+    let more = false;
+    let first = Infinity;
+    let last = -1;
+    for (const key of Object.keys(data)) {
+      const r = Number(key);
+      const row = data[r];
+      if (!Number.isInteger(r) || !row) continue;
+      if (r >= SHEET_ROWS) {
+        more = true;
+        continue;
+      }
+      let any = false;
+      for (const k of Object.keys(row)) {
+        const col = Number(k);
+        if (!Number.isInteger(col) || !row[col]) continue;
+        any = true;
+        first = Math.min(first, col);
+        last = Math.max(last, col);
+      }
+      if (any) rows.push(r);
+    }
+    if (rows.length === 0) continue;
+    // Rows past SHEET_ROWS + 1 are not kept. A tab that says it runs further (SheetJS keeps what it says in !fullref)
+    // may have them, after rows that stop well before: 10 rows and a total on row 150,001 lost the total without a
+    // word. What the tab says is passed on as what it says: it may be stale, and a note that more rows are read than
+    // there are would not be true.
+    const fullref = ws['!fullref'];
+    const says = fullref ? XLSX.utils.decode_range(fullref).e.r + 1 : 0;
+    if (left <= 0 || chars <= 0) {
+      out.push(notRead(name));
+      continue;
+    }
+    const said = XLSX.utils.decode_range(ref);
+    const believed = (said.e.r - said.s.r + 1) * (said.e.c - said.s.c + 1) <= left;
+    // Columns from where the tab says it begins when that is not after its first cell, as before.
+    const from = believed || said.s.c <= first ? said.s.c : first;
+    const to = believed ? said.e.c : last;
+    const width = to - from + 1;
+    const taken: Array<Array<Cell | undefined>> = [];
+    let stopped = false;
+    let lastRow = 0;
+    for (const r of rows) {
+      if (believed && (r < said.s.r || r > said.e.r)) continue;
+      const size = width > left ? Infinity : csvRowLength(data[r]!, from, to, chars);
+      if (size > chars) {
+        stopped = true;
+        break;
+      }
+      left -= width;
+      chars -= size;
+      taken.push(data[r]!);
+      lastRow = r + 1;
+    }
+    if (taken.length === 0) {
+      out.push(notRead(name));
+      continue;
+    }
+    // Written by SheetJS from the rows taken only, one after another: rows without a cell are not visited.
+    const compact = { '!data': taken, '!ref': XLSX.utils.encode_range({ s: { r: 0, c: from }, e: { r: taken.length - 1, c: to } }) } as unknown as import('xlsx').WorkSheet;
+    const csv = XLSX.utils.sheet_to_csv(compact, { blankrows: false }).trim();
+    const note =
+      stopped || more
+        ? `\n(Only rows up to ${(stopped ? lastRow : SHEET_ROWS).toLocaleString('en-US')} are read.)`
+        : says > SHEET_ROWS
+          ? `\n(The tab says it runs to row ${says.toLocaleString('en-US')}; rows after ${SHEET_ROWS.toLocaleString('en-US')} are not read.)`
+          : '';
+    if (csv) out.push(`## ${name}\n${csv}${note}`);
+  }
+  return out.join('\n\n');
 }
 
 async function exportGoogle(
@@ -121,9 +247,10 @@ const OCR_MAX_PAGES = Math.max(1, Number(process.env.OCR_MAX_PAGES ?? 200) || 20
 
 /** Extraction for formats that are plain files: text, Word, PDF, PowerPoint, Excel, images. */
 async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean, progress: OcrProgress = {}): Promise<ExtractResult> {
-  // 1. Native text
+  // 1. Native text. Pictures embedded as base64 are dropped (not small ones, and not examples in code): a Markdown
+  //    file with one picture of 1.6 MB took 7.5 seconds to cut and became 374 passages of letters for the embedding model.
   if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
-    return { text: await src.text(), method: 'native' };
+    return { text: stripEmbeddedImages(await src.text(), { written: true }), method: 'native' };
   }
 
   // 3. Word .docx: dependency-free zip/XML reading (ooxml.ts). Blank line between paragraphs, the same shape as the former

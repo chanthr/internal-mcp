@@ -19,6 +19,8 @@
  * table is not a note), and a path that climbs out of the folder (it points at something this server was not
  * given).
  */
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dataFile } from '../../core/data_file.js';
 import { parseFrontmatter } from '../drive/chunker.js';
@@ -44,12 +46,45 @@ export interface LinkMap {
   folders: Record<string, Record<string, DocEntry>>;
 }
 
-const file = dataFile<LinkMap>('links.json');
+/**
+ * links.json: the link map, with `key` first, a fingerprint of what the links are (linksKey), and `sum`, a fingerprint
+ * of the folders as written after it. A file changed by hand since keeps the key but not the sum.
+ */
+type Written = LinkMap & { key?: string; sum?: string };
+const file = dataFile<Written>('links.json');
+const usable = (m: Written | null): m is Written => m?.version === 1 && !!m.folders && typeof m.folders === 'object';
 export const readLinkMap = (): LinkMap => {
   const m = file.read();
-  return m?.version === 1 && m.folders && typeof m.folders === 'object' ? m : { version: 1, folders: {} };
+  return usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
 };
-export const writeLinkMap = (map: LinkMap): void => file.write(map);
+export const writeLinkMap = (map: LinkMap): void => file.write({ version: 1, key: linksKey(map), sum: sha1(JSON.stringify(map.folders)), folders: map.folders });
+const sha1 = (text: string) => createHash('sha1').update(text).digest('hex');
+/** The head writeLinkMap gives the file (data_file writes JSON.stringify of it, then a line break). */
+const WRITTEN = /^\{"version":1,"key":"([0-9a-f]{40})","sum":"([0-9a-f]{40})","folders":/;
+
+/**
+ * A fingerprint of what the graph is made from: the documents, their titles and other names, and their links. Not
+ * when each was modified: a scan writes the map again whenever a file is saved, and building the graph again for
+ * that took a quarter of a second at 20,000 documents, on the next search.
+ */
+function linksKey(map: LinkMap): string {
+  const h = createHash('sha1');
+  for (const [folder, docs] of Object.entries(map.folders)) {
+    h.update(`\u0000${folder}\u0000`);
+    for (const [path, d] of Object.entries(docs)) h.update(JSON.stringify([path, d.title ?? null, d.aliases ?? [], d.links]));
+  }
+  return h.digest('hex');
+}
+
+/**
+ * The fingerprint at the head of links.json when the file is as writeLinkMap wrote it (what follows has the sum the
+ * head says), else null. Hashing the text is a hundredth of the work of reading it into a graph.
+ */
+function writtenKey(raw: string): string | null {
+  const head = WRITTEN.exec(raw);
+  if (!head || !raw.endsWith('}\n')) return null;
+  return sha1(raw.slice(head[0].length, raw.length - 2)) === head[2] ? head[1] : null;
+}
 
 const DOC_EXT = /\.(md|markdown|mdx|txt|pdf|docx|pptx|xlsx)$/i;
 /** Things a wiki link embeds that are not documents. */
@@ -341,12 +376,37 @@ export function buildGraph(map: LinkMap): Graph {
   return g;
 }
 
-let cached: { stamp: string; graph: Graph } | null = null;
+let cached: { stamp: string; key: string | null; graph: Graph } | null = null;
 
-/** The graph of what is written down now. Built once per change of links.json, whichever process wrote it. */
+/**
+ * The graph of what is written down now, whichever process wrote it. Built again only when the links changed: a
+ * links.json written again because a file was saved, with the same links, keeps the graph built before.
+ */
 export function getGraph(): Graph {
   const stamp = file.stamp();
-  if (!cached || cached.stamp !== stamp) cached = { stamp, graph: buildGraph(readLinkMap()) };
+  if (cached?.stamp === stamp) return cached.graph;
+  let raw = '';
+  try {
+    raw = readFileSync(file.path(), 'utf8');
+  } catch {
+    // no file: no links
+  }
+  // The key at the head is believed only when the rest of the file is what it was written with: a file changed by
+  // hand with the old head kept the graph built before.
+  const key = writtenKey(raw);
+  if (cached && key && cached.key === key) {
+    cached.stamp = stamp;
+    return cached.graph;
+  }
+  let m: Written | null = null;
+  try {
+    m = JSON.parse(raw) as Written;
+  } catch {
+    // not JSON: no links
+  }
+  const map: LinkMap = usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
+  // The fingerprint of what was read, not the one the file says it has.
+  cached = { stamp, key: linksKey(map), graph: buildGraph(map) };
   return cached.graph;
 }
 

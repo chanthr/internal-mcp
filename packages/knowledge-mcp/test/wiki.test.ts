@@ -391,3 +391,32 @@ test('Stop means stop, off stops what it started, an unreadable folder keeps its
   assert.equal(await maybeRunWiki(dir), null, 'no room left today');
   await api('POST', '/wiki/auto', { on: false });
 });
+
+test('while a run goes, asking how far it is does not list the folders again', async () => {
+  // The page asks every second and a half; listing every folder for that took a quarter of a second at 20,000 files.
+  connect();
+  put('u1.md', '# U1\n\nUpsilon: One.\n', new Date('2026-05-01T00:00:00Z'));
+  put('u2.md', '# U2\n\nUpsilon: Two.\n', new Date('2026-05-02T00:00:00Z'));
+  model.delay = 400;
+  try {
+    assert.equal((await api('POST', '/wiki/run', {})).status, 200);
+    let before: any;
+    for (let i = 0; i < 100 && !before?.run?.total; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      before = (await api('GET', '/wiki')).json;
+    }
+    assert.ok(before.run.running && before.run.total >= 2, JSON.stringify(before.run));
+    // A document put in the folder now is not counted while the run goes: the run's own list is used.
+    put('u3.md', '# U3\n\nUpsilon: Three.\n', new Date('2026-05-03T00:00:00Z'));
+    const during = (await api('GET', '/wiki')).json;
+    assert.equal(during.run.done, before.run.done, 'nothing was read in between (the model takes 400 ms)');
+    assert.equal(during.waiting, before.waiting);
+    assert.equal((await api('POST', '/wiki/stop')).status, 200);
+    // Once it has ended, the folders are listed again on every ask.
+    const after = await settled();
+    put('u4.md', '# U4\n\nUpsilon: Four.\n', new Date('2026-05-04T00:00:00Z'));
+    assert.equal((await api('GET', '/wiki')).json.waiting, after.waiting + 1);
+  } finally {
+    model.delay = 0;
+  }
+});

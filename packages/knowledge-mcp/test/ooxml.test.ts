@@ -105,3 +105,22 @@ test('not a zip, missing parts and oversized entries are errors, not crashes', (
 test('decodeXml handles named and numeric entities and leaves unknown ones', () => {
   assert.equal(decodeXml('&lt;a&gt; &quot;b&quot; &apos;c&apos; &#65;&#x42; &nbsp;'), `<a> "b" 'c' AB &nbsp;`);
 });
+
+test('docx: paragraphs and runs that never close are read in one pass', () => {
+  // 1 MB of "<w:p>" that never close took 25 seconds: every one was read on to the end looking for "</w:p>".
+  const n = 200_000;
+  for (const [name, rest] of [
+    ['paragraphs that never close', '<w:p>'.repeat(n)],
+    ['text that never closes in one paragraph', `<w:p>${'<w:t>x'.repeat(n)}</w:p>`],
+    ['text tags whose attributes never end', `<w:p>${'<w:t a'.repeat(n)}</w:p>`],
+  ]) {
+    const xml = `<?xml version="1.0"?><w:document ${W}><w:body><w:p><w:r><w:t>first</w:t></w:r></w:p>${rest}</w:body></w:document>`;
+    const at = performance.now();
+    const text = docxText(zip({ 'word/document.xml': xml }));
+    assert.ok(performance.now() - at < 500, `${name}: ${Math.round(performance.now() - at)} ms`);
+    assert.equal(text, 'first', name);
+  }
+  // An empty run written as <w:t xml:space="preserve"/> holds no text: it used to take in the tags up to the next </w:t>.
+  const xml = `<w:document ${W}><w:body><w:p><w:r><w:t xml:space="preserve"/></w:r><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>`;
+  assert.equal(docxText(zip({ 'word/document.xml': xml })), 'Hello');
+});
