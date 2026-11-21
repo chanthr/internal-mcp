@@ -51,6 +51,11 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 const SHEET_ROWS = 100_000;
 /** Cells written out from one workbook, filled or empty, over all its tabs. */
 const WORKBOOK_CELLS = 2_000_000;
+/**
+ * Characters of cell text written out from one workbook. Cells can share one text of up to 32,767 characters: a
+ * workbook of 44 KB whose 3,000 cells all held the same one became 98 MB of text.
+ */
+const WORKBOOK_CHARS = 10_000_000;
 
 type Cell = import('xlsx').CellObject;
 
@@ -60,15 +65,20 @@ type Cell = import('xlsx').CellObject;
  * A tab is written over the range it says it has (its <dimension>), as before, when that is no larger than what is
  * left of WORKBOOK_CELLS; a larger one is not believed (a file of 1.5 KB with one cell said 200,000 rows by 100
  * columns and became 20 million commas, and one that says a million rows by 16,384 columns would have run for an
- * hour), and the range comes from the cells that are there. Only rows that hold a cell are visited, and the cells
- * written over all tabs stop at WORKBOOK_CELLS: a workbook of 1,000 tabs with two cells far apart took 12 seconds.
- * Where reading stops, a line says so. Other work is let in between tabs.
+ * hour), and the range comes from the cells that are there. Only rows that hold a cell are visited, and what is
+ * written over all tabs stops at WORKBOOK_CELLS cells or WORKBOOK_CHARS characters of cell text: a workbook of 1,000
+ * tabs with two cells far apart took 12 seconds. Where reading stops, a line says so. Other work is let in between
+ * tabs.
  */
 export async function workbookText(buffer: Buffer): Promise<string> {
   const XLSX = await import('xlsx');
-  // One row more than is read: whether it is there says whether the tab has more.
+  // One row more than is read: whether it is there says whether the tab has more (or, when the tab says it has
+  // more rows than that, SheetJS keeps what it says in !fullref).
   const wb = XLSX.read(buffer, { type: 'buffer', dense: true, sheetRows: SHEET_ROWS + 1 });
   let left = WORKBOOK_CELLS;
+  let chars = WORKBOOK_CHARS;
+  const notRead = (name: string) =>
+    `## ${name}\n(Not read: the workbook holds more than is read, ${WORKBOOK_CELLS.toLocaleString('en-US')} cells or ${WORKBOOK_CHARS.toLocaleString('en-US')} characters.)`;
   const out: string[] = [];
   for (const name of wb.SheetNames) {
     await new Promise((resolve) => setImmediate(resolve));
@@ -79,7 +89,9 @@ export async function workbookText(buffer: Buffer): Promise<string> {
     // The rows that hold a cell, and where the cells are. A dense sheet has holes where there are none; its keys are
     // the rows and cells that are there (walking the indexes visited every empty row: 100,000 per tab).
     const rows: number[] = [];
-    let more = false;
+    const sizes: number[] = []; // characters of cell text in each of those rows
+    // Rows past SHEET_ROWS + 1 are not kept: row 100,002 alone with row 100,001 empty was dropped without a word.
+    let more = Boolean(ws['!fullref']);
     let first = Infinity;
     let last = -1;
     for (const key of Object.keys(data)) {
@@ -91,18 +103,24 @@ export async function workbookText(buffer: Buffer): Promise<string> {
         continue;
       }
       let any = false;
+      let size = 0;
       for (const k of Object.keys(row)) {
         const col = Number(k);
-        if (!Number.isInteger(col) || !row[col]) continue;
+        const cell = row[col];
+        if (!Number.isInteger(col) || !cell) continue;
         any = true;
+        size += (cell.w ?? String(cell.v ?? '')).length;
         first = Math.min(first, col);
         last = Math.max(last, col);
       }
-      if (any) rows.push(r);
+      if (any) {
+        rows.push(r);
+        sizes.push(size);
+      }
     }
     if (rows.length === 0) continue;
-    if (left <= 0) {
-      out.push(`## ${name}\n(Not read: the workbook holds more cells than are read, ${WORKBOOK_CELLS.toLocaleString('en-US')}.)`);
+    if (left <= 0 || chars <= 0) {
+      out.push(notRead(name));
       continue;
     }
     const said = XLSX.utils.decode_range(ref);
@@ -114,18 +132,19 @@ export async function workbookText(buffer: Buffer): Promise<string> {
     const taken: Array<Array<Cell | undefined>> = [];
     let stopped = false;
     let lastRow = 0;
-    for (const r of rows) {
+    for (const [i, r] of rows.entries()) {
       if (believed && (r < said.s.r || r > said.e.r)) continue;
-      if (width > left) {
+      if (width > left || sizes[i] > chars) {
         stopped = true;
         break;
       }
       left -= width;
+      chars -= sizes[i];
       taken.push(data[r]!);
       lastRow = r + 1;
     }
     if (taken.length === 0) {
-      out.push(`## ${name}\n(Not read: the workbook holds more cells than are read, ${WORKBOOK_CELLS.toLocaleString('en-US')}.)`);
+      out.push(notRead(name));
       continue;
     }
     // Written by SheetJS from the rows taken only, one after another: rows without a cell are not visited.

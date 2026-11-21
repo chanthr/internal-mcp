@@ -13,7 +13,7 @@
  * 5. The last OVERLAP_TOKENS of the previous chunk are prepended to the start of each chunk
  * 6. Image markdown (![alt](url)): the URL moves to image_urls and only alt stays in content (avoids embedding noise)
  */
-import { encode } from 'gpt-tokenizer';
+import { clearMergeCache, encode, setMergeCacheSize } from 'gpt-tokenizer';
 import { parseDocument, visit } from 'yaml';
 import { indexProfile, type IndexProfile } from './index_profile.js';
 
@@ -161,6 +161,20 @@ function parseDocMeta(fm: Record<string, unknown>): DocMeta {
 const AS_TEXT = { disallowedSpecial: new Set<string>() };
 
 /**
+ * The tokenizer keeps the last 100,000 words it was given in a Map, and once the Map is full each new word first takes
+ * out the oldest one, which grows slow: after a megabyte of words not seen before, each document of 200,000
+ * characters took a second, and one of 4 MB took 18 seconds. Its Map is never let fill up: it is emptied once the
+ * tokenizer has been given TOKENIZER_PARTS parts (see tokensOf), a word or a few each, or TOKENIZER_CHARS characters
+ * (a part can be a stretch of hundreds). Kept between documents, the words in it still save time (Korean text was cut
+ * in a third more time without it). This module is the only one that uses the tokenizer.
+ */
+setMergeCacheSize(Number.MAX_SAFE_INTEGER);
+const TOKENIZER_PARTS = 100_000;
+const TOKENIZER_CHARS = 2_000_000;
+let partsGiven = 0;
+let charsGiven = 0;
+
+/**
  * Places where the tokenizer always ends a token, and reads the text before and after the same way when the text is
  * cut there: a space or a tab after anything but white space, anything but a letter, a mark or an apostrophe after a
  * letter, anything after a digit, a digit after anything but a digit or white space, and anything but white space or
@@ -184,9 +198,12 @@ const WORD_PIECE = 32;
  * (the tokenizer joins letters across the cut differently): "la" over and over was 14% short in 32-character pieces,
  * two tokens a piece. Each such cut counts as two tokens more, so that what is counted is not less than what is there;
  * except between two pieces of one character over and over (a rule of "─", a run of spaces), which read whole never
- * come to more tokens than apart (2,144 runs of 32 kinds of character tried), and are counted as they are.
+ * come to more tokens than apart (every character of the basic plane tried, in runs of 1,100), and are counted as they
+ * are. Not a digit: a run of digits is read in groups of three from where it begins, and pieces of 32 are grouped
+ * otherwise ("０" over and over came to fewer tokens apart).
  */
 const PIECE_MARGIN = 2;
+const NUMBER_AT = /\p{N}/uy;
 
 /** The margin of a cut by force at `at` (see PIECE_MARGIN). */
 function marginAt(text: string, at: number): number {
@@ -196,7 +213,8 @@ function marginAt(text: string, at: number): number {
   // Two code units for a character outside the basic plane: compared one unit apart then.
   const step = c >= 0xd800 && c <= 0xdbff ? 2 : 1;
   for (let i = from; i < to; i++) if (text.charCodeAt(i) !== text.charCodeAt(at + ((((i - at) % step) + step) % step))) return PIECE_MARGIN;
-  return 0;
+  NUMBER_AT.lastIndex = at;
+  return NUMBER_AT.test(text) ? PIECE_MARGIN : 0;
 }
 
 /** UTF-8 bytes of text.slice(from, to), counted no further than just past `most`. */
@@ -238,17 +256,27 @@ export function* cutPlaces(text: string): Generator<[at: number, must: boolean]>
 /**
  * Tokens of the pieces met while one document is cut. A piece is met again and again (every passage is counted more
  * than once, a word recurs, a long run of one character is cut into many equal pieces), and is given to the
- * tokenizer once. (The tokenizer's own cache moves a word it is asked for again to the end of a Map, which grows slow
- * once the Map holds thousands of words.)
+ * tokenizer once. Up to PARTS_KEPT pieces are kept, then they are let go and kept again from none: a document of 4 MB
+ * of words not seen before (650,000 pieces) kept them all, 40 MB, and one of 50 MB would keep ten times that. (Pieces
+ * let go are counted again when they are met again: such a document is cut in twice the time.)
  */
 let seenParts: Map<string, number> | null = null;
+const PARTS_KEPT = 250_000;
 
 /** Tokens of text the tokenizer is given whole: a piece between two cut places, or a part of one. */
 function tokensOf(part: string): number {
   let n = seenParts?.get(part);
   if (n === undefined) {
+    charsGiven += part.length;
+    if (++partsGiven > TOKENIZER_PARTS || charsGiven > TOKENIZER_CHARS) {
+      clearMergeCache();
+      partsGiven = charsGiven = 0;
+    }
     n = encode(part, AS_TEXT).length;
-    seenParts?.set(part, n);
+    if (seenParts) {
+      if (seenParts.size >= PARTS_KEPT) seenParts.clear();
+      seenParts.set(part, n);
+    }
   }
   return n;
 }
@@ -269,9 +297,12 @@ function countTokens(text: string, stop = Infinity): number {
   return n + tokensOf(text.slice(start));
 }
 
-/** Where the last place in text is at which the tokenizer always ends a token, or 0 when there is none. */
-function lastWordEnd(text: string): number {
-  for (let i = text.length - 1; i > 0; i--) {
+/**
+ * Where the last place in text is at which the tokenizer always ends a token, or 0 when there is none. Only places from
+ * `from` on are looked at (each place depends on the character before it and the one after it only).
+ */
+function lastWordEnd(text: string, from = 1): number {
+  for (let i = text.length - 1; i >= Math.max(1, from); i--) {
     const c = text.charCodeAt(i);
     if (c >= 0xdc00 && c <= 0xdfff && i > 0 && text.charCodeAt(i - 1) >= 0xd800 && text.charCodeAt(i - 1) <= 0xdbff) continue;
     WORD_END_AT.lastIndex = i;
@@ -282,25 +313,55 @@ function lastWordEnd(text: string): number {
 
 /**
  * The tokens of a passage built up one piece after another (sentences, paragraphs, rows, small sections), counted as
- * countTokens counts the whole, and as the passage is stored: with picture addresses taken out (extractImages). What
- * lies before the last word end is counted once and kept as a number, so that a passage that grows one paragraph at a
- * time is not counted again from its start every time.
+ * the passage is stored: with picture addresses taken out (extractImages), and without the white space at its end.
+ * What lies before the last word end is counted once and kept as a number, so that a passage that grows one paragraph
+ * at a time is not counted again from its start every time.
+ *
+ * A stretch with no word end in it is counted in pieces of WORD_PIECE characters from where it begins, as countTokens
+ * counts it, once it is longer than a word can be, or once it runs on past one piece added (paragraphs of nothing but
+ * "/" and other signs, table rows of nothing but "|" and "-" after spaces: no prose does). The pieces whose places can
+ * no longer change are counted then and kept as a number too. Kept as text, such a stretch was read again from its
+ * start for every paragraph added: 66,000 paragraphs of "/" took nine seconds at 4,000 tokens a passage.
  */
 class Joined {
   private settled = 0;
+  /** What comes after the last place counted: a word end, or a place in a stretch cut by force. */
   private tail = '';
+  /** The tail is part of a stretch with no word end that is counted in pieces cut by force. */
+  private forced = false;
   constructor(first: string) {
     this.add(first);
   }
-  /** The tokens the passage would have with `more` after it. */
+  /** The tokens the passage would have with `more` after it, as stored. */
   with(more: string): number {
-    return this.settled + countTokens(this.tail + stored(more));
+    return this.settled + countTokens((this.tail + stored(more)).trimEnd());
   }
   add(more: string): void {
-    const t = this.tail + stored(more);
-    const end = lastWordEnd(t);
-    this.settled += countTokens(t.slice(0, end));
-    this.tail = t.slice(end);
+    const from = this.tail.length;
+    let t = this.tail + stored(more);
+    const end = lastWordEnd(t, from);
+    if (end > 0) {
+      this.settled += countTokens(t.slice(0, end));
+      t = t.slice(end);
+      this.forced = false;
+    } else if (from > 0) {
+      this.forced = true;
+    }
+    if (!this.forced && t.length > LONGEST_WORD / 3 && utf8Bytes(t, 0, t.length, LONGEST_WORD) > LONGEST_WORD) this.forced = true;
+    if (this.forced) {
+      // A place is settled once the characters its margin is read from (WORD_PIECE + 1 after it) are there.
+      let at = 0;
+      for (;;) {
+        let next = at + WORD_PIECE;
+        if (next + WORD_PIECE + 1 > t.length) break;
+        const c = t.charCodeAt(next - 1);
+        if (c >= 0xd800 && c <= 0xdbff) next--;
+        this.settled += tokensOf(t.slice(at, next)) + marginAt(t, next);
+        at = next;
+      }
+      t = t.slice(at);
+    }
+    this.tail = t;
   }
 }
 
@@ -397,7 +458,7 @@ function splitTable(table: string, maxTokens: number): string[] {
     joined.add(`\n${row}`);
   }
   if (buf.length > 1) out.push(buf.join('\n'));
-  return (out.length > 0 ? out : [table]).flatMap((piece) => (countTokens(piece, maxTokens) > maxTokens ? hardCutByChars(piece, maxTokens) : [piece]));
+  return (out.length > 0 ? out : [table]).flatMap((piece) => (countTokens(piece.trim(), maxTokens) > maxTokens ? hardCutByChars(piece, maxTokens) : [piece]));
 }
 
 /** Splits into paragraphs on \n\n while protecting code blocks (```). A code block stays whole as one unit. */
@@ -529,14 +590,31 @@ function fits(c: Counted, from: number, to: number, max: number, estimate = fals
  * A binary search finds the longest prefix within maxTokens. The text is counted once, in pieces (counted); a step of
  * the search adds up pieces and gives the tokenizer only the piece it ends in. (Counting the whole rest again for
  * every cut and every step took minutes on 100 KB.)
+ *
+ * A piece is within maxTokens as it is, and also without the white space at its ends, as it is stored when it begins
+ * or ends a passage (a passage is trimmed). " encyclopedia" is one token and "encyclopedia" three: counted only with
+ * the space before it, a piece of a Russian sentence with no end came to four tokens over the cap once trimmed.
  */
 function hardCutByChars(text: string, maxTokens: number): string[] {
   const c = counted(text);
-  if (fits(c, 0, text.length, maxTokens)) return [text];
-  const out: string[] = [];
+  // Where the white space that ends at each place begins, and where the white space that begins there ends (read once:
+  // read again at every step, a run of 200,000 spaces was read hundreds of times).
+  const spaceFrom = new Int32Array(text.length + 1);
+  const spaceTo = new Int32Array(text.length + 1);
+  for (let i = 1; i <= text.length; i++) spaceFrom[i] = SPACE.test(text[i - 1]) ? spaceFrom[i - 1] : i;
+  spaceTo[text.length] = text.length;
+  for (let i = text.length - 1; i >= 0; i--) spaceTo[i] = SPACE.test(text[i]) ? spaceTo[i + 1] : i;
   let at = 0;
+  let from = spaceTo[0];
+  const within = (to: number, estimate = false) => {
+    const end = Math.max(from, spaceFrom[to]);
+    return fits(c, at, to, maxTokens, estimate) && ((from === at && end === to) || fits(c, from, end, maxTokens, estimate));
+  };
+  if (within(text.length)) return [text];
+  const out: string[] = [];
   while (at < text.length) {
-    if (fits(c, at, text.length, maxTokens)) {
+    from = spaceTo[at];
+    if (within(text.length)) {
       out.push(text.slice(at));
       break;
     }
@@ -545,7 +623,7 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
     let cut = 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (fits(c, at, at + mid, maxTokens, true)) {
+      if (within(at + mid, true)) {
         cut = mid;
         lo = mid + 1;
       } else {
@@ -558,8 +636,8 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
     // (So does any cut once the document's search work is spent: a cut at the start of a piece needs no part of it
     // counted to be checked.)
     const j = partAt(c, at + cut);
-    if ((c.piece[j] || searchWork <= 0) && c.starts[j] > at && c.starts[j] < at + cut) cut = c.starts[j] - at;
-    if (!fits(c, at, at + cut, maxTokens)) cut = longestFitting(c, at, cut, maxTokens);
+    if ((c.piece[j] || searchWork <= 0) && c.starts[j] > from && c.starts[j] < at + cut) cut = c.starts[j] - at;
+    if (!within(at + cut)) cut = longestFitting(c, at, cut, within);
     out.push(text.slice(at, at + cut));
     at += cut;
   }
@@ -567,17 +645,17 @@ function hardCutByChars(text: string, maxTokens: number): string[] {
 }
 
 /**
- * After an estimate placed a cut too far: the longest beginning, shorter than `cut`, that is within max tokens counted
- * exactly. Searched from where the piece the cut fell in begins, which is nearly always within it.
+ * After an estimate placed a cut too far: the longest beginning, shorter than `cut`, that is within the cap counted
+ * exactly (`within`). Searched from where the piece the cut fell in begins, which is nearly always within it.
  */
-function longestFitting(c: Counted, at: number, cut: number, max: number): number {
+function longestFitting(c: Counted, at: number, cut: number, within: (to: number) => boolean): number {
   let lo = Math.max(1, c.starts[partAt(c, at + cut - 1)] - at);
-  if (lo >= cut || !fits(c, at, at + lo, max)) lo = 1;
+  if (lo >= cut || !within(at + lo)) lo = 1;
   let hi = cut - 1;
   let best = lo;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (fits(c, at, at + mid, max)) {
+    if (within(at + mid)) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -766,9 +844,12 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
       if (crumb) currentHeading = crumb;
     }
 
+    // Kept whole when it is within the cap as before, and as it is stored (trimmed: "!;" can be more tokens than
+    // "!;\n", and a word more without the space before it).
+    const content = section.trim();
     const tokens = countTokens(section, MAX_TOKENS);
-    if (tokens <= MAX_TOKENS) {
-      chunks.push({ heading: currentHeading, content: section.trim(), tokens });
+    if (tokens <= MAX_TOKENS && (content.length === section.length || countTokens(content, MAX_TOKENS) <= MAX_TOKENS)) {
+      chunks.push({ heading: currentHeading, content, tokens });
       continue;
     }
 
@@ -781,7 +862,7 @@ function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
     for (const para of paragraphs) {
       const pt = countTokens(para);
       // Packed by the sum of the paragraphs, as before, and never past the cap once they are joined.
-      if (buf.length > 0 && (bufTokens + pt > MAX_TOKENS || (joined ??= new Joined(buf.join('\n\n'))).with(`\n\n${para}`) > MAX_TOKENS)) {
+      if (buf.length > 0 && (bufTokens + pt > MAX_TOKENS || (joined ??= new Joined(buf.join('\n\n').trimStart())).with(`\n\n${para}`) > MAX_TOKENS)) {
         chunks.push({ heading: currentHeading, content: buf.join('\n\n').trim(), tokens: bufTokens });
         buf = [];
         bufTokens = 0;

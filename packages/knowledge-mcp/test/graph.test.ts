@@ -360,6 +360,16 @@ test('the graph is what links.json holds, also when the file was changed by hand
     assert.equal(edges(), 'a.md->c.md');
     writeLinkMap(truth);
     assert.equal(edges(), 'a.md->b.md');
+    // With the graph of the true map built, a hand edit that keeps the whole head as it was written (found by review:
+    // the graph built before was kept).
+    const head = /^\{"version":1,"key":"[0-9a-f]{40}","sum":"[0-9a-f]{40}",/.exec(readFileSync(path, 'utf8'))![0];
+    writeFileSync(path, `${head}"folders":${JSON.stringify({ notes: { ...truth.folders.notes, 'a.md': { modified: '10', links: [{ to: 'c' }] } } })}}\n`);
+    assert.equal(edges(), 'a.md->c.md');
+    // A map written again with the same links (a file was saved) keeps the graph: the same object, not built again.
+    writeLinkMap(truth);
+    const built = getGraph();
+    writeLinkMap({ version: 1, folders: { notes: { ...truth.folders.notes, 'a.md': { modified: '2', links: [{ to: 'b' }] } } } });
+    assert.equal(getGraph(), built);
   } finally {
     writeLinkMap(saved);
   }

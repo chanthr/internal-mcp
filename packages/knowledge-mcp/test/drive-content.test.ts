@@ -159,6 +159,10 @@ test('chunker: one long word is cut in time, and every piece is within the cap',
       assert.ok(t <= p.maxTokens + p.overlapTokens + 4 && c.tokens >= t, `${name}: a passage of ${t} tokens, reported ${c.tokens}`);
     }
   }
+  // A piece cut by force is counted without the white space at its ends too: that white space is found once, not
+  // again at every step of a search.
+  const spaces = `start${' \u3000'.repeat(100_000)}end`;
+  assert.ok(ms(() => chunkMarkdown(spaces, sized(100))) < 500);
 });
 
 test('chunker: ordinary text is cut where it was before', () => {
@@ -193,10 +197,13 @@ test('chunker: ordinary text is cut where it was before', () => {
 
 test('chunker: no passage is over the cap, read whole as the embedding model reads it', () => {
   // Sums of parts were taken for the whole: sentences joined with a space, paragraphs with a blank line, small
-  // sections added to the one before without end, and pieces of a long run read apart. Each could pass the cap.
+  // sections added to the one before without end, and pieces of a long run read apart. Each could pass the cap. So
+  // could a piece cut by force that was counted with the space before it and stored without it (" encyclopedia" is
+  // one token, "encyclopedia" three). A passage is read as it is stored, with no overlap and with one.
   let seed = 11;
   const rnd = (n: number) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
   const hangul = () => String.fromCharCode(0xac00 + rnd(11172));
+  const words = 'Kubernetes passage overlap tokenizer retrieval orchestrator encyclopedia the index взрослых помощью dazugehören sérstaklega'.split(' ');
   const atoms = [
     () => '검색은 문서를 다시 읽지 않습니다.',
     () => 'The index keeps every passage. ',
@@ -212,23 +219,95 @@ test('chunker: no passage is over the cap, read whole as the embedding model rea
     () => ' '.repeat(1 + rnd(300)),
     () => '<|endoftext|>',
     () => '😀👍🏽',
+    () => ` ${words[rnd(words.length)]}`,
+    () => ` ${words[rnd(words.length)]}`,
+    () => `, ${words[rnd(words.length)]}`,
+    () => '０'.repeat(1 + rnd(400)),
+    () => '![pic](https://example.com/a.png)',
+    () => '```js\nconst x = 1;\n```\n',
   ];
   for (let doc = 0; doc < 60; doc++) {
     let md = '';
     while (md.length < 3000 + rnd(9000)) md += atoms[rnd(atoms.length)]();
-    for (const max of [100, 256, 800]) {
-      for (const c of chunkMarkdown(md, sized(max))) {
+    for (const [max, overlap] of [[100, 0], [256, 0], [800, 0], [100, 12], [256, 32]]) {
+      const chunks = chunkMarkdown(md, { ...sized(max), overlapTokens: overlap });
+      chunks.forEach((c, i) => {
         const t = trueTokens(c.content);
-        assert.ok(t <= max, `document ${doc}, cap ${max}: a passage of ${t} tokens: ${JSON.stringify(c.content.slice(0, 80))}`);
+        // With an overlap, a passage is the overlap ("…", a blank line) and the passage it was cut as.
+        const cap = max + (i > 0 && overlap > 0 ? overlap + 4 : 0);
+        assert.ok(t <= cap, `document ${doc}, cap ${max}, overlap ${overlap}: a passage of ${t} tokens: ${JSON.stringify(c.content.slice(0, 80))}`);
         assert.ok(c.tokens >= t, `document ${doc}, cap ${max}: ${t} tokens reported as ${c.tokens}`);
-      }
+      });
     }
+  }
+  // Sentences that never end, of words read as one token with a space before them and as more without: each piece
+  // cut by force began a passage, and was stored without that space. (Russian: 32 passages of 168 over the cap.)
+  for (const run of ['взрослых помощью детей школы работы людей', 'dazugehören gebeurtenissen sérstaklega und die der', 'encyclopedia, Kubernetes, orchestrator, the, index']) {
+    const ws = run.split(' ');
+    const md = `# T\n\n${Array.from({ length: 3000 }, () => ws[rnd(ws.length)]).join(' ')}`;
+    for (const max of [256, 800]) for (const c of chunkMarkdown(md, sized(max))) assert.ok(trueTokens(c.content) <= max, `${run}: ${trueTokens(c.content)} tokens at a cap of ${max}`);
   }
   // Found by review: a run of "a" and Hangul of 1,020 bytes after 71 words, and "la" over and over.
   const ko = Array.from({ length: 140 }, hangul).join('');
   const prefix = Array.from({ length: 71 }, (_, i) => `word${i % 7 ? '' : 's'}`).join(' ');
   for (const [md, max] of [[`${prefix} ${'a'.repeat(600)}${ko} ${'x'.repeat(4000)}`, 100], ['la'.repeat(6_000), 800], ['la'.repeat(6_000), 4000]] as const) {
     for (const c of chunkMarkdown(md, sized(max))) assert.ok(trueTokens(c.content) <= max, `${trueTokens(c.content)} tokens at a cap of ${max}`);
+  }
+});
+
+test('chunker: paragraphs and rows with no word end between them are joined in time', () => {
+  // A passage built up one paragraph at a time read again, for each paragraph, all of it after its last word end;
+  // between paragraphs of "/" or rows of "|" and "-" after spaces there is none. 66,000 paragraphs of "/" took nine
+  // seconds at 4,000 tokens a passage, two at 800.
+  for (const [name, md] of [
+    ['paragraphs of "/"', `# T\n\n${'/\n\n'.repeat(66_000)}`],
+    ['paragraphs of "/="', `# T\n\n${'/=\n\n'.repeat(50_000)}`],
+    ['table rows of "|-" after spaces', `# T\n\n| a | b |\n|---|---|\n${'  |-|-|-|\n'.repeat(20_000)}`],
+  ] as const) {
+    let chunks: ReturnType<typeof chunkMarkdown> = [];
+    const took = ms(() => (chunks = chunkMarkdown(md, sized(4000))));
+    assert.ok(took < 500, `${name}: ${Math.round(took)} ms`);
+    // Read whole, a passage of these is one word to the tokenizer, slow to read: the first two are read.
+    for (const c of chunks.slice(0, 2)) {
+      const t = trueTokens(c.content);
+      assert.ok(t <= 4000 && c.tokens >= t, `${name}: a passage of ${t} tokens, reported ${c.tokens}`);
+    }
+  }
+});
+
+test('chunker: words not seen before do not slow the documents after them', () => {
+  // The tokenizer kept the last 100,000 words it was given in a Map that grew slow once full: after a megabyte of
+  // words not seen before, each document of 200,000 characters took one to two seconds.
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  let n = 26 ** 4;
+  const word = () => {
+    let s = '';
+    for (let i = n++; s === '' || i > 0; i = Math.floor(i / 26)) s += letters[i % 26];
+    return s;
+  };
+  const words = (size: number) => {
+    const parts: string[] = [];
+    for (let length = 0, p = 1; length < size; p++) {
+      parts.push(p % 20 === 0 ? `## Part ${p}` : `${Array.from({ length: 50 }, word).join(' ')}.`);
+      length += parts[parts.length - 1].length + 2;
+    }
+    return parts.join('\n\n');
+  };
+  encode(words(1_000_000));
+  const took = ms(() => chunkMarkdown(words(200_000), DEFAULT_PROFILE));
+  assert.ok(took < 500, `${Math.round(took)} ms`);
+});
+
+test('chunker: a long run of one digit is not counted short', () => {
+  // Digits are read in groups of three from where a run of them begins. Pieces of a run of one digit cut by force were
+  // counted as if they read as the run does: "０" over and over was 11 tokens over the cap at 800, 53 at 4,000.
+  for (const digit of ['０', '0', '१', '০', '۰']) {
+    for (const max of [800, 4000]) {
+      for (const c of chunkMarkdown(digit.repeat(20_000), sized(max))) {
+        const t = trueTokens(c.content);
+        assert.ok(t <= max && c.tokens >= t, `${digit} at a cap of ${max}: a passage of ${t} tokens, reported ${c.tokens}`);
+      }
+    }
   }
 });
 
@@ -334,6 +413,21 @@ test('extraction: in a file someone wrote, pictures in code and small pictures a
   assert.equal(stripEmbeddedImages(pictures, { written: true }), `Intro\n\n\`![chart](data:image/png;base64,${big})\`\n\n`);
   // From a Google Doc, every picture of data goes, as before.
   assert.equal(stripEmbeddedImages('Text ![dot](data:image/png;base64,iVBORw0KGgo=) here.'), 'Text  here.');
+  // Code as CommonMark reads it (found by review): inline code between runs of two backticks, inline code over the
+  // lines of a paragraph, and a block indented by four spaces. A backtick in the text of a picture does not make
+  // the picture code.
+  const pic = `![chart](data:image/png;base64,${big})`;
+  for (const example of [`Use \`\` ${pic} \`\` to embed.`, `Use \`the form\n${pic}\` to embed.`, `Example:\n\n    ${pic}\n\nEnd.`, `- item\n  \`\`\`md\n  ${pic}\n  \`\`\`\n`]) {
+    assert.equal(stripEmbeddedImages(example, { written: true }), example);
+  }
+  assert.equal(stripEmbeddedImages(`See ![a \`b](data:image/png;base64,${big}) and \`x\``, { written: true }), 'See  and `x`');
+  assert.equal(stripEmbeddedImages(`Use \`one\n\nand\` ${pic}`, { written: true }), 'Use `one\n\nand` '); // not across a blank line
+  assert.equal(stripEmbeddedImages(`Text\n    ${pic}`, { written: true }), 'Text\n    '); // indented, but within a paragraph
+  // In time, with backticks that never close and runs of every length.
+  for (const text of ['` `` ``` ````'.repeat(20_000) + pic, `${'a `b\n'.repeat(50_000)}${pic}`, `${'    x\n'.repeat(40_000)}${pic}`]) {
+    const took = ms(() => stripEmbeddedImages(text, { written: true }));
+    assert.ok(took < 500, `${Math.round(took)} ms`);
+  }
 });
 
 test('workbook: what a sheet says of its size is not believed past what is read, and a workbook is read within a budget', async () => {
@@ -361,12 +455,15 @@ test('workbook: what a sheet says of its size is not believed past what is read,
     return { text, took: performance.now() - at };
   };
   // Said to be 200,000 rows by 100 columns: 20 million commas and four seconds before. A million rows by 16,384
-  // columns would have run for an hour.
+  // columns would have run for an hour. What is past the rows that are read is not looked at, and the text says so.
   for (const ref of ['A1:CV200000', 'A1:XFD1048576']) {
     const { text, took } = await timed(workbook(ref));
-    assert.equal(text, '## S\nonly', ref);
+    assert.equal(text, '## S\nonly\n(Only rows up to 100,000 are read.)', ref);
     assert.ok(took < 500, `${ref}: ${Math.round(took)} ms`);
   }
+  // Rows past the one after the last read were dropped without a word when that row was empty (found by review).
+  assert.equal(await workbookText(workbook('A1:A100002', { 100002: ['A'] })), '## S\nonly\n(Only rows up to 100,000 are read.)');
+  assert.equal(await workbookText(workbook('A1:A150000', { 5000: ['A'], 150000: ['A'] })), '## S\nonly\nfar\n(Only rows up to 100,000 are read.)');
   // A real cell at the far edge: read, and only the rows that hold a cell are visited.
   const far = await timed(workbook('A1:XFD90000', { 90000: ['XFD'] }));
   assert.ok(far.took < 500, `${Math.round(far.took)} ms`);
@@ -387,4 +484,13 @@ test('workbook: what a sheet says of its size is not believed past what is read,
   // A tab of exactly the rows that are read says nothing of more; one row more, and it does.
   assert.ok(!(await workbookText(workbook('A1:A100000', { 100000: ['A'] }))).includes('Only rows'));
   assert.match(await workbookText(workbook('A1:A100001', { 100001: ['A'] })), /\n\(Only rows up to 100,000 are read\.\)$/);
+  // Cells can share one text of 32,767 characters: 3,000 of them in a workbook of 44 KB were 98 MB of text. The text
+  // written stops at 10 million characters, and says so.
+  const long = 'Lorem ipsum dolor sit amet '.repeat(1214).slice(0, 32_767);
+  const shared = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(shared, XLSX.utils.aoa_to_sheet(Array.from({ length: 3000 }, () => [long])), 'S');
+  const sharedText = await timed(XLSX.write(shared, { type: 'buffer', bookType: 'xlsx', bookSST: true, compression: true }) as Buffer);
+  assert.ok(sharedText.text.length <= 10_000_100, `${sharedText.text.length} characters`);
+  assert.match(sharedText.text, /\n\(Only rows up to 305 are read\.\)$/);
+  assert.ok(sharedText.took < 500, `${Math.round(sharedText.took)} ms`);
 });

@@ -20,7 +20,7 @@
  * given).
  */
 import { createHash } from 'node:crypto';
-import { closeSync, openSync, readSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dataFile } from '../../core/data_file.js';
 import { parseFrontmatter } from '../drive/chunker.js';
@@ -46,14 +46,21 @@ export interface LinkMap {
   folders: Record<string, Record<string, DocEntry>>;
 }
 
-/** links.json: the link map, with `key` first, a fingerprint of what the links are (linksKey). */
-const file = dataFile<LinkMap & { key?: string }>('links.json');
-const usable = (m: (LinkMap & { key?: string }) | null): m is LinkMap & { key?: string } => m?.version === 1 && !!m.folders && typeof m.folders === 'object';
+/**
+ * links.json: the link map, with `key` first, a fingerprint of what the links are (linksKey), and `sum`, a fingerprint
+ * of the folders as written after it. A file changed by hand since keeps the key but not the sum.
+ */
+type Written = LinkMap & { key?: string; sum?: string };
+const file = dataFile<Written>('links.json');
+const usable = (m: Written | null): m is Written => m?.version === 1 && !!m.folders && typeof m.folders === 'object';
 export const readLinkMap = (): LinkMap => {
   const m = file.read();
   return usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
 };
-export const writeLinkMap = (map: LinkMap): void => file.write({ version: 1, key: linksKey(map), folders: map.folders });
+export const writeLinkMap = (map: LinkMap): void => file.write({ version: 1, key: linksKey(map), sum: sha1(JSON.stringify(map.folders)), folders: map.folders });
+const sha1 = (text: string) => createHash('sha1').update(text).digest('hex');
+/** The head writeLinkMap gives the file (data_file writes JSON.stringify of it, then a line break). */
+const WRITTEN = /^\{"version":1,"key":"([0-9a-f]{40})","sum":"([0-9a-f]{40})","folders":/;
 
 /**
  * A fingerprint of what the graph is made from: the documents, their titles and other names, and their links. Not
@@ -69,20 +76,14 @@ function linksKey(map: LinkMap): string {
   return h.digest('hex');
 }
 
-/** The fingerprint at the head of links.json, read without reading the rest; null when it has none. */
-function keyOnDisk(): string | null {
-  try {
-    const fd = openSync(file.path(), 'r');
-    try {
-      const head = Buffer.alloc(80);
-      const n = readSync(fd, head, 0, head.length, 0);
-      return /^\{"version":1,"key":"([0-9a-f]{40})"/.exec(head.toString('utf8', 0, n))?.[1] ?? null;
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
+/**
+ * The fingerprint at the head of links.json when the file is as writeLinkMap wrote it (what follows has the sum the
+ * head says), else null. Hashing the text is a hundredth of the work of reading it into a graph.
+ */
+function writtenKey(raw: string): string | null {
+  const head = WRITTEN.exec(raw);
+  if (!head || !raw.endsWith('}\n')) return null;
+  return sha1(raw.slice(head[0].length, raw.length - 2)) === head[2] ? head[1] : null;
 }
 
 const DOC_EXT = /\.(md|markdown|mdx|txt|pdf|docx|pptx|xlsx)$/i;
@@ -384,15 +385,27 @@ let cached: { stamp: string; key: string | null; graph: Graph } | null = null;
 export function getGraph(): Graph {
   const stamp = file.stamp();
   if (cached?.stamp === stamp) return cached.graph;
-  const key = keyOnDisk();
+  let raw = '';
+  try {
+    raw = readFileSync(file.path(), 'utf8');
+  } catch {
+    // no file: no links
+  }
+  // The key at the head is believed only when the rest of the file is what it was written with: a file changed by
+  // hand with the old head kept the graph built before.
+  const key = writtenKey(raw);
   if (cached && key && cached.key === key) {
     cached.stamp = stamp;
     return cached.graph;
   }
-  const m = file.read();
+  let m: Written | null = null;
+  try {
+    m = JSON.parse(raw) as Written;
+  } catch {
+    // not JSON: no links
+  }
   const map: LinkMap = usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
-  // The fingerprint of what was read, not the one the file says it has: a file changed by hand with the old one at
-  // its head would otherwise keep a graph that is not what the file holds.
+  // The fingerprint of what was read, not the one the file says it has.
   cached = { stamp, key: linksKey(map), graph: buildGraph(map) };
   return cached.graph;
 }

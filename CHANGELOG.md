@@ -272,6 +272,9 @@ Changes that affect people who run or extend the server. Dates are release dates
   at every step of a search: 8,000 Korean characters without a space took 1 s, 100 KB of "a" 29 s, 100 KB of "|"
   50 s. Text is now counted word by word, each word once per document, and a run of more than 768 bytes with no
   word end in it in pieces of 32 characters (each of those cases now takes under 50 ms).
+- **Cutting documents no longer slows down after many words never seen before.** The tokenizer keeps the words it
+  was given in a list of 100,000 that grows slow once full: after a megabyte of new words, each document of 200,000
+  characters took up to 1.7 s, and one of 4 MB took 18 s. The list is now emptied before it fills: 0.12 s and 5 s.
 - **No passage is larger than the size it is cut to.** Sentences, paragraphs, table rows and small sections were
   packed by the sum of their own sizes, and joined they could come to more: 4,000 short release notes in a row made
   one passage of 62,000 tokens, more than an embedding model takes, and ordinary text went a few tokens over in 8%
@@ -288,7 +291,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   it, and the document was listed as one that could not be indexed. Such strings are now text like any other.
 - **Pictures embedded as base64 in Markdown and text files are dropped before indexing**, as they already were for
   Google Docs. A Markdown file with one picture of 1.6 MB took 7.5 s to cut and became 374 passages of letters
-  sent to the embedding model. Pictures in code blocks and `inline code` (examples), and pictures under 1 KB, are kept.
+  sent to the embedding model. Pictures in code (examples) are kept: in a fenced or indented code block, or in
+  inline code between runs of backticks, also over the lines of a paragraph. So are pictures under 1 KB.
 - **A `.docx` with paragraphs that never close is read in one pass.** A file of 1.6 KB holding 1 MB of such XML
   took 25 s to read (the 64 MB a part may hold: hours). It now takes milliseconds.
 - **An `.xlsx` no longer makes millions of commas out of the size it says it has.** A file of 1.5 KB with one cell
@@ -296,7 +300,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   16,384 columns would have run for an hour, and 1,000 tabs with two cells far apart took 12 s. A tab's own range is
   used when it is no larger than what is left of 2,000,000 cells for the whole workbook, and otherwise the range of
   the cells that are there; only rows that hold a cell are visited, empty rows are left out, a tab is read to
-  100,000 rows, and where reading stops a line says so.
+  100,000 rows and a workbook to 10 million characters of cell text (a file of 44 KB whose 3,000 cells shared one
+  text of 32,767 characters became 98 MB of text), and where reading stops a line says so.
 - **Comparing ways of cutting no longer holds the server.** It cut 200 sample documents in one go, five ways in a
   row (up to 2.3 s each). Other requests now wait at most one document.
 - **The Wiki page no longer lists every folder while a run goes.** It asks how far the run is every 1.5 s, and each
