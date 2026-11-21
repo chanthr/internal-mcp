@@ -8,7 +8,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, utimesSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -148,6 +148,33 @@ test('scan follows edits and deletions', async () => {
   assert.match(await search(admin, { query: 'offsite Busan' }), /notes\.txt/);
   assert.match(await search(admin, { query: 'quarterly budget' }), /No document contains these words/);
   assert.match(await search(admin, { query: '휴가' }), /No document contains these words/);
+});
+
+test('a subfolder that cannot be read: the rest of the folder is indexed, and what was indexed under it is kept', { skip: process.getuid?.() === 0 ? 'every folder is readable to root' : false }, async () => {
+  // Indexed while it could be read; then its permission changed (or it belongs to another account now).
+  mkdirSync(join(docs, 'private'));
+  writeFileSync(join(docs, 'private', 'plan.md'), '# Plan\n\nThe roadmap names the lighthouse project.\n');
+  mkdirSync(join(docs, 'listed'));
+  writeFileSync(join(docs, 'listed', 'minutes.md'), '# Minutes\n\nThe board approved the harbour bridge.\n');
+  assert.equal((await scanFolders())!.indexed, 2);
+  writeFileSync(join(docs, 'alpha.md'), '# Alpha\n\nThe alpha document says the budget review is in March.\n');
+  chmodSync(join(docs, 'private'), 0o000);
+  chmodSync(join(docs, 'listed'), 0o444); // its names can be listed, its files cannot be opened
+  try {
+    const logs: string[] = [];
+    const r = (await scanFolders((...a) => void logs.push(a.join(' '))))!;
+    assert.deepEqual([r.indexed, r.removed, r.unreadable], [1, 0, [join(docs, 'private/')]]);
+    assert.match(logs.join('\n'), /could not read listed\/minutes\.md \(EACCES\), private\/ \(EACCES\); skipped, their documents are kept/);
+    assert.match(await search(admin, { query: 'alpha budget review March' }), /alpha\.md/);
+    assert.match(await search(admin, { query: 'lighthouse roadmap' }), /plan\.md/, 'kept while it cannot be read');
+    assert.match(await search(admin, { query: 'harbour bridge' }), /minutes\.md/, 'kept while it cannot be read');
+  } finally {
+    chmodSync(join(docs, 'private'), 0o755);
+    chmodSync(join(docs, 'listed'), 0o755);
+  }
+  // Readable again and then deleted: removed like any other document.
+  for (const p of ['private', 'listed', 'alpha.md']) rmSync(join(docs, p), { recursive: true });
+  assert.equal((await scanFolders())!.removed, 3);
 });
 
 test('Drive code that walks the index leaves local documents alone, and a folder indexed first does not make Drive look done', async () => {

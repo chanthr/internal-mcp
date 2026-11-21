@@ -19,6 +19,7 @@ import { clearFolderMetaCache, getFolderMeta, ownerEmails, type ShareOrigin } fr
 import { DRIVE_COLLECTION, getQdrantClient, isDriveDocId, type PointId } from './qdrant.js';
 import { embedQuery, embeddingsConfigured } from './embeddings.js';
 import { acquireLock, releaseLock, withLock } from '../../core/lock.js';
+import { MAX_INTERVAL_MIN } from '../../core/env.js';
 import { cli } from '../../core/invocation.js';
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -409,7 +410,7 @@ export function startDriveSyncScheduler(intervalMin = 30): void {
   };
 
   const scheduleNext = () => {
-    setTimeout(() => void run().finally(scheduleNext), intervalMin * 60_000);
+    setTimeout(() => void run().finally(scheduleNext), Math.min(intervalMin, MAX_INTERVAL_MIN) * 60_000);
   };
 
   void run().finally(scheduleNext); // one run at startup, then the periodic schedule

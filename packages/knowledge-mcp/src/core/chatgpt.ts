@@ -181,8 +181,9 @@ export async function finishChatgptSignIn(query: Record<string, unknown>): Promi
   // On the first sign-in OpenAI issues this installation's client ID and sends it back here.
   const clientId = p.clientId === 'dynamic_agent_client' ? String(query.client_id ?? '') : p.clientId;
   if (!code || !clientId || clientId === 'dynamic_agent_client') return fail('OpenAI did not finish registering this app. Start the sign-in again.');
-  if (p.clientId === 'dynamic_agent_client') stored.write({ ...account(), clientId });
   try {
+    // Inside the try: a data folder that cannot be written (a full disk) is said in the tab, not left to throw.
+    if (p.clientId === 'dynamic_agent_client') stored.write({ ...account(), clientId });
     const t = await tokenRequest({ grant_type: 'authorization_code', client_id: clientId, code, code_verifier: p.verifier, redirect_uri: p.redirectUri, resource: RESOURCE });
     if (t.status !== 200 || !t.body.access_token || !t.body.refresh_token || !t.body.id_token) {
       return fail(`OpenAI did not give a sign-in (${t.body.error ?? t.status}). Start it again.`);

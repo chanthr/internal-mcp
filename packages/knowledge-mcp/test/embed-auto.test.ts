@@ -51,6 +51,7 @@ const { vectorStatus } = await import('../src/plugins/drive/indexer.js');
 const { scanFolders, localFolders } = await import('../src/plugins/knowledge/folders.js');
 const { getLocalIndex, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
 const { watchFolders, worthAPass } = await import('../src/plugins/knowledge/watch.js');
+const { acquireLock, releaseLock } = await import('../src/core/lock.js');
 
 const until = async (what: () => boolean | Promise<boolean>, ms = 15_000) => {
   for (let t = 0; t < ms; t += 20) {
@@ -99,6 +100,28 @@ test('a file saved in a folder is noticed within seconds; hidden and temporary f
     await until(() => passes > 0);
     await new Promise((r) => setTimeout(r, 200));
     assert.equal(passes, 1);
+  } finally {
+    stop();
+  }
+});
+
+test('the data directory inside a watched folder: what the server writes there starts no pass', async () => {
+  // The folder that holds the data directory is watched, as with `setup folder .` or settings inside a notes vault.
+  let passes = 0;
+  const stop = watchFolders([{ path: dir, name: 'all', source: 'files' }], () => passes++, () => undefined, 60);
+  try {
+    await new Promise((r) => setTimeout(r, 150));
+    // What every pass does in the data directory: its lock is made and removed, and files are written.
+    for (let i = 0; i < 3; i++) {
+      assert.equal(acquireLock('folders-scan'), true);
+      releaseLock('folders-scan');
+    }
+    writeFileSync(join(dir, 'data', 'scan-note.json'), '{}');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(passes, 0, "the server's own files are not changes of a document");
+    // A document beside it still is.
+    writeFileSync(join(dir, 'readme.md'), '# Readme\n');
+    await until(() => passes > 0);
   } finally {
     stop();
   }

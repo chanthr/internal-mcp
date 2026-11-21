@@ -4,6 +4,8 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +64,9 @@ const { consoleToken } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
-const { certPath, cloudflareApi, cloudflaredHome, lookup, reach, resumeTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
+const { certPath, cloudflareApi, cloudflaredHome, lookup, processes, reach, resumeChecks, resumeTunnel, startQuickTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
+// A cloudflared that cannot be checked at start is checked again a while later: a moment, here.
+Object.assign(resumeChecks ?? {}, { ms: 10 });
 
 // Public DNS, Cloudflare's API and the address seen from outside, as the tests need them.
 const NS: Record<string, string[]> = { 'example.com': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'other.org': ['ns1.other-host.net', 'ns2.other-host.net'] };
@@ -294,4 +298,95 @@ test('what comes through a tunnel never reaches the console', async () => {
   assert.equal((await api('GET', '/state')).status, 200);
   // The MCP endpoint is what a tunnel is for: it asks for a key as it always did.
   assert.equal((await fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Connecting-Ip': '203.0.113.9' }, body: '{}' })).status, 401);
+});
+
+test('a program given the id of a cloudflared that is gone is not taken for the tunnel, and never stopped', async () => {
+  // Another program of the same person, holding the id the tunnel's cloudflared had before a restart.
+  const other = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(other, 'spawn');
+  const file = join(data, 'tunnel.json');
+  const note = { mode: 'quick', on: true, pid: other.pid, port: server.port, url: 'https://old-words.trycloudflare.com' };
+  try {
+    writeFileSync(file, JSON.stringify(note));
+    const view = await tunnelView();
+    assert.deepEqual([view.running, view.url], [false, null]);
+    // Stopping the tunnel (the server's exit does the same) leaves that program running.
+    stopTunnel();
+    assert.ok(alive(other.pid!), 'the other program was not stopped');
+
+    // At start the tunnel comes back: a cloudflared of its own is started, the other program is not kept for it.
+    writeFileSync(file, JSON.stringify(note));
+    await resumeTunnel(server.port);
+    const back = await tunnelView();
+    assert.deepEqual([back.running, back.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    const pid = pidOf();
+    assert.notEqual(pid, other.pid);
+
+    // A cloudflared with the id written down, but one that started at another time, is not it either.
+    const kept = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(typeof kept.mark, 'string');
+    writeFileSync(file, JSON.stringify({ ...kept, mark: `${kept.mark}0` }));
+    assert.equal((await tunnelView()).running, false);
+    stopTunnel();
+    assert.ok(alive(pid), 'as far as the note goes, it is another process, so it was not stopped');
+    process.kill(pid);
+    assert.ok(await gone(pid));
+    assert.ok(alive(other.pid!));
+  } finally {
+    other.kill();
+  }
+});
+
+test('a cloudflared that cannot be checked (ps failed) is kept, shown as running, never signalled, and not started twice', async () => {
+  const on = await startQuickTunnel(server.port);
+  assert.equal(on.running, true);
+  const pid = pidOf();
+  const launches = () => said().filter((l) => l.includes(' --url ')).length;
+  const before = launches();
+  const real = processes.info;
+  // As when ps fails or takes too long on a busy machine: the process is there, and nothing more is known.
+  processes.info = () => null;
+  try {
+    const view = await tunnelView();
+    assert.deepEqual([view.running, view.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    assert.match(view.problem ?? '', new RegExp(`cloudflared \\(process ${pid}\\) could not be checked just now`));
+    // Stop: not signalled, and not forgotten, so the page does not say "off" while the address still answers.
+    stopTunnel();
+    assert.ok(alive(pid), 'not signalled');
+    assert.equal(pidOf(), pid, 'still in the note');
+    assert.equal((await tunnelView()).running, true);
+    // A restart of the server does not start a second one beside it, and neither does the console.
+    const note = JSON.parse(readFileSync(join(data, 'tunnel.json'), 'utf8'));
+    writeFileSync(join(data, 'tunnel.json'), JSON.stringify({ ...note, on: true }));
+    await resumeTunnel(server.port);
+    await assert.rejects(startQuickTunnel(server.port), /could not be checked, so it was not stopped/);
+    assert.equal(launches(), before);
+  } finally {
+    processes.info = real;
+  }
+  // Once it can be checked again, it is stopped as usual.
+  stopTunnel();
+  assert.ok(await gone(pid));
+  assert.equal((await tunnelView()).running, false);
+});
+
+test('at start, a cloudflared that cannot be checked yet is checked again, and the tunnel comes back once it is known to be gone', async () => {
+  // After a restart its id belongs to another program; ps fails twice while the machine is busy starting up.
+  const other = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(other, 'spawn');
+  const real = processes.info;
+  let failures = 2;
+  processes.info = (pid) => (failures-- > 0 ? null : real(pid));
+  try {
+    writeFileSync(join(data, 'tunnel.json'), JSON.stringify({ mode: 'quick', on: true, pid: other.pid, port: server.port, url: 'https://old-words.trycloudflare.com' }));
+    await resumeTunnel(server.port);
+    const back = await tunnelView();
+    assert.deepEqual([back.running, back.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    assert.notEqual(pidOf(), other.pid);
+    assert.ok(alive(other.pid!), 'the other program was left alone');
+  } finally {
+    processes.info = real;
+    other.kill();
+    stopTunnel();
+  }
 });

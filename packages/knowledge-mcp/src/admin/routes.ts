@@ -60,7 +60,7 @@ import { cutMark, indexProfile, knownPrefixes, LEGACY_CUT } from '../plugins/dri
 import { measureView, startMeasure, stopMeasure, WAYS } from '../plugins/knowledge/measure.js';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkDriveCredentials, checkEmbedding, listEmbeddingModels, checkGithub, checkPostgresUrl, checkRailway, checkSlack, checkSqliteFile } from '../setup/checks.js';
-import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList } from '../setup/commands.js';
+import { addTrusted, BUILT_IN, configuredFolders, readConfigFile, refuseLiteralSecrets, runSetupCommand, trustedList, writeConfigFile } from '../setup/commands.js';
 import { readEnvKeys, readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { countDocuments } from '../setup/wizard.js';
 import { backgroundExec, createDriveServiceAccount, gcloudAccount } from '../setup/auto.js';
@@ -534,7 +534,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const before: Array<{ path: string }> = Array.isArray(config.folders) ? config.folders : [];
       config.folders = before.filter((f) => resolve(dir, f.path) !== resolve(dir, path));
       if (config.folders.length === before.length) return refuse(res, 404, 'That folder is not in the list.');
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+      writeConfigFile(dir, config);
       change(res);
     }),
   );
@@ -1128,7 +1128,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       else knowledge.index = next;
       if (Object.keys(knowledge).length) config.knowledge = knowledge;
       else delete config.knowledge;
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+      writeConfigFile(dir, config);
       change(res, { note: 'Saved. Documents are cut the new way as the folders are read again, starting now.' });
     }),
   );
@@ -1237,7 +1237,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const problems = tools.success ? dataConfigProblems(parsed, tools.data).filter((p) => p.path[0] === 'connections' || p.message.includes(`"${b.name}"`)) : [];
       if (problems.length) return refuse(res, 422, problems.map((p) => p.message).join(' '));
       config.connections = all;
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+      writeConfigFile(dir, config);
       change(res, { found });
     }),
   );
@@ -1252,7 +1252,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const used = (Array.isArray(config.tools) ? config.tools : []).filter((t: { connection?: string }) => t.connection === name).length;
       if (used) return refuse(res, 409, `${used} tool${used === 1 ? ' uses' : 's use'} this connection. Remove ${used === 1 ? 'it' : 'them'} first.`);
       delete config.connections[name];
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+      writeConfigFile(dir, config);
       change(res);
     }),
   );
@@ -1311,7 +1311,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const raw = readConfigFile(dir);
       const rawList: Array<{ name: string }> = Array.isArray(raw.tools) ? raw.tools : [];
       raw.tools = [...rawList.filter((t) => t.name !== tool.name), req.body];
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(raw, null, 2)}\n`);
+      writeConfigFile(dir, raw);
       change(res);
     }),
   );
@@ -1325,7 +1325,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       const next = list.filter((t) => t.name !== String(req.params.name));
       if (next.length === list.length) return refuse(res, 404, 'There is no such declared tool.');
       raw.tools = next;
-      writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(raw, null, 2)}\n`);
+      writeConfigFile(dir, raw);
       change(res);
     }),
   );
@@ -1712,7 +1712,7 @@ export function mountConsole(app: Express, registry: Registry): boolean {
   // The browser comes back from Railway or Google. It carries no console token (it arrives from another site), so
   // this accepts only the answer to a sign-in started from the console minutes ago, and saves nothing by itself.
   router.get(CALLBACK_PATH.replace(/^\/console/, ''), (req, res) => {
-    void finishChatgptSignIn(req.query as Record<string, unknown>).then((r) => {
+    void finishChatgptSignIn(req.query as Record<string, unknown>).catch((e: unknown) => ({ ok: false, text: `The sign-in could not be finished (${e instanceof Error ? e.message : String(e)}). Start it again from the console.` })).then((r) => {
       const text = r.text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
       res
         .status(r.ok ? 200 : 400)

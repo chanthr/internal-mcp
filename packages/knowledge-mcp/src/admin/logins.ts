@@ -21,8 +21,9 @@
  *            change made in the console.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { writeFileAtomic } from '../core/data_file.js';
 import { dataDir } from '../core/paths.js';
 import {
   deleteRailwayClient,
@@ -38,7 +39,7 @@ import {
 } from '../plugins/railway/login.js';
 import { railwayProjects } from '../plugins/railway/tools.js';
 import { backgroundExec, gcloudAccount, gcloudDefaultProject, gcloudProjects, ghToken, hasTool, type Exec, type GcloudProject, GCLOUD_SIGN_IN } from '../setup/auto.js';
-import { readConfigFile } from '../setup/commands.js';
+import { readConfigFile, writeConfigFile } from '../setup/commands.js';
 import { readEnvValues, updateEnvFile } from '../setup/envfile.js';
 import { completeMcpSignIn, prepareMcpSignIn, saveMcpSignIn, unregister, type McpCarry, type McpResult, type McpTarget } from './upstreams.js';
 
@@ -354,7 +355,7 @@ function writeRoots(dir: string, drop: Set<string>, add: Array<{ id: string; nam
   const roots = [...kept, ...add.map((a) => ({ id: a.id, name: a.name, source: GOOGLE_LOGIN_SOURCE }))];
   if (roots.length === 0 && current.length === 0) return;
   config.drive = { ...(config.drive ?? {}), roots };
-  writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  writeConfigFile(dir, config);
 }
 
 /** Take the Google sign-in away: its file, the folders it added, and (best effort) the permission at Google. */
@@ -425,10 +426,7 @@ export async function finishLogin(dir: string): Promise<{ service: LoginService;
     roots: done.roots.map((r) => r.id),
   };
   mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
-  const tmp = `${googleLoginPath()}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, googleLoginPath());
+  writeFileAtomic(googleLoginPath(), `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
   writeRoots(dir, new Set(previous?.roots ?? []), done.roots);
   updateEnvFile(join(dir, '.env'), { GOOGLE_APPLICATION_CREDENTIALS: googleLoginPath() });
   return { service: 'google', label: 'Google Drive', found: `${done.account}, reading ${done.roots.map((r) => r.name).join(', ')}` };

@@ -8,7 +8,7 @@
  * Scope comes from the config file: drive.roots (folders to search) and drive.excludeFolders.
  */
 import { definePlugin } from '../../plugin/define.js';
-import { isSet as has } from '../../core/env.js';
+import { intervalMinutes, isSet as has } from '../../core/env.js';
 import { indexAvailable } from './indexer.js';
 import { searchDriveTool } from './tools/search_drive.js';
 import { readDriveFileTool } from './tools/read_drive_file.js';
@@ -52,7 +52,7 @@ export const drivePlugin = definePlugin({
     } catch (e) {
       log('ensureCollection failed (sync keeps trying):', e);
     }
-    startDriveSyncScheduler(parseInt(process.env.DRIVE_SYNC_INTERVAL_MIN || '30', 10));
+    startDriveSyncScheduler(intervalMinutes('DRIVE_SYNC_INTERVAL_MIN', 30, log));
   },
   async catchUp({ log }) {
     // A stdio session has no scheduler, so without this a local-only setup would never get an index or see new

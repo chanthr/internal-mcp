@@ -8,7 +8,7 @@
  *
  * All prompts go through `SetupIO`, so tests drive the whole flow with scripted answers and fake services.
  */
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -29,6 +29,7 @@ import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trus
 import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
 import { cli, shellQuote } from '../core/invocation.js';
+import { writeFileAtomic } from '../core/data_file.js';
 
 export interface SetupIO {
   /** Print a line. */
@@ -553,7 +554,7 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   const envWritten = Object.keys(env).length ? updateEnvFile(envPath, env) : [];
   if (envWritten.length) io.say(`Saved ${envWritten.length} value${envWritten.length === 1 ? '' : 's'} to ${envPath} (${envWritten.join(', ')}).`);
   if (configChanged) {
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    writeFileAtomic(configPath, `${JSON.stringify(config, null, 2)}\n`);
     io.say(`Saved ${configPath}.`);
   }
   if (!envWritten.length && !configChanged) io.say('Nothing to save.');

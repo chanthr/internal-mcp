@@ -18,8 +18,7 @@ import { compare, measure } from './measure.js';
 import { EFFORTS, type Effort } from './agent_search.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 import { afterFolderPass, foldersConfigured, localFolders, scanFolders, scanFoldersSoon, startFolderScans } from './folders.js';
-import { ocrIsLocal } from '../drive/ocr.js';
-import { ocrRun, ocrWaiting, startOcrRun } from './ocr_run.js';
+import { startAutoOcrRun } from './ocr_run.js';
 import { searchKnowledgeTool } from './tools/search_knowledge.js';
 import { readDocumentTool } from './tools/read_document.js';
 import { linkedDocumentsTool } from './tools/linked_documents.js';
@@ -27,6 +26,7 @@ import { findDocumentsTool } from './tools/find_documents.js';
 import { saveNoteTool } from './tools/save_note.js';
 import { useSkillTool } from './tools/use_skill.js';
 import { cli } from '../../core/invocation.js';
+import { intervalMinutes } from '../../core/env.js';
 import { watchFolders } from './watch.js';
 import { settingsDir } from '../../core/config.js';
 import { repairWiki, wikiExists } from './wiki.js';
@@ -90,12 +90,10 @@ export const knowledgePlugin = definePlugin({
     // HTTP server: scan the folders now and then on a timer. KNOWLEDGE_SCAN_ENABLED=false turns it off.
     if (!(await shouldScan(state, log))) return;
     // Scans the OCR on this computer can read are read after each pass, when the person turned that on (console).
-    afterFolderPass(() => {
-      if (process.env.OCR_AUTO?.trim() === 'true' && ocrIsLocal() && ocrWaiting() > 0 && !ocrRun()?.running) startOcrRun();
-    });
+    afterFolderPass(() => void startAutoOcrRun());
     // Documents added or changed since "Keep the wiki up to date" was turned on (wiki_auto.ts).
     afterFolderPass(() => void maybeRunWiki(settingsDir(), log).catch((e) => log(`wiki: ${e instanceof Error ? e.message : e}`)));
-    startFolderScans(parseInt(process.env.KNOWLEDGE_SCAN_INTERVAL_MIN || '10', 10), log);
+    startFolderScans(intervalMinutes('KNOWLEDGE_SCAN_INTERVAL_MIN', 10, log), log);
     // A file saved, added or removed is read within seconds, not at the next timed pass (watch.ts).
     if (process.env.KNOWLEDGE_WATCH?.trim() !== 'false') {
       watchFolders(localFolders(), () => void scanFoldersSoon(log).catch((e) => log(`folders: scan failed: ${e instanceof Error ? e.message : e}`)), log);

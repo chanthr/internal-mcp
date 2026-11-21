@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
@@ -286,4 +286,29 @@ test('a sign-in without permission to use the plan is kept, but the plan is not 
   } finally {
     grantPlan = true;
   }
+});
+
+test('the data folder cannot be written when the browser comes back: the tab says so, and the server keeps running', { skip: process.getuid?.() === 0 ? 'root writes anywhere' : false }, async () => {
+  // A first sign-in: the client ID OpenAI issues is saved as soon as the browser is back.
+  writeFileSync(join(dir, 'data', 'chatgpt-account.json'), JSON.stringify({ hostId: 'urn:uuid:00000000-0000-4000-8000-000000000001' }));
+  const url = new URL((await api('POST', '/llm/chatgpt/sign-in')).json.url);
+  assert.equal(url.searchParams.get('client_id'), 'dynamic_agent_client');
+  const back = new URL(url.searchParams.get('redirect_uri')!);
+  back.searchParams.set('code', 'the-code');
+  back.searchParams.set('state', url.searchParams.get('state')!);
+  back.searchParams.set('client_id', 'oaiapp_123');
+  // A volume that became read-only: neither the folder nor the file in it may be written.
+  chmodSync(join(dir, 'data', 'chatgpt-account.json'), 0o400);
+  chmodSync(join(dir, 'data'), 0o500);
+  try {
+    // Before, the failed save was a rejection nobody caught: the tab got no answer, and the server stopped.
+    const r = await fetch(back, { signal: AbortSignal.timeout(5_000) });
+    assert.equal(r.status, 400);
+    assert.match(await r.text(), /Not signed in<\/h1><p>The sign-in could not be checked \(EACCES/);
+  } finally {
+    chmodSync(join(dir, 'data'), 0o700);
+    chmodSync(join(dir, 'data', 'chatgpt-account.json'), 0o600);
+  }
+  assert.equal((await fetch(`http://localhost:${server.port}/health`)).status, 200);
+  assert.match((await api('GET', '/llm/chatgpt')).json.error, /could not be checked/);
 });

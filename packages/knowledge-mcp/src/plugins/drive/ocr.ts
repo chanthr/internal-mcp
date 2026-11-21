@@ -84,36 +84,91 @@ function pageText(raw: string): string {
   return t.trim();
 }
 
+/**
+ * Why the OCR did not answer with a page, when that may not be the file's fault: not reached at all, too slow, an
+ * error of the server (5xx, or busy), or set up wrong (a key it does not take, a model it does not have). On a model
+ * of this computer the slow and the server error can still be the file's (a page that makes the model run on until
+ * the time is up, an image it cannot decode): ocr_run.ts tells the two apart by whether the OCR reads other pages.
+ */
+export type OcrUnavailable = 'unreachable' | 'slow' | 'server' | 'setup';
+const unavailable = (message: string, why: OcrUnavailable): Error => Object.assign(new Error(message), { ocrUnavailable: why });
+export const ocrUnavailable = (e: unknown): OcrUnavailable | null => (e as { ocrUnavailable?: OcrUnavailable } | null)?.ocrUnavailable ?? null;
+
+/**
+ * The most a model writes for one page: a dense page, a table of numbers, is several thousand tokens. Without a bound,
+ * a model that starts repeating itself on a page writes until the five minutes are up, every time the file is read.
+ * A page that reaches it is not taken as read (it was cut off): the file fails, as with any page that cannot be read.
+ */
+const PAGE_TOKENS = 16_384;
+/** Endpoints that refused max_tokens (some take max_completion_tokens only): asked without it from then on. */
+const unbounded = new Set<string>();
+/**
+ * A connection the server dropped after the request was sent: it may have stopped on this very image (a model that
+ * crashes on a file). Any other error of fetch (refused, no such host, a port fetch will not use) sent nothing.
+ */
+const DROPPED = new Set(['UND_ERR_SOCKET', 'UND_ERR_CLOSED', 'ECONNRESET', 'EPIPE']);
+
 /** One image to text through the model. */
 export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSettings, signal?: AbortSignal): Promise<string> {
-  const limit = AbortSignal.timeout(5 * 60_000);
-  let res: Response;
-  try {
-    res = await fetch(`${s.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(s.apiKey ? { Authorization: `Bearer ${s.apiKey}` } : {}) },
-      body: JSON.stringify({
-        model: s.model,
-        temperature: 0,
-        messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${mime};base64,${image.toString('base64')}` } }, { type: 'text', text: s.prompt }] }],
-      }),
-      signal: signal ? AbortSignal.any([signal, limit]) : limit,
-    });
-  } catch (e) {
-    if (signal?.aborted) throw e;
-    const cause = (e as { cause?: { code?: string } }).cause;
-    throw new Error(`${host(s.baseUrl)} could not be reached (${cause?.code ?? (e instanceof Error ? e.message : String(e))}).`);
+  const endpoint = `${s.baseUrl} ${s.model}`;
+  for (let bounded = !unbounded.has(endpoint); ; bounded = false) {
+    const limit = AbortSignal.timeout(5 * 60_000);
+    const stopped = (): boolean => !!signal?.aborted;
+    let res: Response;
+    let raw: string;
+    try {
+      res = await fetch(`${s.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(s.apiKey ? { Authorization: `Bearer ${s.apiKey}` } : {}) },
+        body: JSON.stringify({
+          model: s.model,
+          temperature: 0,
+          ...(bounded ? { max_tokens: PAGE_TOKENS } : {}),
+          messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${mime};base64,${image.toString('base64')}` } }, { type: 'text', text: s.prompt }] }],
+        }),
+        signal: signal ? AbortSignal.any([signal, limit]) : limit,
+      });
+    } catch (e) {
+      if (stopped()) throw e;
+      const cause = (e as { cause?: { code?: string } }).cause?.code;
+      const why = `${host(s.baseUrl)} could not be reached (${cause ?? (e instanceof Error ? e.message : String(e))}).`;
+      throw unavailable(why, limit.aborted ? 'slow' : cause && DROPPED.has(cause) ? 'server' : 'unreachable');
+    }
+    try {
+      raw = await res.text();
+    } catch (e) {
+      if (stopped()) throw e;
+      // The answer began and broke off: the server stopped, or the time was up while it was still writing.
+      throw unavailable(`${host(s.baseUrl)} stopped in the middle of its answer (${e instanceof Error ? e.message : String(e)}).`, limit.aborted ? 'slow' : 'server');
+    }
+    let body: { choices?: Array<{ message?: { content?: unknown }; finish_reason?: string | null }>; error?: { message?: string } | string } = {};
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      if (res.status === 200) throw unavailable(`${host(s.baseUrl)} answered with something that is not a whole answer.`, 'server');
+    }
+    if (res.status !== 200) {
+      const said = String((typeof body.error === 'string' ? body.error : body.error?.message) ?? '').slice(0, 200);
+      // Asked once more without the bound, and remembered: such a page is not the file's fault.
+      if (res.status === 400 && bounded && /max_tokens/i.test(said)) {
+        unbounded.add(endpoint);
+        continue;
+      }
+      if (res.status === 401 || res.status === 403) throw unavailable(`${host(s.baseUrl)} did not accept the key.`, 'setup');
+      if (res.status === 404) throw unavailable(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`, 'setup');
+      const why = `${host(s.baseUrl)} answered ${res.status}${said ? `: ${said}` : ''}`;
+      if (res.status === 408) throw unavailable(why, 'slow');
+      throw res.status >= 500 || res.status === 429 ? unavailable(why, 'server') : new Error(why);
+    }
+    const choice = body.choices?.[0];
+    const content = choice?.message?.content;
+    // Cut off at the bound (or the server's own), or no text at all (a model that thought until the bound): not
+    // the page. Kept as if it were, the file would never be read again.
+    if (choice?.finish_reason === 'length') throw new Error(`${s.model} stopped before the end of the page: it may repeat itself on it, or the page holds more than one answer can.`);
+    if (content == null) throw new Error(`${s.model} answered with no text for the page.`);
+    const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('') : '';
+    return pageText(text);
   }
-  const body = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: { content?: unknown } }>; error?: { message?: string } | string };
-  if (res.status !== 200) {
-    const said = String((typeof body.error === 'string' ? body.error : body.error?.message) ?? '').slice(0, 200);
-    if (res.status === 401 || res.status === 403) throw new Error(`${host(s.baseUrl)} did not accept the key.`);
-    if (res.status === 404) throw new Error(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`);
-    throw new Error(`${host(s.baseUrl)} answered ${res.status}${said ? `: ${said}` : ''}`);
-  }
-  const content = body.choices?.[0]?.message?.content;
-  const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('') : '';
-  return pageText(text);
 }
 
 /** The width pages are drawn at: enough for small print, small enough to send quickly. */
@@ -219,14 +274,14 @@ export function checkPdf(line: string): Buffer {
 }
 
 /** Is this OCR good to use? One drawn page is read; the line on it must come back. */
-export async function checkOcr(s: OcrSettings): Promise<{ seconds: number }> {
+export async function checkOcr(s: OcrSettings, signal?: AbortSignal): Promise<{ seconds: number }> {
   const started = Date.now();
   if (s.kind === 'mathpix') {
     // A Mathpix check would be billed: the keys are taken as they are, and the first scan tells.
     return { seconds: 0 };
   }
   const code = String(Math.floor(1000 + Math.random() * 9000));
-  const r = await ocrPdf(checkPdf(`Knowledge MCP check ${code}`), s, { maxPages: 1 });
+  const r = await ocrPdf(checkPdf(`Knowledge MCP check ${code}`), s, { maxPages: 1, signal });
   if (!r.text.includes(code)) {
     throw new Error(`${s.model} answered, but did not read the test page (it wrote: "${r.text.replace(/\s+/g, ' ').slice(0, 80)}"). Pick a model that reads images.`);
   }

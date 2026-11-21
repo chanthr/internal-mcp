@@ -513,7 +513,7 @@ export async function wikiListing(dir: string): Promise<{ docs: WikiDoc[]; unsur
     try {
       const listed = await listLocalFiles(folder);
       for (const file of listed.files) docs.push({ ...file, folder: folder.name });
-      if (listed.truncated) unsure.push(folder.name);
+      if (listed.truncated || listed.unlisted.length) unsure.push(folder.name);
     } catch {
       // A folder that cannot be read now is read another time.
       unsure.push(folder.name);
