@@ -190,6 +190,24 @@ const KEYWORD_COMMON_SHARE = 0.2;
 /** At most this many words of a question are searched for: the rarest. */
 const KEYWORD_MAX_TERMS = 16;
 
+/**
+ * How long a chunk the embedding endpoint refused is left out of missingVectors. Then it is tried again: an endpoint
+ * that refused it may have changed (another model behind the same name, a larger context, another address).
+ */
+const REFUSAL_RETRY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The pieces FTS5's tokenizer (unicode61) makes of a word from tokens.ts: it splits at anything but letters and
+ * digits, "_" included, and drops accents from Latin letters. "search_knowledge" is held as "search" and
+ * "knowledge", "café" as "cafe".
+ */
+function ftsPieces(term: string): string[] {
+  return term
+    .replace(/\p{Script=Latin}/gu, (c) => c.normalize('NFD').replace(/\p{M}/gu, ''))
+    .split(/[^\p{L}\p{N}\p{Co}]+/u)
+    .filter(Boolean);
+}
+
 const newColumn = (capacity: number): MetaColumn => ({ codes: new Int32Array(capacity), values: [undefined], plain: new Map(), json: new Map() });
 
 /**
@@ -220,9 +238,11 @@ export class LocalVectorClient {
   private memory = new Map<string, MemoryIndex>();
   private meta = new Map<string, MetaIndex>();
   private checked = new Set<string>();
+  /** Collections whose table has the vector_error column (canRefuse). */
+  private refusable = new Map<string, boolean>();
   private reads = new Map<string, Reads>();
   /** Words found in many passages, with how many: counting those is what costs (see keywordTerms). */
-  private commonTerms = new Map<string, { total: number; docs: Map<string, number>; count: StatementSync }>();
+  private commonTerms = new Map<string, { total: number; version: number; docs: Map<string, number>; count: StatementSync }>();
 
   constructor(private readonly db: DatabaseSync) {
     // Several processes can write here (the server, a manual `drive reindex`, stdio sessions). Without a timeout
@@ -247,19 +267,22 @@ export class LocalVectorClient {
     this.memory.delete(name);
     this.meta.delete(name);
     this.commonTerms.delete(name);
+    this.refusable.delete(name);
   }
 
   /**
    * After a write by this process: bring the memory copies up to date with it instead of reading everything again.
-   * A copy that misses a write by another process (data_version moved since it was read) is dropped instead, and
-   * read again when it is next needed. This connection's own writes do not move data_version.
+   * A copy that misses a write by another process (data_version moved since it was read) is left as it is: it is
+   * read again when it is next needed (load), into the same array when the vectors fit. This connection's own writes
+   * do not move data_version.
    */
   private applyWrite(name: string, ops: WriteOp[]): void {
+    // A chunk removed or rewritten may make a common word rarer: what was counted is counted again (termDocs).
+    if (ops.some((op) => op.kind === 'remove')) this.commonTerms.delete(name);
     if (!this.memory.has(name) && !this.meta.has(name)) return;
     const version = this.dataVersion();
     const vectors = this.memory.get(name);
-    if (vectors && vectors.dataVersion !== version) this.memory.delete(name);
-    else if (vectors) {
+    if (vectors && vectors.dataVersion === version) {
       for (const op of ops) {
         if (op.kind === 'remove') this.dropVector(vectors, op.rid);
         else if (op.vector) this.putVector(vectors, op.rid, op.id, op.vector);
@@ -268,8 +291,7 @@ export class LocalVectorClient {
       if (vectors.dead > 64 && vectors.dead * 2 > vectors.size) this.compact(vectors, vectors.matrix);
     }
     const meta = this.meta.get(name);
-    if (meta && meta.dataVersion !== version) this.meta.delete(name);
-    else if (meta) {
+    if (meta && meta.dataVersion === version) {
       for (const op of ops) {
         if (op.kind === 'remove') this.dropMeta(meta, op.rid);
         else if (op.kind === 'add') this.putMeta(meta, op.rid, op.payload);
@@ -400,7 +422,7 @@ export class LocalVectorClient {
 
   private createTables(name: string): void {
     const table = tableOf(name);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB)`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB, vector_error TEXT)`);
     // An earlier layout required a vector on every row. Chunks may now be stored before they have one.
     const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number }>;
     if (cols.some((c) => c.name === 'vector' && c.notnull === 1)) {
@@ -420,18 +442,43 @@ export class LocalVectorClient {
     // The chunks that still wait for a vector, and nothing else. Finding the next batch to embed, and counting how
     // many are left, read this small index instead of walking the whole table past every chunk that is done.
     this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_novec ON ${table} (file_id) WHERE vector IS NULL`);
-    // Why a chunk has no vector when the embedding endpoint refused it (too long for the model, say). Such a chunk
-    // is not asked for again until its text changes or the model does: one refused chunk at the head of the queue
-    // used to stop every other chunk from getting a vector. Added later, so an older file gets the column here.
-    if (!cols.some((c) => c.name === 'vector_error')) {
-      try {
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN vector_error TEXT`);
-      } catch {
-        /* another process added it first */
-      }
-    }
-    this.db.exec(`CREATE INDEX IF NOT EXISTS ${table}_refused ON ${table} (file_id) WHERE vector_error IS NOT NULL`);
     this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${ftsOf(name)} USING fts5(tokens, content='', contentless_delete=1)`);
+    this.refusable.delete(name);
+    this.canRefuse(name);
+  }
+
+  /**
+   * Whether the table can set aside chunks the embedding endpoint refused (the vector_error column: why a chunk has
+   * no vector). A file from an older version gets the column on first use. When that cannot be done now (the file is
+   * read-only, or another process is writing), everything works as it did without it, and it is tried again on a
+   * later call.
+   */
+  private canRefuse(name: string): boolean {
+    if (this.refusable.get(name)) return true;
+    const table = tableOf(name);
+    const has = () => (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === 'vector_error');
+    if (!has()) this.tryChange(`ALTER TABLE ${table} ADD COLUMN vector_error TEXT`);
+    const ok = has();
+    // Counting the refused chunks reads this small index. Without it the count reads the table, which still works.
+    if (ok) this.tryChange(`CREATE INDEX IF NOT EXISTS ${table}_refused ON ${table} (file_id) WHERE vector_error IS NOT NULL`);
+    this.refusable.set(name, ok);
+    return ok;
+  }
+
+  /**
+   * A change to the file's layout that waits for nobody: it gives up at once when the file is read-only or another
+   * process is writing. (With the usual ten-second wait, the first search of a new version waited that long behind
+   * an older server's reindex, and then failed.)
+   */
+  private tryChange(sql: string): void {
+    this.db.exec('PRAGMA busy_timeout = 0');
+    try {
+      this.db.exec(sql);
+    } catch {
+      /* read-only or busy: tried again later */
+    } finally {
+      this.db.exec('PRAGMA busy_timeout = 10000');
+    }
   }
 
   /** Rebuild the keyword index when it does not cover exactly the chunks in the table. */
@@ -592,7 +639,8 @@ export class LocalVectorClient {
     const oneFile = clauses.length === 1 && clauses[0].key === 'file_id' && typeof clauses[0].value === 'string';
     // When only a few fields are asked for and nothing is filtered, the database picks them out: the chunk text is
     // most of every row, and reading it into the server only to drop it made paging through an index slow.
-    const keys = Array.isArray(body.with_payload) && !body.filter && body.with_payload.every((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) ? body.with_payload : null;
+    // The same for one document: the database filters it by its file_id column, so the payload is not needed for that.
+    const keys = Array.isArray(body.with_payload) && (!body.filter || oneFile) && body.with_payload.every((k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) ? body.with_payload : null;
     const column = keys ? `json_object(${keys.map((k) => `'${k}', json_extract(payload, '$.${k}')`).join(', ')}) AS payload` : 'payload';
     const rows = (
       oneFile
@@ -602,7 +650,7 @@ export class LocalVectorClient {
     const points: QdrantPoint[] = [];
     for (const r of rows) {
       const payload = JSON.parse(r.payload) as Payload | null;
-      if (!matchesFilter(payload, clauses)) continue;
+      if (!oneFile && !matchesFilter(payload, clauses)) continue;
       if (points.length === limit) return { points, next_page_offset: r.rid }; // the paging cursor is the row number, not a point id
       points.push({ id: Number(r.id), payload: pickPayload(payload, body.with_payload ?? true) });
     }
@@ -632,9 +680,12 @@ export class LocalVectorClient {
       let matrix: Float32Array;
       if (cached && cached.dim === dim && cached.capacity >= n) matrix = cached.matrix;
       else {
+        // Grown by another process: by half again at least, as for this process's own writes (makeRoom). Room for
+        // only a sixteenth more made a new array at nearly every batch while another process filled in vectors.
+        const capacity = Math.max(n + headroom(n), cached && cached.dim === dim ? Math.ceil(cached.capacity * GROWTH) : 0);
         this.memory.delete(name);
         cached = undefined;
-        matrix = this.allocate(dim, n + headroom(n), count);
+        matrix = this.allocate(dim, capacity, count);
       }
       const bytes = new Uint8Array(matrix.buffer, matrix.byteOffset, matrix.byteLength);
       const ids: string[] = new Array(n);
@@ -804,7 +855,18 @@ export class LocalVectorClient {
   ): Promise<ScoredPoint[]> {
     this.requireDim(name);
     const clauses = mustClauses(body.filter);
-    const match = matchExpression(this.keywordTerms(name, body.query));
+    const all = queryTerms(body.query);
+    // A filtered search looks for every word: which words are rare among the passages the filter lets through is
+    // not known, and the one rare in the whole index may not be among them at all.
+    const terms = clauses.length ? all : this.keywordTerms(name, body.query);
+    const found = this.rankByWords(name, terms, clauses, body);
+    // Fewer found than asked for: the words left out could find more, so the whole question is searched, as before.
+    if (terms.length < all.length && found.length < body.limit) return this.rankByWords(name, all, clauses, body);
+    return found;
+  }
+
+  private rankByWords(name: string, terms: string[], clauses: Clause[], body: { limit: number; with_payload?: boolean | string[] }): ScoredPoint[] {
+    const match = matchExpression(terms);
     if (!match) return [];
     const table = tableOf(name);
     const fts = ftsOf(name);
@@ -829,11 +891,12 @@ export class LocalVectorClient {
   }
 
   /**
-   * The words keyword search looks for in a question. In a small index, all of them. In a large one a word found in
-   * more than a fifth of the passages is dropped while rarer words remain, and the rarest KEYWORD_MAX_TERMS are
-   * kept. A common word matches nearly every passage, and BM25 then ranks each one: a long Korean question (every
+   * The words an unfiltered keyword search looks for first. In a small index, all of them. In a large one a word
+   * found in more than a fifth of the passages is dropped while rarer words remain, and the rarest KEYWORD_MAX_TERMS
+   * are kept. A common word matches nearly every passage, and BM25 then ranks each one: a long Korean question (every
    * pair of characters is a word) took 400 ms at 70,000 passages and blocked the server meanwhile. It adds little to
-   * the ranking, which weighs a word by how rare it is.
+   * the ranking, which weighs a word by how rare it is. A word the index does not hold is kept (it costs nothing to
+   * look for), and when the words kept find fewer passages than asked for, keywordSearch looks for all of them.
    */
   keywordTerms(name: string, question: string): string[] {
     const terms = queryTerms(question);
@@ -841,33 +904,54 @@ export class LocalVectorClient {
     const total = Number((this.db.prepare(`SELECT count(*) AS n FROM ${tableOf(name)}`).get() as { n: number }).n);
     if (total < KEYWORD_TRIM_FROM) return terms;
     const common = total * KEYWORD_COMMON_SHARE;
-    const found = terms.map((term, at) => ({ term, at, docs: this.termDocs(name, term, total, common) })).filter((t) => t.docs > 0);
-    if (found.length === 0) return terms; // nothing matches either way
-    const rare = found.filter((t) => t.docs <= common);
-    const kept = (rare.length ? rare : found).sort((a, b) => a.docs - b.docs || a.at - b.at).slice(0, KEYWORD_MAX_TERMS);
+    const counted: Array<{ term: string; at: number; docs: number }> = [];
+    for (const [at, term] of terms.entries()) {
+      const docs = this.termDocs(name, term, total, common);
+      if (docs === null) return terms; // the word list cannot be read here: nothing is dropped
+      counted.push({ term, at, docs });
+    }
+    const unknown = counted.filter((t) => t.docs === 0);
+    const known = counted.filter((t) => t.docs > 0);
+    const rare = known.filter((t) => t.docs <= common);
+    const kept = [...unknown, ...(rare.length ? rare : known).sort((a, b) => a.docs - b.docs || a.at - b.at).slice(0, KEYWORD_MAX_TERMS)];
     return kept.sort((a, b) => a.at - b.at).map((t) => t.term);
   }
 
-  /** How many passages hold a word, from the keyword index's own word list (fts5vocab, made for this connection). */
-  private termDocs(name: string, term: string, total: number, common: number): number {
+  /**
+   * How many passages hold a word, from the keyword index's own word list (fts5vocab, made for this connection).
+   * The index splits a word as FTS5's tokenizer does (ftsPieces), so a word of several pieces is counted by its rarest
+   * piece: no passage can hold it more often. Null when the word list cannot be made (a read-only connection).
+   */
+  private termDocs(name: string, term: string, total: number, common: number): number | null {
     let known = this.commonTerms.get(name);
-    // What was remembered is dropped once the index has grown or shrunk by a tenth.
-    if (!known || Math.abs(known.total - total) * 10 > total) {
-      this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS temp.${vocabOf(name)} USING fts5vocab(main, ${ftsOf(name)}, 'row')`);
-      known = { total, docs: new Map(), count: this.db.prepare(`SELECT doc FROM temp.${vocabOf(name)} WHERE term = ?`) };
+    // What was remembered is dropped when another process wrote (data_version), and once the index has grown or
+    // shrunk by a tenth. This process's removals drop it too (applyWrite).
+    const version = this.dataVersion();
+    if (!known || known.version !== version || Math.abs(known.total - total) * 10 > total) {
+      try {
+        this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS temp.${vocabOf(name)} USING fts5vocab(main, ${ftsOf(name)}, 'row')`);
+        known = { total, version, docs: new Map(), count: this.db.prepare(`SELECT doc FROM temp.${vocabOf(name)} WHERE term = ?`) };
+      } catch {
+        return null;
+      }
       this.commonTerms.set(name, known);
     }
-    const remembered = known.docs.get(term);
-    if (remembered !== undefined) return remembered;
-    const docs = Number((known.count.get(term) as { doc: number } | undefined)?.doc ?? 0);
-    // Counting a common word reads its whole list of passages (about a millisecond at 70,000), so those are
-    // remembered: a common word stays common while a few documents change. A rarer word is counted every time, which
-    // is quick, so a word that a new document brings is never taken for absent.
-    if (docs > common) {
-      if (known.docs.size >= 10_000) known.docs.clear();
-      known.docs.set(term, docs);
+    let fewest = Infinity;
+    for (const piece of ftsPieces(term)) {
+      let docs = known.docs.get(piece);
+      if (docs === undefined) {
+        docs = Number((known.count.get(piece) as { doc: number } | undefined)?.doc ?? 0);
+        // Counting a common word reads its whole list of passages (about a millisecond at 70,000), so those are
+        // remembered: a common word stays common while a few documents are added. A rarer word is counted every
+        // time, which is quick, so a word that a new document brings is never taken for absent.
+        if (docs > common) {
+          if (known.docs.size >= 10_000) known.docs.clear();
+          known.docs.set(piece, docs);
+        }
+      }
+      fewest = Math.min(fewest, docs);
     }
-    return docs;
+    return fewest === Infinity ? 0 : fewest;
   }
 
   /** How many chunks there are, and how many of them still wait for a vector. Both read an index, not the table. */
@@ -1006,7 +1090,7 @@ export class LocalVectorClient {
     this.requireDim(name);
     const r = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = NULL WHERE vector IS NOT NULL`).run();
     // The next model gets a try at the chunks this one refused.
-    this.db.prepare(`UPDATE ${tableOf(name)} SET vector_error = NULL WHERE vector_error IS NOT NULL`).run();
+    if (this.canRefuse(name)) this.db.prepare(`UPDATE ${tableOf(name)} SET vector_error = NULL WHERE vector_error IS NOT NULL`).run();
     this.db.prepare('UPDATE vec_collections SET dim = ?, model = NULL, passage_form = NULL WHERE name = ?').run(dim, name);
     this.memory.delete(name); // no vector left, and maybe another size; the metadata is unchanged
     return Number(r.changes);
@@ -1014,22 +1098,28 @@ export class LocalVectorClient {
 
   /**
    * Chunks stored without a vector (indexed before an embedding model was configured), except those the endpoint
-   * refused (refuseVectors).
+   * refused in the last REFUSAL_RETRY_MS (refuseVectors).
    */
   async missingVectors(name: string, limit: number): Promise<Array<{ id: number; payload: Payload | null }>> {
     this.requireDim(name);
     // Through the index of chunks without a vector: the cost is the batch, however many chunks are already done.
-    const rows = this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL AND vector_error IS NULL LIMIT ?`).all(limit) as Array<{
-      id: string;
-      payload: string;
-    }>;
+    // A refusal starts with when it was made (refuseVectors), so an older one compares as smaller than the cutoff.
+    const refusable = this.canRefuse(name);
+    const rows = (
+      refusable
+        ? this.db
+            .prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL AND (vector_error IS NULL OR vector_error < ?) LIMIT ?`)
+            .all(new Date(Date.now() - REFUSAL_RETRY_MS).toISOString(), limit)
+        : this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL LIMIT ?`).all(limit)
+    ) as Array<{ id: string; payload: string }>;
     return rows.map((r) => ({ id: Number(r.id), payload: JSON.parse(r.payload) as Payload | null }));
   }
 
   /** Add vectors to chunks that are already stored. The chunk text and the keyword index are untouched. */
   async setVectors(name: string, vectors: Array<{ id: PointId; vector: number[] }>): Promise<void> {
     const dim = this.requireDim(name);
-    const stmt = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = ?, vector_error = NULL WHERE id = ? RETURNING rowid AS rid`);
+    const clear = this.canRefuse(name) ? ', vector_error = NULL' : '';
+    const stmt = this.db.prepare(`UPDATE ${tableOf(name)} SET vector = ?${clear} WHERE id = ? RETURNING rowid AS rid`);
     const ops: WriteOp[] = [];
     this.db.exec('BEGIN');
     try {
@@ -1049,27 +1139,32 @@ export class LocalVectorClient {
   }
 
   /**
-   * Set aside chunks the embedding endpoint refused (too long for the model, say), with the reason. missingVectors
-   * no longer offers them, so they do not hold up the others; they stay searchable by keywords. A new text for the
-   * chunk (its document changed) or a new model (clearVectors) gives them another try.
+   * Set aside chunks the embedding endpoint refused (too long for the model, say), with when and why. missingVectors
+   * does not offer them for REFUSAL_RETRY_MS, so they do not hold up the others; they stay searchable by keywords.
+   * A new text for the chunk (its document changed), a new model (clearVectors), or the end of that time gives them
+   * another try. Returns false when the file cannot hold the mark now (canRefuse): they are then offered again.
    */
-  async refuseVectors(name: string, refused: Array<{ id: PointId; reason: string }>): Promise<void> {
+  async refuseVectors(name: string, refused: Array<{ id: PointId; reason: string }>): Promise<boolean> {
     this.requireDim(name);
+    if (!this.canRefuse(name)) return false;
     const stmt = this.db.prepare(`UPDATE ${tableOf(name)} SET vector_error = ? WHERE id = ? AND vector IS NULL`);
+    const when = new Date().toISOString();
     this.db.exec('BEGIN');
     try {
-      for (const r of refused) stmt.run(r.reason.slice(0, 500) || 'refused', String(r.id));
+      for (const r of refused) stmt.run(`${when} ${r.reason || 'refused'}`.slice(0, 500), String(r.id));
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
     }
+    return true;
   }
 
   /** How many chunks have no vector because the embedding endpoint refused them (refuseVectors). */
   async refusedVectors(name: string): Promise<number> {
     if (this.dimOf(name) === undefined) return 0;
     this.requireDim(name);
+    if (!this.canRefuse(name)) return 0;
     return Number((this.db.prepare(`SELECT count(*) AS n FROM ${tableOf(name)} WHERE vector_error IS NOT NULL`).get() as { n: number }).n);
   }
 

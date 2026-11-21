@@ -366,7 +366,9 @@ test('a long question in a large index is searched by its rarer words, at most 1
   const question = `${common} 그리고 두루미 서식지 보호 quokka zebra 관찰 기록에 대해 ${Array.from({ length: 40 }, (_, i) => `code${i * 97}`).join(' ')}`;
   const terms = local.keywordTerms(W, question);
   assert.ok(queryTerms(question).length > 50);
-  assert.ok(terms.length <= 16, String(terms));
+  // At most 16 of the words the index holds. The four it holds nowhere are kept: looking for them costs nothing.
+  const absent = ['그리', '리고', '록에', '대해'];
+  assert.ok(absent.every((t) => terms.includes(t)) && terms.filter((t) => !absent.includes(t)).length <= 16, String(terms));
   assert.ok(!terms.some((t) => tokenize(common).includes(t)), `words in every passage are dropped: ${terms}`);
   assert.ok(['두루', '루미', 'quokka', 'zebra'].every((t) => terms.includes(t)), String(terms));
   assert.equal((await local.keywordSearch(W, { query: question, limit: 5 }))[0].id, 9000);
@@ -400,4 +402,129 @@ test('a keyword index out of step is rebuilt from the chunks, one chunk at a tim
   assert.deepEqual((await rebuilt.keywordSearch(R, { query: 'rebuild', limit: 5 })).map((h) => h.id), [1]);
   await rebuilt.delete(R, { filter: { must: [{ key: 'content', match: { value: 'another passage' } }] } }); // a filter other than file_id walks the chunks too
   assert.deepEqual((await rebuilt.stats(R)).chunks, 1);
+});
+
+test('trimming a question never loses what the whole question finds: filters, short results, identifiers, accents', async () => {
+  const T = 'unit_trim';
+  await client.createCollection(T, { vectors: { size: 4 } });
+  const points = [];
+  for (let i = 0; i < 6000; i++) {
+    let content = `guide filler${i % 700}`; // "guide" in every passage
+    if (i % 4 === 0) content += ' 휴가 규정'; // a quarter of them
+    if (i === 3000 || i === 3001) content += ' 출산 장려'; // rare, and only outside "hr"
+    if (i < 3) content += ' search_knowledge tool';
+    if (i >= 3 && i < 6) content += ' café menu';
+    points.push({ id: i + 1, payload: { file_id: `f${i % 50}`, source: i < 200 ? 'hr' : 'eng', content } });
+  }
+  for (let i = 0; i < points.length; i += 1000) await client.upsert(T, { points: points.slice(i, i + 1000) });
+
+  // The word rare in the whole index is not among the passages the filter lets through: every word is looked for.
+  const hr = await local.keywordSearch(T, { query: '출산 휴가 규정', limit: 5, filter: { must: [{ key: 'source', match: { value: 'hr' } }] } });
+  assert.equal(hr.length, 5);
+  assert.ok(hr.every((h) => h.payload?.source === 'hr' && String(h.payload?.content).includes('휴가')), JSON.stringify(hr.map((h) => h.id)));
+  // Unfiltered, the rare word finds two passages of the five asked for: the whole question fills the rest.
+  assert.deepEqual(local.keywordTerms(T, '출산 휴가 규정'), ['출산']);
+  const all = (await local.keywordSearch(T, { query: '출산 휴가 규정', limit: 5 })).map((h) => h.id);
+  assert.deepEqual([all.length, all[0], all.includes(3002)], [5, 3001, true]);
+
+  // A word with "_" or an accent is split and unaccented by the keyword index: counted by its pieces, and kept.
+  assert.deepEqual(local.keywordTerms(T, 'search_knowledge guide'), ['search_knowledge']);
+  assert.deepEqual(local.keywordTerms(T, 'café guide'), ['café']);
+  assert.deepEqual(new Set((await local.keywordSearch(T, { query: 'search_knowledge guide', limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([1, 2, 3]));
+  assert.deepEqual(new Set((await local.keywordSearch(T, { query: 'café guide', limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([4, 5, 6]));
+  // A word no passage holds is kept rather than leaving only the commonest one.
+  assert.deepEqual(local.keywordTerms(T, 'nowhere guide'), ['nowhere', 'guide']);
+});
+
+test('words counted as common are counted again after a write by another process or a removal here', async () => {
+  const V = 'unit_vocab';
+  await client.createCollection(V, { vectors: { size: 4 } });
+  const passage = (i: number, word: string) => ({ id: i + 1, payload: { file_id: i < 500 ? 'gone' : `f${i % 50}`, content: `${word} w${i % 900} rare${i}` } });
+  const points = Array.from({ length: 6000 }, (_, i) => passage(i, i < 1300 ? 'apple' : 'pear'));
+  for (let i = 0; i < points.length; i += 1000) await client.upsert(V, { points: points.slice(i, i + 1000) });
+  const terms = () => local.keywordTerms(V, 'apple rare1200');
+  assert.deepEqual(terms(), ['rare1200']); // apple in 1,300 of 6,000 passages: common, and remembered as such
+
+  // Another process removes 500 apple passages: 800 of 5,500 is no longer common.
+  const other = freshClient();
+  await other.delete(V, { filter: { must: [{ key: 'file_id', match: { value: 'gone' } }] } });
+  assert.deepEqual(terms(), ['apple', 'rare1200']);
+  assert.deepEqual(terms(), other.keywordTerms(V, 'apple rare1200'));
+
+  // It writes apple into 1,200 more (common again); then this process rewrites 1,000 of them without it.
+  await other.upsert(V, { points: Array.from({ length: 1200 }, (_, j) => passage(1300 + j, 'apple')) });
+  assert.deepEqual(terms(), ['rare1200']);
+  await client.upsert(V, { points: Array.from({ length: 1000 }, (_, j) => passage(1300 + j, 'pear')) });
+  assert.deepEqual(terms(), ['apple', 'rare1200']);
+  assert.deepEqual(terms(), freshClient().keywordTerms(V, 'apple rare1200'));
+});
+
+test('vectors another process fills in are read again into room that grows by half, not by a sixteenth', async () => {
+  const X = 'unit_fill';
+  await client.createCollection(X, { vectors: { size: 8 } });
+  for (let i = 0; i < 3000; i += 1000) {
+    await client.upsert(X, { points: Array.from({ length: 1000 }, (_, j) => ({ id: i + j + 1, payload: { file_id: `f${(i + j) % 40}`, content: `p ${i + j}` } })) });
+  }
+  const q = [1, 2, 3, 4, 5, 6, 7, 8];
+  await client.search(X, { vector: q, limit: 3 });
+  // Another process makes vectors 128 at a time (a backfill, `knowledge reembed`); this one searches after each batch.
+  const other = freshClient();
+  let rounds = 0;
+  for (;;) {
+    const missing = await other.missingVectors(X, 128);
+    if (missing.length === 0) break;
+    await other.setVectors(X, missing.map((m) => ({ id: m.id, vector: [m.id % 7, 1, m.id % 3, 0, 1, 0, m.id % 5, 1] })));
+    await client.search(X, { vector: q, limit: 3 });
+    rounds++;
+  }
+  const use = local.memoryUse(X);
+  assert.deepEqual([rounds, use.loads, use.vectors], [24, 25, 3000]);
+  // 64, then 192, 320, 480, 720, 1,080, 1,620, 2,430 and 3,645: nine arrays. Room for a sixteenth more made 24.
+  assert.ok(use.allocations <= 9, JSON.stringify(use));
+  assert.deepEqual(await client.search(X, { vector: q, limit: 3000 }), await freshClient().search(X, { vector: q, limit: 3000 }));
+});
+
+test('a file from before the vector_error column works read-only and while another process writes', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'kmcp-oldfile-')), 'vectors.db');
+  const raw = new DatabaseSync(path);
+  raw.exec(`PRAGMA journal_mode = WAL;
+    CREATE TABLE vec_collections (name TEXT PRIMARY KEY, dim INTEGER NOT NULL, model TEXT, passage_form TEXT);
+    INSERT INTO vec_collections VALUES ('old', 4, NULL, NULL);
+    CREATE TABLE vec_old (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB);
+    CREATE INDEX vec_old_file ON vec_old (file_id);
+    CREATE INDEX vec_old_novec ON vec_old (file_id) WHERE vector IS NULL;
+    CREATE VIRTUAL TABLE fts_old USING fts5(tokens, content='', contentless_delete=1);`);
+  const row = raw.prepare('INSERT INTO vec_old (rowid, id, file_id, payload, vector) VALUES (?, ?, ?, ?, ?)');
+  row.run(1, '1', 'a', JSON.stringify({ file_id: 'a', content: 'hello world' }), new Uint8Array(new Float32Array([1, 0, 0, 0]).buffer));
+  row.run(2, '2', 'b', JSON.stringify({ file_id: 'b', content: 'second passage' }), null);
+  raw.exec("INSERT INTO fts_old (rowid, tokens) VALUES (1, 'hello world'), (2, 'second passage'); PRAGMA wal_checkpoint(TRUNCATE)");
+  raw.close();
+
+  // Read-only: the column cannot be added, and everything works as it did without it.
+  const ro = new LocalVectorClient(new DatabaseSync(path, { readOnly: true }));
+  assert.deepEqual((await ro.keywordSearch('old', { query: 'hello', limit: 3 })).map((h) => h.id), [1]);
+  assert.deepEqual((await ro.search('old', { vector: [1, 0, 0, 0], limit: 3 })).map((h) => h.id), [1]);
+  assert.deepEqual((await ro.missingVectors('old', 5)).map((m) => m.id), [2]);
+  assert.deepEqual([await ro.refusedVectors('old'), await ro.refuseVectors('old', [{ id: 2, reason: 'too long' }])], [0, false]);
+
+  // Another process holds a write while this one is first used: it does not wait, and the column comes later.
+  const holder = new DatabaseSync(path);
+  holder.exec('BEGIN IMMEDIATE');
+  const rw = new LocalVectorClient(new DatabaseSync(path));
+  try {
+    assert.deepEqual((await rw.keywordSearch('old', { query: 'hello', limit: 3 })).map((h) => h.id), [1]);
+    assert.deepEqual((await rw.missingVectors('old', 5)).map((m) => m.id), [2]);
+  } finally {
+    holder.exec('COMMIT');
+    holder.close();
+  }
+  assert.equal(await rw.refuseVectors('old', [{ id: 2, reason: 'too long' }]), true);
+  assert.deepEqual([await rw.refusedVectors('old'), (await rw.missingVectors('old', 5)).length], [1, 0]);
+
+  // A refusal is kept with when it was made, and tried again a day later.
+  const check = new DatabaseSync(path);
+  assert.match(String((check.prepare("SELECT vector_error FROM vec_old WHERE id = '2'").get() as { vector_error: string }).vector_error), /^\d{4}-\d\d-\d\dT[\d:.]+Z too long$/);
+  check.exec("UPDATE vec_old SET vector_error = '2000-01-01T00:00:00.000Z too long' WHERE id = '2'");
+  check.close();
+  assert.deepEqual((await rw.missingVectors('old', 5)).map((m) => m.id), [2]);
 });

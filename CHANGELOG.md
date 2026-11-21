@@ -268,26 +268,36 @@ Changes that affect people who run or extend the server. Dates are release dates
   not reused, so each "add a document, then search" added the size of the index: 10,000 passages of 1,024
   dimensions went from 147 MB to 808 MB in 20 rounds, and filling in vectors for 70,000 passages reached 9 GB.
   Writes are now applied to the copy in memory, which grows by half when it is full and is read again only after
-  another process writes. The same 20 rounds now add 2 MB, and the search after a change takes 6 ms instead
-  of 39 ms.
+  another process writes, into the same array while the vectors fit and otherwise into one half as large again.
+  The same 20 rounds now add 2 MB, and the search after a change takes 6 ms instead of 39 ms. While another
+  process filled in vectors for 40,000 passages of 768 dimensions, a search after each batch now peaks at 515 MB.
 - **A filtered search keeps a few megabytes of metadata, not every passage's.** It held each passage's whole
   metadata (86 MB more for 72,856 passages) and read it again after any change (348 ms). It now keeps only the
   fields filters look at, each value once: 5 MB, kept up to date by writes, so the search after a change takes
   20 ms. Results are the same.
 - **A long question no longer holds up the server.** In a Korean question every pair of characters is a word,
   and words found in nearly every passage made the keyword index rank all of them: 361 ms for 110 characters at
-  72,856 passages, during which nothing else ran. In an index of 5,000 passages or more, words found in more than
-  a fifth of the passages are now left out while rarer ones remain, and at most the 16 rarest are searched for:
-  12 ms, and the passage the question was written from still comes first.
+  72,856 passages, during which nothing else ran. In an index of 5,000 passages or more, an unfiltered search now
+  looks first for the rarer words only: words found in more than a fifth of the passages are left out while rarer
+  ones remain, and at most the 16 rarest are kept. That takes 12 ms, and the passage the question was written from
+  still comes first. When those words find fewer passages than asked for, and in every filtered search, all the
+  words are looked for, as before. A word is counted the way the keyword index splits it, so `search_knowledge` and
+  `café` are kept, and a word the index does not hold is never dropped. The counts follow removals and other
+  processes' writes.
 - **Rebuilding the keyword index reads one passage at a time.** It read every passage's text into memory first.
 - **A long document is embedded and stored a batch at a time.** All of its vectors were held until the end: a
   5-million-character document took 100 MB more, and a file at the 50 MB limit could take over a gigabyte. The
-  batch that marks the document as indexed is stored last, so a run that fails half way is tried again.
+  batch that marks the document as indexed is stored last, so a run that fails half way is tried again. What the
+  failed run stored past the earlier version's passages is deleted at once, and after a run that succeeds every
+  stored passage past the new count is deleted, so no failed run leaves passages behind.
 - **A passage the embedding model refuses no longer stops every other from getting a vector.** llama.cpp and
   LM Studio answer "input is too large" for a passage longer than the model takes; the same batch was then asked
   for again and again, and no passage got a vector. The refused passages are now found, set aside and searched by
-  keywords only, and the console and `doctor` say how many there are. Changing the model gives them another try.
-  An endpoint that refuses everything (no model loaded) is told apart by a short probe and is not mistaken for this.
+  keywords only, and the console and `doctor` say how many there are. Changing the model, or a day passing, gives
+  them another try. An endpoint that refuses everything (no model loaded) is told apart by a short probe, asked
+  again whenever a round gets nothing through and once more at the end, and is not mistaken for this: nothing is
+  set aside. An index file from an older version works as before when the new column cannot be added yet (the
+  file is read-only, or another process is writing).
 - **The embedding timeout covers the whole answer.** It covered only the headers: an endpoint that sent them and
   then stalled held a search for five minutes, and a request that timed out kept running while the retry sent it
   again. The request is now cancelled at the deadline.

@@ -390,13 +390,16 @@ export async function runReindex(argv: string[]): Promise<void> {
         filter: { must: [{ key: 'file_id', match: { value: file.id } }] },
       });
       // Embedded and stored a batch at a time (storeChunks); the payload is built by buildChunkPayload, shared with indexer.ts.
-      await storeChunks(
-        qdrant,
+      // Nothing of the file is left from before (deleted above), so a failure removes all this run wrote.
+      await storeChunks(qdrant, {
+        fileId: file.id,
         chunks,
-        (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
-        form ? (c) => embedInputForChunk(c, file.name, form) : null,
-        false,
-      );
+        pointOf: (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
+        embedInput: form ? (c) => embedInputForChunk(c, file.name, form) : null,
+        wait: false,
+        stored: 0,
+        sweep: false,
+      });
       if (form) await noteVectorModel(form);
 
       done.set(file.id, file.modifiedTime); // record in the checkpoint (upsert succeeded)
