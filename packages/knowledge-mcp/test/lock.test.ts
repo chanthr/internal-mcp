@@ -8,7 +8,8 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -77,18 +78,20 @@ test('where the start of a process cannot be known (Windows, ps failed), a lock 
   }
 });
 
-test('a holder at work touches its lock; one that has had it for staleMs is taken over, as before', () => {
+test('a holder at work touches its lock; once it has had it for staleMs, the lock reads as taken then, as before', () => {
   mock.timers.enable({ apis: ['setInterval', 'Date'], now: Date.now() });
   try {
+    const since = Date.now();
     assert.equal(acquireLock('reembed', 60 * 60_000), true);
     // As if the last touch were long ago: the next beat touches it again.
     const at = new Date(Date.now() - 10 * 60_000);
     utimesSync(lockFile('reembed'), at, at);
     mock.timers.tick(30_000);
     assert.ok(Date.now() - statSync(lockFile('reembed')).mtimeMs < 5_000, 'touched');
-    // An hour on, the holder has not let go (it hangs): its lock reads as taken an hour ago, and is taken over.
+    // An hour on, the holder has not let go (it hangs): its lock's time is set back to when it was taken, an hour
+    // ago, and is taken over like any lock older than staleMs (above).
     mock.timers.tick(60 * 60_000);
-    assert.equal(acquireLock('reembed', 60 * 60_000), true);
+    assert.ok(Math.abs(statSync(lockFile('reembed')).mtimeMs - since) < 1_000, 'set back to when it was taken');
     // Released: it is not touched, or made again, any more.
     releaseLock('reembed');
     mock.timers.tick(60_000);
@@ -106,6 +109,80 @@ test('a lock being made (no process id in it yet) is held for a few seconds, the
   utimesSync(lockFile('making'), at, at);
   assert.equal(acquireLock('making'), true);
   releaseLock('making');
+});
+
+test('a lock whose text is not a process id (cut short by a power cut, or garbage) is taken over once it is old', () => {
+  for (const text of ['\0\0\0\0\0', 'abc', '']) {
+    writeFileSync(lockFile('job'), text);
+    const at = new Date(Date.now() - 3 * 3_600_000);
+    utimesSync(lockFile('job'), at, at);
+    assert.equal(acquireLock('job', 60_000), true, JSON.stringify(text));
+    releaseLock('job');
+  }
+});
+
+/** A process id that no process has. */
+function deadPid(): number {
+  for (let pid = 99_998; ; pid--) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+}
+
+test('a holder that lets go at the moment its lock is taken over: no error, and this process holds it', () => {
+  leftBehind('swap', deadPid(), 60_000);
+  // Its holder removes it between the last look and the removal.
+  const real = fs.unlinkSync;
+  const vanishing = mock.method(fs, 'unlinkSync', (path: fs.PathLike) => {
+    if (String(path) === lockFile('swap')) real(path);
+    return real(path);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.equal(acquireLock('swap'), true);
+  } finally {
+    vanishing.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.equal(readFileSync(lockFile('swap'), 'utf8'), String(process.pid));
+  releaseLock('swap');
+  assert.equal(existsSync(lockFile('swap')), false);
+});
+
+test('a lock that another process took over since is not let go of, or touched, by its old holder', () => {
+  assert.equal(acquireLock('replaced'), true);
+  // Another process took it over (a new file, its own id), as when this one was taken for gone.
+  writeFileSync(`${lockFile('replaced')}.new`, String(process.ppid));
+  fs.renameSync(`${lockFile('replaced')}.new`, lockFile('replaced'));
+  releaseLock('replaced');
+  assert.equal(readFileSync(lockFile('replaced'), 'utf8'), String(process.ppid));
+  rmSync(lockFile('replaced'));
+});
+
+test('a data folder on a share whose clock is behind: a lock made a moment ago, by a holder that just started, is held', async () => {
+  const holder = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(holder, 'spawn');
+  // The share stamps what is written there with its own clock, five seconds behind this machine's.
+  const behind = () => new Date(Date.now() - 5_000);
+  const realWrite = fs.writeFileSync;
+  const stamping = mock.method(fs, 'writeFileSync', (path: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    (realWrite as (...a: unknown[]) => void)(path, ...rest);
+    if (typeof path === 'string' && path.startsWith(process.env.MCP_DATA_DIR!)) utimesSync(path, behind(), behind());
+  });
+  syncBuiltinESMExports();
+  try {
+    writeFileSync(lockFile('shared'), String(holder.pid));
+    utimesSync(lockFile('shared'), behind(), behind());
+    assert.equal(acquireLock('shared'), false);
+  } finally {
+    stamping.mock.restore();
+    syncBuiltinESMExports();
+    holder.kill();
+    rmSync(lockFile('shared'), { force: true });
+  }
 });
 
 /**

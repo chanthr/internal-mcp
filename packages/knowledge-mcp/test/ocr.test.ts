@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -33,6 +33,11 @@ const seen: Array<{ model: string; prompt: string; image: string; maxTokens: num
 let reads: (n: number) => string = () => '';
 /** The status the model answers its n-th request with (counted from the start of the file), and the image it was sent. */
 let status: (n: number, image: Buffer) => number = () => 200;
+/**
+ * A whole answer of its own for a request, before `status` and `reads`: what to send, or 'drop' (the connection is
+ * dropped after the request, as by a server that stops), or 'cut' (half an answer, then the connection drops).
+ */
+let respond: (request: any, image: Buffer, res: ServerResponse) => unknown = () => undefined;
 const read = (req: IncomingMessage) =>
   new Promise<string>((resolve) => {
     let body = '';
@@ -44,7 +49,17 @@ const model = createServer(async (req: IncomingMessage, res: ServerResponse) => 
   const parts = body.messages[0].content;
   const url: string = parts.find((p: any) => p.type === 'image_url').image_url.url;
   seen.push({ model: body.model, prompt: parts.find((p: any) => p.type === 'text').text, image: url.slice(0, 22), maxTokens: body.max_tokens });
-  const code = status(seen.length, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
+  const image = Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
+  const own = await respond(body, image, res);
+  if (own === 'drop') return void req.socket.destroy();
+  if (own === 'cut') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.write('{"choices":[{"message":{"role":"assistant","content":"Invoice 2026-');
+    return void setTimeout(() => res.socket?.destroy(), 20);
+  }
+  if (own === 'sent') return;
+  if (own) return void res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(own));
+  const code = status(seen.length, image);
   if (code !== 200) return void res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'the page could not be read' } }));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ choices: [{ message: { content: reads(seen.length) } }] }));
@@ -68,7 +83,9 @@ const ollamaBase = `http://127.0.0.1:${(ollama.address() as AddressInfo).port}/v
 
 const { ocrSettings, ocrPrompt, checkOcr, checkPdf, ocrIsLocal, keptOcr } = await import('../src/plugins/drive/ocr.js');
 const { scanFolders } = await import('../src/plugins/knowledge/folders.js');
-const { startAutoOcrRun, startOcrRun, ocrRun, ocrWaiting } = await import('../src/plugins/knowledge/ocr_run.js');
+const { ocrRecheck, startAutoOcrRun, startOcrRun, stopOcrRun, ocrRun, ocrWaiting } = await import('../src/plugins/knowledge/ocr_run.js');
+// The OCR's test page is asked for again a moment after it failed: a moment, here.
+Object.assign(ocrRecheck ?? {}, { ms: 10 });
 const { DRIVE_COLLECTION, getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
 const { mimeForFileName } = await import('../src/plugins/drive/extract_text.js');
 const { consoleToken } = await import('../src/admin/auth.js');
@@ -266,15 +283,13 @@ test('scans the model refuses do not hold up the ones behind them, and are left 
   try {
     await scanFolders();
     assert.equal(ocrWaiting(), 4);
-    // The first run stops after three failures in a row; the next takes the one it can read first.
-    assert.equal(await autoPasses(1), 1);
-    assert.equal(ocrWaiting(), 4);
+    // Refusals say nothing about the next file: the first run goes on past them and reads the good one.
     assert.equal(await autoPasses(1), 1);
     assert.equal(ocrWaiting(), 3, 'the good one was read');
     // Three tries each, then they are left alone.
-    assert.equal(await autoPasses(4), 1);
+    assert.equal(await autoPasses(4), 2);
     assert.equal(seen.length - before, 10, 'three tries of three files, and the good one');
-    assert.equal(seen.at(-1)!.maxTokens, 4096, 'one page is asked for with a bound');
+    assert.equal(seen.at(-1)!.maxTokens, 16_384, 'one page is asked for with a bound');
   } finally {
     status = () => 200;
     delete process.env.OCR_AUTO;
@@ -330,7 +345,139 @@ test('a scan that the model on this computer fails on with a server error, while
   }
 });
 
-test('a model that is down stops the run after three failures, and says why', async () => {
+test('a page the model did not finish (cut off at the bound, or no text) is not taken as read', async () => {
+  useModel();
+  writeFileSync(join(docs, 'dense.png'), 'DENSE-page');
+  writeFileSync(join(docs, 'thought.png'), 'THINK-page');
+  // A page longer than one answer: cut off at max_tokens. A model that thought until the bound: no text at all.
+  respond = (request, image) => {
+    const kind = image.toString().split('-')[0];
+    if (kind === 'DENSE') return { choices: [{ message: { content: 'w0 w1 w2 (and on, to the bound)' }, finish_reason: 'length' }] };
+    if (kind === 'THINK') return { choices: [{ message: { content: null, reasoning: 'Let me look at the page…' }, finish_reason: 'stop' }] };
+    return undefined;
+  };
+  try {
+    await scanFolders();
+    startOcrRun();
+    await until(() => !ocrRun()?.running);
+    const run = ocrRun()!;
+    assert.deepEqual([run.read, run.empty, run.failed.length], [0, 0, 2]);
+    assert.match(run.failed.map((f) => f.why).join('\n'), /stopped before the end of the page[\s\S]*answered with no text/);
+    assert.equal(ocrWaiting(), 2, 'both still wait: nothing was kept for them');
+    for (const name of ['dense.png', 'thought.png']) assert.equal(keptOcr(join(docs, name), `${statSync(join(docs, name)).size}:${Math.round(statSync(join(docs, name)).mtimeMs)}`), null);
+  } finally {
+    respond = () => undefined;
+    for (const name of ['dense.png', 'thought.png']) rmSync(join(docs, name));
+    await scanFolders();
+  }
+});
+
+test('an endpoint that refuses max_tokens is asked again without it, and from then on', async () => {
+  // As OpenAI's reasoning models answer it on chat/completions: the 400 names the parameter.
+  process.env.OCR_MODEL = 'strict-model';
+  writeFileSync(join(docs, 'one.png'), 'GOOD-one');
+  writeFileSync(join(docs, 'two.png'), 'GOOD-two');
+  const asked: Array<number | undefined> = [];
+  respond = (request, _image, res) => {
+    asked.push(request.max_tokens);
+    if (request.max_tokens === undefined) return undefined;
+    res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead." } }));
+    return 'sent';
+  };
+  reads = () => 'A receipt.';
+  try {
+    await scanFolders();
+    startOcrRun();
+    await until(() => !ocrRun()?.running);
+    assert.deepEqual([ocrRun()!.read, ocrRun()!.failed.length], [2, 0]);
+    assert.deepEqual(asked, [16_384, undefined, undefined], 'asked once with the bound, then without it');
+  } finally {
+    respond = () => undefined;
+    useModel();
+  }
+});
+
+test('a scan that brings the OCR down (it drops the connection) is left alone after three passes, and the files behind it are read', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  for (const name of ['a', 'b', 'c']) writeFileSync(join(docs, `${name}-poison-test.png`), name === 'a' ? 'POISON-a' : `GOOD-${name}`);
+  // The server stops on that image, and the next request finds it still starting again.
+  let restarting = false;
+  respond = (_request, image) => {
+    if (restarting) return (restarting = false), 'drop';
+    if (image.toString().startsWith('POISON')) return (restarting = true), 'drop';
+    return undefined;
+  };
+  reads = () => Array.from({ length: 9000 }, (_, i) => String(1000 + i)).join(' ');
+  try {
+    await scanFolders();
+    assert.equal(ocrWaiting(), 3);
+    assert.equal(await autoPasses(2), 2);
+    assert.equal(ocrWaiting(), 1, 'the files behind it were read');
+    assert.equal(await autoPasses(4), 1, 'tried three times in all');
+    assert.equal(ocrWaiting(), 1);
+  } finally {
+    respond = () => undefined;
+    delete process.env.OCR_AUTO;
+    for (const name of ['a', 'b', 'c']) rmSync(join(docs, `${name}-poison-test.png`));
+    await scanFolders();
+  }
+});
+
+test('an answer that breaks off after it began is not taken as an empty page', async () => {
+  useModel();
+  writeFileSync(join(docs, 'cut.png'), 'CUT-c');
+  respond = (_request, image) => (image.toString().startsWith('CUT') ? 'cut' : undefined);
+  try {
+    await scanFolders();
+    startOcrRun();
+    await until(() => !ocrRun()?.running);
+    const run = ocrRun()!;
+    assert.deepEqual([run.empty, run.failed.length], [0, 1]);
+    assert.match(run.failed[0].why, /stopped in the middle of its answer/);
+    assert.equal(ocrWaiting(), 1, 'still waits');
+  } finally {
+    respond = () => undefined;
+    rmSync(join(docs, 'cut.png'));
+    await scanFolders();
+  }
+});
+
+test('Stop stops the run while it asks the OCR for its test page, and holds nothing against the file', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  writeFileSync(join(docs, 'e500.png'), 'E500-e');
+  let asking = false;
+  // A server error for the file; the test page takes long.
+  respond = async (_request, image) => {
+    if (image.toString().startsWith('E500')) return undefined;
+    asking = true;
+    await new Promise((r) => setTimeout(r, 3_000));
+    return { choices: [{ message: { content: 'late' }, finish_reason: 'stop' }] };
+  };
+  status = (_n, image) => (image.toString().startsWith('E500') ? 500 : 200);
+  try {
+    await scanFolders();
+    assert.ok(startAutoOcrRun());
+    await until(() => asking);
+    const stoppedAt = Date.now();
+    stopOcrRun();
+    await until(() => !ocrRun()?.running);
+    assert.ok(Date.now() - stoppedAt < 1_000, `ended ${Date.now() - stoppedAt} ms after Stop`);
+    assert.equal(ocrRun()!.stopped, 'Stopped.');
+    // Nothing was held against the file: three more runs start for it by themselves.
+    respond = () => undefined;
+    assert.equal(await autoPasses(1), 1);
+  } finally {
+    respond = () => undefined;
+    status = () => 200;
+    delete process.env.OCR_AUTO;
+    rmSync(join(docs, 'e500.png'));
+    await scanFolders();
+  }
+});
+
+test('a model that is not running stops the run at the first file, and says why', async () => {
   for (const name of ['a.pdf', 'b.pdf', 'c.pdf', 'd.pdf']) writeFileSync(join(docs, name), checkPdf(`Copy ${name}`));
   Object.assign(process.env, { OCR_PROVIDER: 'model', OCR_BASE_URL: 'http://127.0.0.1:9/v1', OCR_MODEL: 'glm-ocr:q8_0' });
   try {
@@ -338,9 +485,9 @@ test('a model that is down stops the run after three failures, and says why', as
     startOcrRun();
     await until(() => !ocrRun()?.running);
     const run = ocrRun()!;
-    assert.equal(run.failed.length, 3);
+    assert.equal(run.failed.length, 1);
     assert.match(run.failed[0].why, /could not be reached/);
-    assert.equal(run.stopped, 'Stopped after three files failed in a row.');
+    assert.equal(run.stopped, 'Stopped: the OCR could not be reached.');
     assert.equal(ocrWaiting(), 4, 'what failed still waits');
   } finally {
     useModel();

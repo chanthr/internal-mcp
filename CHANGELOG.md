@@ -294,16 +294,21 @@ Changes that affect people who run or extend the server. Dates are release dates
   lock while it works, and a lock whose process started after the last touch is taken over at once. A holder that
   runs and started before keeps its lock, however long ago the last touch (the machine slept), until it has had it
   for 12 hours as before; only where the start of a process cannot be known (Windows, or ps failed) does a lock
-  nobody touched for five minutes count as left behind. Processes that find the same lock left behind take turns,
-  so only one takes it over, and a lock is made whole, so one being made is not taken for one left behind.
+  nobody touched for five minutes count as left behind. A lock whose text is not a process id (NUL bytes after a
+  power cut) is taken over after ten seconds. Processes that find the same lock left behind take turns, so only
+  one takes it over; a lock is made whole, so one being made is not taken for one left behind; and ages are read
+  by the clock of the data folder, so a share whose clock is behind does not make a new lock look old.
 - **A scan the OCR cannot read is no longer read again after every pass.** One page the model could not read
   failed the file, and with *Read new scans after each folder scan* on, every pass read up to 200 of its pages
   again. A run that starts by itself now leaves a file alone after three failures of its own, until the file or
   the OCR changes; a run started from the console still tries it. A refusal of the model counts against the file;
   a timeout or a server error counts only when the model reads other pages, or its test page, at the time; an OCR
-  that is not running counts against nothing. A file that failed is read last in the next run, so that the files
-  behind it are not held up, and a page is asked for with a bound on its length, so a model cannot write on until
-  the five minutes are up.
+  that is not running counts against nothing and stops the run at once, and a file that makes the OCR drop the
+  connection counts like a server error. A file that failed is read last in the next run, and refusals do not stop
+  a run, so that the files behind them are not held up. A page is asked for with a bound on its length, so a model
+  cannot write on until the five minutes are up; a page cut off at the bound, an answer without text and an answer
+  that breaks off are not taken as read; an endpoint that refuses the bound is asked again without it. Stop also
+  stops a run while it checks the OCR with its test page.
 - **A ChatGPT sign-in that cannot be saved no longer stops the server.** When the data folder could not be written
   (a full disk, a read-only volume) as the browser came back, the error was not caught and the process exited. The
   tab now says the sign-in could not be finished.
