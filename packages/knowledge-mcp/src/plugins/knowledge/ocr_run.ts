@@ -6,11 +6,15 @@
  * every scan, when the OCR runs on this computer and the person turned that on). It reads one file at a time,
  * says how far it is down to the page, can be stopped, and keeps what it read (drive/ocr.ts), so nothing is read
  * twice while a file is unchanged.
+ *
+ * A file that failed (one page the model could not read fails the whole file) stays waiting. A run started from the
+ * console tries it again; a run that starts by itself after a pass leaves it alone once it failed AUTO_TRIES times
+ * as it is now, instead of reading up to 200 pages of it again after every pass. A file that changes is tried again.
  */
 import { extractLocalFile } from '../drive/extract_text.js';
 import { backfillVectors, indexText } from '../drive/indexer.js';
-import { ocrConfigured } from '../drive/ocr.js';
-import { readByOcr, resolveLocalId, waitingForOcr } from './folders.js';
+import { ocrConfigured, ocrIsLocal } from '../drive/ocr.js';
+import { noTextSince, readByOcr, resolveLocalId, waitingForOcr } from './folders.js';
 
 export interface OcrRun {
   running: boolean;
@@ -33,6 +37,14 @@ export interface OcrRun {
 }
 let current: (OcrRun & { stop: AbortController }) | null = null;
 
+const AUTO_TRIES = 3;
+/** Files whose reading failed: how often, at which modified time. Only waiting files are kept, so it stays small. */
+const failures = new Map<string, { modified: string; tries: number }>();
+const givenUp = (id: string): boolean => {
+  const f = failures.get(id);
+  return !!f && f.tries >= AUTO_TRIES && f.modified === noTextSince(id);
+};
+
 export function ocrRun(): OcrRun | null {
   if (!current) return null;
   const { stop: _stop, ...view } = current;
@@ -42,11 +54,24 @@ export function ocrWaiting(): number {
   return waitingForOcr().length;
 }
 
-/** Read up to `limit` of the waiting files. Returns at once; the page reads how far it is. */
-export function startOcrRun(opts: { limit?: number; afterRead?: () => void } = {}): OcrRun {
+/**
+ * After a folder pass: read what waits, when the OCR runs on this computer and the person turned that on, except
+ * the files that failed AUTO_TRIES times as they are now. Null when there is nothing to start.
+ */
+export function startAutoOcrRun(): OcrRun | null {
+  if (process.env.OCR_AUTO?.trim() !== 'true' || !ocrIsLocal() || current?.running) return null;
+  const waiting = waitingForOcr();
+  const still = new Set(waiting);
+  for (const id of failures.keys()) if (!still.has(id)) failures.delete(id);
+  const due = waiting.filter((id) => !givenUp(id));
+  return due.length ? startOcrRun({ ids: due }) : null;
+}
+
+/** Read up to `limit` of the waiting files (or the files named). Returns at once; the page reads how far it is. */
+export function startOcrRun(opts: { limit?: number; ids?: string[]; afterRead?: () => void } = {}): OcrRun {
   if (current?.running) return ocrRun()!;
   if (!ocrConfigured()) throw new Error('No OCR is set. Set one up first.');
-  const ids = waitingForOcr().slice(0, opts.limit ?? Infinity);
+  const ids = (opts.ids ?? waitingForOcr()).slice(0, opts.limit ?? Infinity);
   const run: NonNullable<typeof current> = { running: true, done: 0, total: ids.length, current: null, page: null, read: 0, pages: 0, empty: 0, failed: [], stopped: null, startedAt: Date.now(), endedAt: null, stop: new AbortController() };
   current = run;
   void (async () => {
@@ -55,6 +80,7 @@ export function startOcrRun(opts: { limit?: number; afterRead?: () => void } = {
       const file = await resolveLocalId(id);
       if (!file) {
         readByOcr(id); // gone, or no longer a document here
+        failures.delete(id);
         run.done++;
         continue;
       }
@@ -69,9 +95,12 @@ export function startOcrRun(opts: { limit?: number; afterRead?: () => void } = {
           run.pages += Number(r.meta?.pages ?? 0) || 1;
         }
         readByOcr(id);
+        failures.delete(id);
       } catch (e) {
         if (run.stop.signal.aborted) break;
         run.failed.push({ name: file.path, why: (e instanceof Error ? e.message : String(e)).slice(0, 200) });
+        const before = failures.get(id);
+        failures.set(id, { modified: file.modifiedTime, tries: before?.modified === file.modifiedTime ? before.tries + 1 : 1 });
         // The OCR itself is down (not this one file): the rest would fail the same way.
         if (run.failed.length >= 3 && run.read === 0) {
           run.stopped = 'Stopped after three files failed in a row.';

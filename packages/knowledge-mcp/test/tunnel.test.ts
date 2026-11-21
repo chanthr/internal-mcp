@@ -4,6 +4,8 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -294,4 +296,41 @@ test('what comes through a tunnel never reaches the console', async () => {
   assert.equal((await api('GET', '/state')).status, 200);
   // The MCP endpoint is what a tunnel is for: it asks for a key as it always did.
   assert.equal((await fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Connecting-Ip': '203.0.113.9' }, body: '{}' })).status, 401);
+});
+
+test('a program given the id of a cloudflared that is gone is not taken for the tunnel, and never stopped', async () => {
+  // Another program of the same person, holding the id the tunnel's cloudflared had before a restart.
+  const other = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(other, 'spawn');
+  const file = join(data, 'tunnel.json');
+  const note = { mode: 'quick', on: true, pid: other.pid, port: server.port, url: 'https://old-words.trycloudflare.com' };
+  try {
+    writeFileSync(file, JSON.stringify(note));
+    const view = await tunnelView();
+    assert.deepEqual([view.running, view.url], [false, null]);
+    // Stopping the tunnel (the server's exit does the same) leaves that program running.
+    stopTunnel();
+    assert.ok(alive(other.pid!), 'the other program was not stopped');
+
+    // At start the tunnel comes back: a cloudflared of its own is started, the other program is not kept for it.
+    writeFileSync(file, JSON.stringify(note));
+    await resumeTunnel(server.port);
+    const back = await tunnelView();
+    assert.deepEqual([back.running, back.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    const pid = pidOf();
+    assert.notEqual(pid, other.pid);
+
+    // A cloudflared with the id written down, but one that started at another time, is not it either.
+    const kept = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(typeof kept.started, 'number');
+    writeFileSync(file, JSON.stringify({ ...kept, started: kept.started - 3_600_000 }));
+    assert.equal((await tunnelView()).running, false);
+    stopTunnel();
+    assert.ok(alive(pid), 'as far as the note goes, it is another process, so it was not stopped');
+    process.kill(pid);
+    assert.ok(await gone(pid));
+    assert.ok(alive(other.pid!));
+  } finally {
+    other.kill();
+  }
 });

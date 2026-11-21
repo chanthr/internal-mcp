@@ -34,6 +34,7 @@ import { request } from 'node:https';
 import { join } from 'node:path';
 import { dataFile } from '../core/data_file.js';
 import { dataDir } from '../core/paths.js';
+import { processInfo } from '../core/process_info.js';
 import { backgroundExec, hasTool, type Exec } from '../setup/auto.js';
 import { RELOAD_EXIT_CODE } from './supervisor.js';
 
@@ -48,8 +49,9 @@ interface Saved {
   accountId?: string;
   /** named: the address answered from outside the last time it was checked. */
   verified?: boolean;
-  /** The cloudflared that is running, and the address it serves. */
+  /** The cloudflared that is running, when it started (to tell it from a later process given the same id), and the address it serves. */
   pid?: number;
+  started?: number;
   url?: string;
   port?: number;
 }
@@ -186,6 +188,19 @@ const alive = (pid: number | undefined): boolean => {
     return false;
   }
 };
+/**
+ * Is the cloudflared written down still running? Its process id alone does not say. Once cloudflared is gone (the
+ * machine was restarted, it crashed), the system gives that id to the next program, which would be taken for the
+ * tunnel: its old address shown as working, no cloudflared started, and that program stopped with the server. So
+ * the process must be cloudflared, and the one that started when this one did.
+ */
+const ourCloudflared = (s: Saved | null): s is Saved & { pid: number } => {
+  if (!s?.pid) return false;
+  const p = processInfo(s.pid);
+  if (!p || !/(^|[\s/\\])cloudflared(\.exe)?(\s|$)/i.test(p.command)) return false;
+  // The start time is read to the second, and may be off by one when read again.
+  return s.started === undefined || p.startedAt === null || Math.abs(p.startedAt - s.started) <= 2000;
+};
 const logText = (): string => {
   try {
     return readFileSync(logPath(), 'utf8');
@@ -216,24 +231,24 @@ export interface TunnelView {
 
 export async function tunnelView(exec: Exec = backgroundExec): Promise<TunnelView> {
   const s = saved.read();
-  const running = alive(s?.pid);
+  const up = ourCloudflared(s);
   const signed = cloudflaredSignedIn() ? await signedInDomain() : null;
   return {
     installed: await hasTool(exec, 'cloudflared'),
     signedIn: cloudflaredSignedIn(),
     signedInFor: signed?.name ?? null,
-    verified: running && s?.mode === 'named' ? !!s.verified : false,
-    running,
+    verified: up && s?.mode === 'named' ? !!s.verified : false,
+    running: up,
     mode: s?.mode ?? null,
-    url: running ? s?.url ?? null : null,
+    url: up ? s?.url ?? null : null,
     hostname: s?.hostname ?? null,
     // It was meant to run and is not: say what cloudflared said last.
-    problem: s?.on && !running ? lastProblem() ?? 'cloudflared stopped.' : null,
+    problem: s?.on && !up ? lastProblem() ?? 'cloudflared stopped.' : null,
   };
 }
 
-/** Start cloudflared beside the server, writing what it says to the tunnel log. Returns its process id. */
-function launch(args: string[]): number {
+/** Start cloudflared beside the server, writing what it says to the tunnel log. Returns its process id and start time. */
+function launch(args: string[]): { pid: number; started: number | undefined } {
   rmSync(logPath(), { force: true });
   const out = openSync(logPath(), 'a', 0o600);
   try {
@@ -241,7 +256,7 @@ function launch(args: string[]): number {
     child.on('error', () => {});
     child.unref();
     if (!child.pid) throw new Error('cloudflared could not be started.');
-    return child.pid;
+    return { pid: child.pid, started: processInfo(child.pid)?.startedAt ?? undefined };
   } finally {
     closeSync(out);
   }
@@ -262,14 +277,15 @@ async function until(pid: number, found: () => string | null, ms: number): Promi
 
 export function stopTunnel(keep = false): void {
   const s = saved.read();
-  if (s?.pid && alive(s.pid)) {
+  // Only the cloudflared this server started is stopped: a process that was given its id since is left alone.
+  if (ourCloudflared(s)) {
     try {
       process.kill(s.pid);
     } catch {
       /* already gone */
     }
   }
-  if (s && !keep) saved.write({ ...s, on: false, pid: undefined, verified: false, url: s.mode === 'named' ? s.url : undefined });
+  if (s && !keep) saved.write({ ...s, on: false, pid: undefined, started: undefined, verified: false, url: s.mode === 'named' ? s.url : undefined });
 }
 
 /** A temporary address, without an account. */
@@ -277,15 +293,15 @@ export async function startQuickTunnel(port: number): Promise<TunnelView> {
   stopTunnel();
   // Its own config: cloudflared refuses a quick tunnel when it finds a config file of the person's.
   writeFileSync(configPath(), PLACEHOLDER, { mode: 0o600 });
-  const pid = launch(['tunnel', '--config', configPath(), '--no-autoupdate', '--url', `http://localhost:${port}`]);
-  saved.write({ mode: 'quick', on: true, pid, port });
+  const { pid, started } = launch(['tunnel', '--config', configPath(), '--no-autoupdate', '--url', `http://localhost:${port}`]);
+  saved.write({ mode: 'quick', on: true, pid, started, port });
   const url = await until(pid, () => /https:\/\/[a-z0-9-]+\.trycloudflare\.com/.exec(logText())?.[0] ?? null, 30_000);
   if (!url) {
     const why = lastProblem();
     stopTunnel();
     throw new Error(`Cloudflare gave no address${why ? ` (${why})` : ''}. Try again in a moment.`);
   }
-  saved.write({ mode: 'quick', on: true, pid, port, url });
+  saved.write({ mode: 'quick', on: true, pid, started, port, url });
   return tunnelView();
 }
 
@@ -429,8 +445,8 @@ export async function startNamedTunnel(port: number, rawHostname: string, exec: 
     [`# Written by Knowledge MCP for its tunnel to ${hostname}.`, `tunnel: ${id}`, `credentials-file: ${JSON.stringify(credentialsPath(id))}`, 'ingress:', `  - hostname: ${hostname}`, `    service: http://localhost:${port}`, '  - service: http_status:404', ''].join('\n'),
     { mode: 0o600 },
   );
-  const pid = launch(['tunnel', '--config', configPath(), '--no-autoupdate', 'run']);
-  s = { mode: 'named', on: true, hostname, tunnelId: id, tunnelName: name, accountId: cert.accountId, pid, port, url: `https://${hostname}`, verified: false };
+  const { pid, started } = launch(['tunnel', '--config', configPath(), '--no-autoupdate', 'run']);
+  s = { mode: 'named', on: true, hostname, tunnelId: id, tunnelName: name, accountId: cert.accountId, pid, started, port, url: `https://${hostname}`, verified: false };
   saved.write(s);
   const up = await until(pid, () => (/Registered tunnel connection|Connection [0-9a-f-]+ registered/i.test(logText()) ? 'up' : null), 30_000);
   if (!up) {
@@ -448,7 +464,7 @@ export async function startNamedTunnel(port: number, rawHostname: string, exec: 
 /** Ask the address again: does it answer from outside now? */
 export async function recheckTunnel(): Promise<TunnelView> {
   const s = saved.read();
-  if (!s?.on || s.mode !== 'named' || !s.hostname || !alive(s.pid)) return tunnelView();
+  if (!s?.on || s.mode !== 'named' || !s.hostname || !ourCloudflared(s)) return tunnelView();
   const why = await answers(s.hostname, 1);
   saved.write({ ...s, verified: !why });
   const view = await tunnelView();
@@ -462,7 +478,7 @@ export async function recheckTunnel(): Promise<TunnelView> {
 export async function resumeTunnel(port: number): Promise<void> {
   const s = saved.read();
   if (!s?.on) return;
-  if (alive(s.pid) && s.port === port) return;
+  if (ourCloudflared(s) && s.port === port) return;
   try {
     if (s.mode === 'named' && s.hostname) await startNamedTunnel(port, s.hostname);
     else await startQuickTunnel(port);

@@ -119,12 +119,32 @@ function skipName(name: string): boolean {
   return name.startsWith('.') || isExcludedName(name);
 }
 
-/** Supported files under a folder. Symbolic links are not followed: they could point outside the folder, or loop. */
-export async function listLocalFiles(folder: LocalFolder): Promise<{ files: LocalFile[]; truncated: boolean }> {
+/** What could not be read while listing a folder: a subfolder (its path ends in "/") or a file, and why. */
+export interface Unlisted {
+  path: string;
+  why: string;
+}
+
+/**
+ * Supported files under a folder. Symbolic links are not followed: they could point outside the folder, or loop.
+ * Only the folder itself failing to open fails the listing. A subfolder or a file that cannot be read (no
+ * permission, removed while it was listed) is skipped and said in `unlisted`: one private subfolder does not hide
+ * the rest of the folder.
+ */
+export async function listLocalFiles(folder: LocalFolder): Promise<{ files: LocalFile[]; truncated: boolean; unlisted: Unlisted[] }> {
   const files: LocalFile[] = [];
+  const unlisted: Unlisted[] = [];
   let truncated = false;
+  const why = (e: unknown) => ((e as NodeJS.ErrnoException).code ?? (e instanceof Error ? e.message : String(e)));
   const walk = async (dir: string, rel: string): Promise<void> => {
-    const entries = await readdir(dir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (e) {
+      if (!rel) throw e;
+      unlisted.push({ path: `${rel}/`, why: why(e) });
+      return;
+    }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const e of entries) {
       if (truncated) return;
@@ -136,7 +156,13 @@ export async function listLocalFiles(folder: LocalFolder): Promise<{ files: Loca
       } else if (e.isFile()) {
         const mimeType = mimeForFileName(e.name);
         if (!mimeType) continue;
-        const st = await stat(abs);
+        let st;
+        try {
+          st = await stat(abs);
+        } catch (err) {
+          unlisted.push({ path: relPath, why: why(err) });
+          continue;
+        }
         if (st.size > MAX_FILE_BYTES) continue;
         if (files.length >= MAX_FILES_PER_FOLDER) {
           truncated = true;
@@ -155,7 +181,7 @@ export async function listLocalFiles(folder: LocalFolder): Promise<{ files: Loca
     }
   };
   await walk(folder.path, '');
-  return { files, truncated };
+  return { files, truncated, unlisted };
 }
 
 /**
@@ -263,6 +289,10 @@ export function folderReading(name: string): FolderReading | null {
 export function waitingForOcr(): string[] {
   return [...noText.keys()].filter((id) => /\.(pdf|png|jpe?g|webp)$/i.test(id));
 }
+/** The modified time at which a file was found to have no text, or undefined when it is not waiting. */
+export function noTextSince(id: string): string | undefined {
+  return noText.get(id);
+}
 /** A file was read by OCR and indexed: it no longer counts as having no text. */
 export function readByOcr(id: string): void {
   noText.delete(id);
@@ -339,6 +369,7 @@ function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult |
     const r: FolderScanResult = { folders: folders.length, files: 0, indexed: 0, unchanged: 0, skipped: 0, removed: 0, errored: 0, unreadable: [] };
     const seen = new Set<string>();
     const keepPrefixes: string[] = [];
+    const keepIf: Array<(id: string) => boolean> = [];
     // What each document links to (graph.ts), written down beside the index: a document that has not changed
     // keeps what was read from it last time.
     const linksBefore = readLinkMap();
@@ -366,9 +397,18 @@ function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult |
         log(`folder ${folder.path} has more than ${MAX_FILES_PER_FOLDER} files; only the first ${MAX_FILES_PER_FOLDER} are indexed (KNOWLEDGE_MAX_FILES)`);
       }
       const prefix = `${LOCAL_PREFIX}${folder.name}/`;
+      // What could not be read this time is not gone: its documents, and what was read from them, are kept.
+      const unlisted = (id: string) => listing.unlisted.some((u) => (u.path.endsWith('/') ? id.startsWith(prefix + u.path) : id === prefix + u.path));
+      if (listing.unlisted.length) {
+        keepIf.push(unlisted);
+        for (const u of listing.unlisted) if (u.path.endsWith('/')) r.unreadable.push(join(folder.path, u.path));
+        for (const [rel, entry] of Object.entries(known)) if (unlisted(prefix + rel)) links[rel] = entry;
+        const shown = listing.unlisted.slice(0, 3).map((u) => `${u.path} (${u.why})`).join(', ');
+        log(`folder ${folder.path}: could not read ${shown}${listing.unlisted.length > 3 ? ` and ${listing.unlisted.length - 3} more` : ''}; skipped, their documents are kept`);
+      }
       const at: FolderReading = { done: 0, total: listing.files.length };
       reading.set(folder.name, at);
-      for (const id of failed.keys()) if (id.startsWith(prefix)) failed.delete(id);
+      for (const id of failed.keys()) if (id.startsWith(prefix) && !unlisted(id)) failed.delete(id);
       for (const [n, file] of listing.files.entries()) {
         at.done = n;
         r.files++;
@@ -404,12 +444,12 @@ function readFolders(log: (...a: unknown[]) => void): Promise<FolderScanResult |
       }
       at.done = at.total;
       // A file that is gone is not a file without text any more.
-      if (!listing.truncated) for (const id of noText.keys()) if (id.startsWith(prefix) && !seen.has(id)) noText.delete(id);
+      if (!listing.truncated) for (const id of noText.keys()) if (id.startsWith(prefix) && !seen.has(id) && !unlisted(id)) noText.delete(id);
     }
     if (JSON.stringify(linksNow) !== JSON.stringify(linksBefore)) writeLinkMap(linksNow);
 
     for (const id of indexed.keys()) {
-      if (seen.has(id) || keepPrefixes.some((p) => id.startsWith(p))) continue;
+      if (seen.has(id) || keepPrefixes.some((p) => id.startsWith(p)) || keepIf.some((keep) => keep(id))) continue;
       await deleteFileVectors(id);
       r.removed++;
     }

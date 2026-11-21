@@ -5,7 +5,8 @@
  * that is already present is replaced on its own line (also when it was commented out as `# KEY=`), new keys are
  * appended. The file is created owner-only (0600) because it holds tokens.
  */
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { writeFileAtomic } from '../core/data_file.js';
 
 /**
  * Write a value so that dotenv reads back exactly one variable.
@@ -81,7 +82,7 @@ export function updateEnvFile(path: string, values: Record<string, string | unde
     }
   }
   const text = out.join('\n').replace(/\n*$/, '\n');
-  writeFileSync(path, text, { mode: 0o600 });
-  chmodSync(path, 0o600); // writeFileSync keeps the mode of an existing file
+  // Written whole and swapped in: a .env cut short by a full disk would lose the keys after the cut.
+  writeFileAtomic(path, text, { mode: 0o600 });
   return written;
 }

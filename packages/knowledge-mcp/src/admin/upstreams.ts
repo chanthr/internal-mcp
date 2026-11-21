@@ -13,13 +13,12 @@
  * what is specific to MCP servers.
  */
 import { checkResourceAllowed, resourceUrlFromServerUrl } from '@modelcontextprotocol/sdk/shared/auth-utils.js';
-import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { discoverOAuthServerInfo, exchangeAuthorization, startAuthorization } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { AuthorizationServerMetadata, OAuthClientInformationMixed } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { probeUpstream } from '../core/upstream.js';
 import { forgetUpstreamLogin, readUpstreamLogin, UPSTREAM_NAME, withTokens, writeUpstreamLogin, type UpstreamLogin } from '../core/upstream_login.js';
-import { readConfigFile } from '../setup/commands.js';
+import { readConfigFile, writeConfigFile } from '../setup/commands.js';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const TIMEOUT_MS = 20_000;
@@ -67,7 +66,7 @@ function writeEntries(dir: string, entries: UpstreamEntry[]): void {
   const config = readConfigFile(dir);
   if (entries.length) config.upstreams = entries;
   else delete config.upstreams;
-  writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  writeConfigFile(dir, config);
 }
 
 /** Add the entry, or replace the one of the same name. What was set on it by hand (prefix, expose, headers) stays. */

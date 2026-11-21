@@ -9,7 +9,7 @@
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express, { type Request as ExpressRequest, type Response as ExpressResponse } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { MemoryStore } from 'express-rate-limit';
 import { z } from 'zod';
 import { isToolAllowed } from '../core/scope.js';
 import { logToolCall } from '../store/tool_log.js';
@@ -274,18 +274,29 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
     legacyHeaders: false,
     handler: rlHandler(429, 'rate limit exceeded — slow down'),
   });
+  // Count 401 only. If session expiry after a redeploy (404), a GET without a session (405) and dropped SSE were
+  // also counted as "auth failures", legitimate users behind the same egress IP (an office NAT, for example) would
+  // get 429 along with them. A request counts from the moment it arrives, so that a flood of bad keys is stopped
+  // before each key is looked up, and stops counting as soon as its key is found good (resolveAuth). Deciding that
+  // when the response ends instead counted every open SSE stream as a failure for as long as it stayed open: the
+  // twentieth client behind one address was refused.
+  const authFailures = new MemoryStore();
   const mcpAuthFailRateLimit = rateLimit({
     windowMs: RL_WINDOW_MS,
     limit: Number(process.env.MCP_RATE_LIMIT_FAIL_MAX ?? 20),
-    // Count 401 only. If session expiry after a redeploy (404), a GET without a session (405) and dropped SSE were
-    // also counted as "auth failures",
-    // legitimate users behind the same egress IP (an office NAT, for example) would get 429 along with them.
-    skipSuccessfulRequests: true,
-    requestWasSuccessful: (_req, res) => res.statusCode !== 401,
+    store: authFailures,
+    requestPropertyName: 'authFailures',
     standardHeaders: 'draft-7',
     legacyHeaders: false,
     handler: rlHandler(429, 'too many failed auth attempts — slow down'),
   });
+  /** The request was not a failed sign-in: its key was good, or it could not be checked (a store outage, 503). */
+  const notAFailure = (req: ExpressRequest): void => {
+    const counted = req as ExpressRequest & { authFailures?: { key: string } };
+    if (!counted.authFailures) return;
+    void authFailures.decrement(counted.authFailures.key);
+    delete counted.authFailures;
+  };
 
   // ── Auth resolution (shared by POST, GET and DELETE) ──
   // Even with sessions, auth runs on every request (permissions are not bound to the session: if a session ID leaks,
@@ -339,6 +350,7 @@ export async function runHttp(registry: Registry): Promise<{ port: number; close
         auth = { ...auth, role, scopes };
       }
     }
+    if (auth.ok || auth.unavailable) notAFailure(req);
     if (!auth.ok) return auth;
     // ── act-as (internal proxy passes on the signed-in user's permissions) ──
     // Only for delegated key_ids. The header role is not read; the server recomputes it from app_users (prevents

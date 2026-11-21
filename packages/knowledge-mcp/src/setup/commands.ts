@@ -20,7 +20,7 @@
  * `knowledge-mcp setup` or `setup secret <ENV_NAME>`, typed by the person who owns it. `setup check` then tells whether it works.
  */
 import { parseArgs } from 'node:util';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { railwayAuth, railwaySignedIn } from '../plugins/railway/login.js';
@@ -31,6 +31,7 @@ import { checkConnection, closeDataConnections } from '../connections/index.js';
 import { formatValidationError } from '../plugin/result.js';
 import { countDocuments } from './wizard.js';
 import { cli } from '../core/invocation.js';
+import { writeFileAtomic } from '../core/data_file.js';
 import {
   createDriveServiceAccount,
   gcloudAccount,
@@ -79,6 +80,11 @@ export function readConfigFile(dir: string): Record<string, any> {
   }
 }
 
+/** Save mcp.config.json whole: a save that fails (a full disk) leaves the file as it was, not cut short. */
+export function writeConfigFile(dir: string, config: Record<string, unknown>): void {
+  writeFileAtomic(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+}
+
 /** drive.trustedOwners as the server will read it: env DRIVE_TRUSTED_OWNERS first, then mcp.config.json. */
 export function trustedList(ctx: Pick<CommandContext, 'dir' | 'env'>): string[] {
   const env = (ctx.env ?? process.env).DRIVE_TRUSTED_OWNERS;
@@ -93,7 +99,7 @@ export function addTrusted(dir: string, entries: string[]): string[] {
   const added = [...new Set(entries.map((e) => e.trim().toLowerCase()).filter(Boolean))].filter((e) => !current.includes(e));
   if (added.length) {
     config.drive = { ...(config.drive ?? {}), trustedOwners: [...current, ...added] };
-    writeFileSync(join(dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+    writeConfigFile(dir, config);
   }
   return added;
 }
@@ -128,7 +134,7 @@ async function folder(argv: string[], ctx: CommandContext): Promise<number> {
   }
   list.push({ path, ...(values.name ? { name: values.name } : {}), ...(values.source ? { source: values.source } : {}) });
   config.folders = list;
-  writeFileSync(join(ctx.dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  writeConfigFile(ctx.dir, config);
   ctx.out(`✓ ${path} added: ${n} document${n === 1 ? '' : 's'} (Markdown, text, PDF, Word, PowerPoint, Excel). Saved to ${join(ctx.dir, 'mcp.config.json')}.`);
   ctx.out(`  The server indexes it the next time it starts. To index it now: ${cli('knowledge scan')}`);
   ctx.out('  Search works by keywords without any key. An embedding model (setup embeddings) adds search by meaning.');
@@ -446,7 +452,7 @@ async function connection(argv: string[], ctx: CommandContext): Promise<number> 
   const problems = tools.success ? dataConfigProblems(parsed.data, tools.data).filter((p) => p.path[0] === 'connections' || p.message.includes(`"${name}"`)) : [];
   if (problems.length) throw new Error(problems.map((p) => p.message).join('; '));
   config.connections = all;
-  writeFileSync(join(ctx.dir, 'mcp.config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  writeConfigFile(ctx.dir, config);
 
   ctx.out(`✓ connection "${name}" ${existed ? 'updated' : 'added'} (${conn.type}). Saved to ${join(ctx.dir, 'mcp.config.json')}.`);
   const env = ctx.env ?? process.env;

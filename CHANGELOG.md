@@ -263,6 +263,40 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **Google Sheets are read tab by tab.** Only the first tab was read and indexed.
 - **Google Docs with pictures are read in full.** The Markdown export carries pictures as base64, which used up
   `maxChars` and cut the text short. Picture data is now removed.
+- **Stopping the server or the tunnel no longer stops another program.** The tunnel remembered cloudflared by its
+  process id only. After a restart that id can belong to another program of the same user: the console showed the
+  old address as working, started no cloudflared, and stopping the server sent that program SIGTERM. The process
+  must now be cloudflared and have started when the one this server started did; anything else is forgotten and
+  never signalled.
+- **A save that cannot finish no longer cuts `mcp.config.json` or `.env` short.** With a full disk the console's
+  folder save left half a config, and the next start failed on it ("JSON at position 4096"); a `.env` cut short
+  lost the keys after the cut. Both files are now written beside themselves, flushed, and swapped in whole. They
+  keep their permissions, and a config that is a link stays a link.
+- **A data folder inside a watched folder no longer makes the scans run without end.** With `setup folder .`, or
+  a settings folder inside a notes vault, every pass made and removed its lock file there, and that change started
+  the next pass three seconds later. What the server writes in its own data folder is no longer a change.
+- **`KNOWLEDGE_SCAN_INTERVAL_MIN` and `DRIVE_SYNC_INTERVAL_MIN` below one minute, or not a number, no longer
+  run the job without pause.** "0.5" was read as 0 (a scan or a Drive sync, using API quota, again and again);
+  "abc" the same. Fractions above one minute are kept now; anything else is said in the log, and the default is
+  used.
+- **One subfolder that cannot be read no longer stops the whole folder from being indexed.** A private subfolder,
+  or a file removed while the folder was being listed, made the folder count as unreadable: none of its new files
+  were indexed. Such a subfolder or file is now skipped and said in the log, and what was indexed from it is kept.
+- **A scan lock left by a crash no longer stops scans for up to 12 hours.** When its process id belonged to another
+  process (even pid 1), the folder scan, the Drive sync and the vector fill were skipped. A holder now touches its
+  lock while it works: a lock whose process started after the last touch is taken over at once, and one nobody
+  touched for five minutes is taken over too.
+- **A scan the OCR cannot read is no longer read again after every pass.** One page the model could not read
+  failed the file, and with *Read new scans after each folder scan* on, every pass read up to 200 of its pages
+  again. A run that starts by itself now leaves a file alone after three failures, until the file changes; a run
+  started from the console still tries it.
+- **A ChatGPT sign-in that cannot be saved no longer stops the server.** When the data folder could not be written
+  (a full disk, a read-only volume) as the browser came back, the error was not caught and the process exited. The
+  tab now says the sign-in could not be finished.
+- **Open SSE streams no longer count as failed sign-ins.** The limit on failed keys from one address counted every
+  request until its response ended, and a connector's stream stays open for hours: the twentieth client behind one
+  address was refused with "too many failed auth attempts". A request stops counting as soon as its key is found
+  good; a run of bad keys is stopped as before.
 
 ## 0.3.2
 

@@ -7,9 +7,11 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtempSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const { runSetup, parseSelection } = await import('../src/setup/wizard.js');
 const { updateEnvFile, readEnvKeys, readEnvValues, formatEnvValue } = await import('../src/setup/envfile.js');
@@ -464,6 +466,47 @@ test('setup folder: adds a folder once, validates it, and setup check reports it
   const bad = collect();
   assert.equal(await runSetupCommand(['check'], { dir, out: bad.out, env: {} }), 1);
   assert.match(bad.lines.join('\n'), /✗ folder\s+.*does not exist or is not a folder/);
+});
+
+test('a save that cannot finish (a full disk) leaves mcp.config.json and .env as they were', { skip: process.platform === 'win32' ? 'no ulimit' : false }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-full-'));
+  mkdirSync(join(dir, 'new-folder'));
+  const config = `${JSON.stringify({ folders: Array.from({ length: 300 }, (_, i) => ({ path: join(dir, `folder-${i}`), name: `folder-${i}` })) }, null, 2)}\n`;
+  writeFileSync(join(dir, 'mcp.config.json'), config, { mode: 0o600 });
+  const env = Array.from({ length: 400 }, (_, i) => `KEY_${i}=value-${i}-${'x'.repeat(40)}\n`).join('');
+  writeFileSync(join(dir, '.env'), env, { mode: 0o600 });
+  // The console's folder save, and a .env save, in a process that may write no file larger than a few kilobytes:
+  // the write fails half way, as on a full disk.
+  const src = (file: string) => JSON.stringify(pathToFileURL(resolve(import.meta.dirname, '..', 'src', file)).href);
+  const script = [
+    `const { runSetupCommand } = await import(${src('setup/commands.ts')});`,
+    `const { updateEnvFile } = await import(${src('setup/envfile.ts')});`,
+    `const said = [];`,
+    `const code = await runSetupCommand(['folder', ${JSON.stringify(join(dir, 'new-folder'))}], { dir: ${JSON.stringify(dir)}, out: (l) => said.push(l) });`,
+    `console.log('folder', code, said.join(' '));`,
+    `try { updateEnvFile(${JSON.stringify(join(dir, '.env'))}, { NEW_KEY: 'v' }); console.log('env saved'); } catch (e) { console.log('env', e.code); }`,
+  ].join('\n');
+  const r = spawnSync('/bin/sh', ['-c', 'ulimit -f 8 && exec "$0" --import tsx --input-type=module -e "$1"', process.execPath, script], {
+    cwd: resolve(import.meta.dirname, '..'),
+    encoding: 'utf8',
+    timeout: 60_000,
+    env: { ...process.env, TSX_DISABLE_CACHE: '1', MCP_ENV_FILE: 'none', MCP_DATA_DIR: join(dir, 'data') },
+  });
+  assert.match(r.stdout, /^folder 1 .*EFBIG/m, r.stdout + r.stderr);
+  assert.match(r.stdout, /^env EFBIG$/m, r.stdout + r.stderr);
+  assert.equal(readFileSync(join(dir, 'mcp.config.json'), 'utf8'), config);
+  assert.equal(readFileSync(join(dir, '.env'), 'utf8'), env);
+  assert.deepEqual(readdirSync(dir).sort(), ['.env', 'mcp.config.json', 'new-folder'], 'no temporary file is left behind');
+
+  // A save that finishes keeps the file's permissions, and a config that is a link stays a link.
+  const real = join(dir, 'kept-elsewhere.json');
+  writeFileSync(real, '{}\n', { mode: 0o600 });
+  const linked = mkdtempSync(join(tmpdir(), 'kmcp-linked-'));
+  symlinkSync(real, join(linked, 'mcp.config.json'));
+  assert.equal(await runSetupCommand(['folder', join(dir, 'new-folder')], { dir: linked, out: () => undefined }), 0);
+  assert.equal(lstatSync(join(linked, 'mcp.config.json')).isSymbolicLink(), true);
+  assert.deepEqual(JSON.parse(readFileSync(real, 'utf8')).folders, [{ path: join(dir, 'new-folder') }]);
+  assert.equal(statSync(real).mode & 0o777, 0o600);
 });
 
 test('wizard, a later run: a folder set up before is kept, and the model question is still asked', async () => {

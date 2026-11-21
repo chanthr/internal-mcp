@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,6 +31,7 @@ Object.assign(process.env, {
 // A vision model: it "reads" a page by answering with what the test says the page holds, and keeps what it was sent.
 const seen: Array<{ model: string; prompt: string; image: string }> = [];
 let reads: (n: number) => string = () => '';
+let failing = false;
 const read = (req: IncomingMessage) =>
   new Promise<string>((resolve) => {
     let body = '';
@@ -41,6 +42,7 @@ const model = createServer(async (req: IncomingMessage, res: ServerResponse) => 
   const body = JSON.parse(await read(req));
   const parts = body.messages[0].content;
   seen.push({ model: body.model, prompt: parts.find((p: any) => p.type === 'text').text, image: parts.find((p: any) => p.type === 'image_url').image_url.url.slice(0, 22) });
+  if (failing) return void res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'the page could not be read' } }));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ choices: [{ message: { content: reads(seen.length) } }] }));
 });
@@ -63,7 +65,7 @@ const ollamaBase = `http://127.0.0.1:${(ollama.address() as AddressInfo).port}/v
 
 const { ocrSettings, ocrPrompt, checkOcr, checkPdf, ocrIsLocal, keptOcr } = await import('../src/plugins/drive/ocr.js');
 const { scanFolders } = await import('../src/plugins/knowledge/folders.js');
-const { startOcrRun, ocrRun, ocrWaiting } = await import('../src/plugins/knowledge/ocr_run.js');
+const { startAutoOcrRun, startOcrRun, ocrRun, ocrWaiting } = await import('../src/plugins/knowledge/ocr_run.js');
 const { DRIVE_COLLECTION, getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
 const { mimeForFileName } = await import('../src/plugins/drive/extract_text.js');
 const { consoleToken } = await import('../src/admin/auth.js');
@@ -155,6 +157,43 @@ test('a folder scan leaves a scan for the OCR run, which reads it page by page a
   }
   assert.equal(seen.length, 2);
   assert.equal((await (await getLocalIndex())!.keywordSearch(DRIVE_COLLECTION, { query: 'lease agreement', limit: 5, with_payload: true })).length, 2);
+});
+
+test('a scan the model cannot read is tried again by itself only a few times while it is unchanged; the console still tries it', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  failing = true;
+  try {
+    writeFileSync(join(docs, 'torn.pdf'), checkPdf('Torn copy'));
+    await scanFolders();
+    assert.equal(ocrWaiting(), 1);
+    // After every folder pass (every ten minutes, and after every change) a run would start by itself.
+    const before = seen.length;
+    let started = 0;
+    for (let pass = 0; pass < 6; pass++) {
+      if (startAutoOcrRun()) started++;
+      await until(() => !ocrRun()?.running);
+    }
+    assert.equal(started, 3);
+    assert.equal(seen.length - before, 3, 'its one page, asked once a try');
+    assert.equal(ocrWaiting(), 1, 'it still waits');
+    // A run started from the console tries it all the same.
+    startOcrRun();
+    await until(() => !ocrRun()?.running);
+    assert.deepEqual([ocrRun()!.failed.length, seen.length - before], [1, 4]);
+    // Changed, it is tried again by itself, and now the model reads it.
+    failing = false;
+    reads = () => 'A torn copy, read at last.';
+    const later = new Date(Date.now() + 5000);
+    utimesSync(join(docs, 'torn.pdf'), later, later);
+    await scanFolders();
+    assert.ok(startAutoOcrRun());
+    await until(() => !ocrRun()?.running);
+    assert.deepEqual([ocrRun()!.read, ocrWaiting()], [1, 0]);
+  } finally {
+    failing = false;
+    delete process.env.OCR_AUTO;
+  }
 });
 
 test('a model that is down stops the run after three failures, and says why', async () => {
