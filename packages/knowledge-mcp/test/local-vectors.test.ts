@@ -16,6 +16,7 @@ const { getQdrantClient, getLocalIndex: localIndex, vectorProblem, vectorStoreKi
 const { makeChunkId } = await import('../src/plugins/drive/indexer.js');
 const { getLocalIndex } = await import('../src/plugins/drive/qdrant.js');
 const { tokenize, ftsQuery } = await import('../src/plugins/drive/tokens.js');
+const { ftsPieces } = await import('../src/plugins/drive/local_vectors.js');
 const client = await getQdrantClient();
 const local = (await localIndex())!;
 const C = 'unit_test';
@@ -353,7 +354,7 @@ test('filters keep only the fields they look at, follow the writes made here, an
   for (const key of ['doc_tags', 'source', 'file_id', 'has_image']) assert.deepEqual(await local.fieldValues(M, key), await fresh.fieldValues(M, key));
 });
 
-test('a long question in a large index is searched by its rarer words, at most 16, and still finds its passage', async () => {
+test('a long question in a large index is searched by 16 of its words, the rarer ones, and still finds its passage', async () => {
   const W = 'unit_words';
   await client.createCollection(W, { vectors: { size: 4 } });
   // 5,200 passages share a boilerplate sentence; each also has a word of its own.
@@ -373,10 +374,8 @@ test('a long question in a large index is searched by its rarer words, at most 1
   assert.ok(['두루', '루미', 'quokka', 'zebra'].every((t) => terms.includes(t)), String(terms));
   assert.equal((await local.keywordSearch(W, { query: question, limit: 5 }))[0].id, 9000);
 
-  // An ordinary question keeps its words; a common one goes only while a rarer one remains.
-  assert.deepEqual(local.keywordTerms(W, '두루미 quokka'), queryTerms('두루미 quokka'));
-  assert.deepEqual(local.keywordTerms(W, '회사 quokka'), ['quokka']);
-  assert.deepEqual(local.keywordTerms(W, '회사 규정'), ['회사', '규정']);
+  // A question of 16 words or fewer keeps them all, common ones included.
+  for (const q of ['두루미 quokka', '회사 quokka', '회사 규정']) assert.deepEqual(local.keywordTerms(W, q), queryTerms(q));
   assert.deepEqual((await local.keywordSearch(W, { query: '두루미 quokka', limit: 5 })).map((h) => h.id), [9000]);
   // A word that a new document brings is found at once, whatever was counted before.
   await client.upsert(W, { points: [{ id: 9001, payload: { file_id: 'new', content: `${common} wombat` } }] });
@@ -404,7 +403,7 @@ test('a keyword index out of step is rebuilt from the chunks, one chunk at a tim
   assert.deepEqual((await rebuilt.stats(R)).chunks, 1);
 });
 
-test('trimming a question never loses what the whole question finds: filters, short results, identifiers, accents', async () => {
+test('cutting a long question never loses what the whole question finds: filters, short results, identifiers', async () => {
   const T = 'unit_trim';
   await client.createCollection(T, { vectors: { size: 4 } });
   const points = [];
@@ -412,51 +411,80 @@ test('trimming a question never loses what the whole question finds: filters, sh
     let content = `guide filler${i % 700}`; // "guide" in every passage
     if (i % 4 === 0) content += ' 휴가 규정'; // a quarter of them
     if (i === 3000 || i === 3001) content += ' 출산 장려'; // rare, and only outside "hr"
-    if (i < 3) content += ' search_knowledge tool';
+    if (i < 16) content += ` uniq${i}`; // one passage each
+    if (i % 10 < 3) content += ' app'; // "app" and "url" in 30% each; "app_url" itself in three passages
+    if (i % 10 >= 5 && i % 10 < 8) content += ' url';
+    if (i >= 10 && i < 13) content += ' app_url';
     if (i >= 3 && i < 6) content += ' café menu';
     points.push({ id: i + 1, payload: { file_id: `f${i % 50}`, source: i < 200 ? 'hr' : 'eng', content } });
   }
   for (let i = 0; i < points.length; i += 1000) await client.upsert(T, { points: points.slice(i, i + 1000) });
+  const uniq = Array.from({ length: 16 }, (_, i) => `uniq${i}`).join(' ');
 
-  // The word rare in the whole index is not among the passages the filter lets through: every word is looked for.
-  const hr = await local.keywordSearch(T, { query: '출산 휴가 규정', limit: 5, filter: { must: [{ key: 'source', match: { value: 'hr' } }] } });
+  // 16 words or fewer: every word, as always.
+  for (const q of ['출산 휴가 규정', 'app_url guide', 'café guide', 'search_knowledge 휴가']) assert.deepEqual(local.keywordTerms(T, q), queryTerms(q));
+  // Longer: the commonest single words go, down to 16 the index holds. The identifier stays, though its pieces are
+  // common: FTS5 looks for it as "app" next to "url", which only three passages have.
+  const long = `app_url guide 휴가 ${uniq}`;
+  const terms = local.keywordTerms(T, long);
+  assert.deepEqual(terms, ['app_url', ...Array.from({ length: 15 }, (_, i) => `uniq${i}`)]);
+  assert.deepEqual(new Set((await local.keywordSearch(T, { query: long, limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([11, 12, 13]));
+  // A word the index does not hold is kept, and does not count among the 16.
+  assert.ok(local.keywordTerms(T, `nowhere ${long}`).includes('nowhere'));
+  // The words kept find 16 passages of the 30 asked for: the whole question fills the rest.
+  assert.deepEqual(local.keywordTerms(T, `guide ${uniq}`), uniq.split(' '));
+  const filled = (await local.keywordSearch(T, { query: `guide ${uniq}`, limit: 30 })).map((h) => h.id);
+  assert.deepEqual([filled.length, new Set(filled.slice(0, 16))], [30, new Set(Array.from({ length: 16 }, (_, i) => i + 1))]);
+  // A filtered search looks for every word: the rare one may not be among the passages the filter lets through.
+  const hr = await local.keywordSearch(T, { query: `출산 ${uniq} 휴가 규정`, limit: 5, filter: { must: [{ key: 'source', match: { value: 'hr' } }] } });
   assert.equal(hr.length, 5);
-  assert.ok(hr.every((h) => h.payload?.source === 'hr' && String(h.payload?.content).includes('휴가')), JSON.stringify(hr.map((h) => h.id)));
-  // Unfiltered, the rare word finds two passages of the five asked for: the whole question fills the rest.
-  assert.deepEqual(local.keywordTerms(T, '출산 휴가 규정'), ['출산']);
-  const all = (await local.keywordSearch(T, { query: '출산 휴가 규정', limit: 5 })).map((h) => h.id);
-  assert.deepEqual([all.length, all[0], all.includes(3002)], [5, 3001, true]);
-
-  // A word with "_" or an accent is split and unaccented by the keyword index: counted by its pieces, and kept.
-  assert.deepEqual(local.keywordTerms(T, 'search_knowledge guide'), ['search_knowledge']);
-  assert.deepEqual(local.keywordTerms(T, 'café guide'), ['café']);
-  assert.deepEqual(new Set((await local.keywordSearch(T, { query: 'search_knowledge guide', limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([1, 2, 3]));
-  assert.deepEqual(new Set((await local.keywordSearch(T, { query: 'café guide', limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([4, 5, 6]));
-  // A word no passage holds is kept rather than leaving only the commonest one.
-  assert.deepEqual(local.keywordTerms(T, 'nowhere guide'), ['nowhere', 'guide']);
+  assert.ok(hr.every((h) => h.payload?.source === 'hr'), JSON.stringify(hr.map((h) => h.id)));
 });
 
-test('words counted as common are counted again after a write by another process or a removal here', async () => {
+test('a word is split and unaccented as the keyword index does it, so it is counted as itself', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec("CREATE VIRTUAL TABLE t USING fts5(tokens, content='', contentless_delete=1); CREATE VIRTUAL TABLE v USING fts5vocab(t, 'instance')");
+  // Every Latin letter with marks (Latin-1, Latin Extended A and B, Latin Extended Additional: Vietnamese), and words.
+  const words: string[] = [];
+  for (const [from, to] of [[0xc0, 0x24f], [0x1e00, 0x1eff]]) for (let cp = from; cp <= to; cp++) words.push(...tokenize(String.fromCodePoint(cp)));
+  words.push(...tokenize('cổ phần người Việt đường search_knowledge file_id café naïve résumé 휴가 東京'));
+  const unique = [...new Set(words)];
+  const ins = db.prepare('INSERT INTO t (rowid, tokens) VALUES (?, ?)');
+  unique.forEach((w, i) => ins.run(i + 1, w));
+  const held = new Map<number, string[]>();
+  for (const r of db.prepare('SELECT term, doc FROM v ORDER BY doc, offset').all() as Array<{ term: string; doc: number }>) held.set(r.doc, [...(held.get(r.doc) ?? []), r.term]);
+  const any = new Set([...held.values()].flat());
+  // A piece that is not what the index holds for the word must not be a word it holds for other text: that miscounted
+  // a letter with two marks as the plain letter ("cổ" as the common "co").
+  const miscounted = unique.filter((w, i) => ftsPieces(w).some((p) => !(held.get(i + 1) ?? []).includes(p) && any.has(p)));
+  assert.deepEqual(miscounted, []);
+  assert.deepEqual(['cổ', 'café', 'search_knowledge', '휴가'].map(ftsPieces), [['cổ'], ['cafe'], ['search', 'knowledge'], ['휴가']]);
+});
+
+test('words counted as common are counted again after a write by another process or a rewrite here', async () => {
   const V = 'unit_vocab';
   await client.createCollection(V, { vectors: { size: 4 } });
-  const passage = (i: number, word: string) => ({ id: i + 1, payload: { file_id: i < 500 ? 'gone' : `f${i % 50}`, content: `${word} w${i % 900} rare${i}` } });
-  const points = Array.from({ length: 6000 }, (_, i) => passage(i, i < 1300 ? 'apple' : 'pear'));
-  for (let i = 0; i < points.length; i += 1000) await client.upsert(V, { points: points.slice(i, i + 1000) });
-  const terms = () => local.keywordTerms(V, 'apple rare1200');
-  assert.deepEqual(terms(), ['rare1200']); // apple in 1,300 of 6,000 passages: common, and remembered as such
+  // "apple" in the first `cut` passages and "pear" in the rest: both common, and remembered as such.
+  const passages = (cut: number) => Array.from({ length: 6000 }, (_, i) => ({ id: i + 1, payload: { file_id: `f${i % 50}`, content: `${i < cut ? 'apple' : 'pear'} w${i % 900} rare${i}` } }));
+  const write = async (to: { upsert: typeof client.upsert }, cut: number) => {
+    const points = passages(cut);
+    for (let i = 0; i < points.length; i += 1000) await to.upsert(V, { points: points.slice(i, i + 1000) });
+  };
+  await write(client, 1300);
+  // 17 words the index holds: the commonest goes.
+  const question = `apple pear ${Array.from({ length: 15 }, (_, i) => `rare${i}`).join(' ')}`;
+  const without = (word: string) => queryTerms(question).filter((t) => t !== word);
+  assert.deepEqual(local.keywordTerms(V, question), without('pear')); // pear in 4,700, apple in 1,300
 
-  // Another process removes 500 apple passages: 800 of 5,500 is no longer common.
+  // Another process turns it round (apple in 5,900, pear in 100) at the same size: this process counts again.
   const other = freshClient();
-  await other.delete(V, { filter: { must: [{ key: 'file_id', match: { value: 'gone' } }] } });
-  assert.deepEqual(terms(), ['apple', 'rare1200']);
-  assert.deepEqual(terms(), other.keywordTerms(V, 'apple rare1200'));
-
-  // It writes apple into 1,200 more (common again); then this process rewrites 1,000 of them without it.
-  await other.upsert(V, { points: Array.from({ length: 1200 }, (_, j) => passage(1300 + j, 'apple')) });
-  assert.deepEqual(terms(), ['rare1200']);
-  await client.upsert(V, { points: Array.from({ length: 1000 }, (_, j) => passage(1300 + j, 'pear')) });
-  assert.deepEqual(terms(), ['apple', 'rare1200']);
-  assert.deepEqual(terms(), freshClient().keywordTerms(V, 'apple rare1200'));
+  await write(other, 5900);
+  assert.deepEqual(local.keywordTerms(V, question), without('apple'));
+  assert.deepEqual(local.keywordTerms(V, question), other.keywordTerms(V, question));
+  // This process turns it back by rewriting the passages: counted again too.
+  await write(client, 1300);
+  assert.deepEqual(local.keywordTerms(V, question), without('pear'));
+  assert.deepEqual(local.keywordTerms(V, question), freshClient().keywordTerms(V, question));
 });
 
 test('vectors another process fills in are read again into room that grows by half, not by a sixteenth', async () => {
@@ -525,6 +553,20 @@ test('a file from before the vector_error column works read-only and while anoth
   const check = new DatabaseSync(path);
   assert.match(String((check.prepare("SELECT vector_error FROM vec_old WHERE id = '2'").get() as { vector_error: string }).vector_error), /^\d{4}-\d\d-\d\dT[\d:.]+Z too long$/);
   check.exec("UPDATE vec_old SET vector_error = '2000-01-01T00:00:00.000Z too long' WHERE id = '2'");
-  check.close();
   assert.deepEqual((await rw.missingVectors('old', 5)).map((m) => m.id), [2]);
+  // A mark written before marks carried a time is old enough: tried again.
+  check.exec("UPDATE vec_old SET vector_error = 'embeddings 400 (model): input is too large' WHERE id = '2'");
+  assert.deepEqual((await rw.missingVectors('old', 5)).map((m) => m.id), [2]);
+
+  // An older version drops the collection and makes it again, without the column: it is added again on the next call.
+  check.exec(`DROP TABLE vec_old; DROP TABLE fts_old;
+    CREATE TABLE vec_old (id TEXT PRIMARY KEY, file_id TEXT, payload TEXT, vector BLOB);
+    CREATE INDEX vec_old_file ON vec_old (file_id);
+    CREATE INDEX vec_old_novec ON vec_old (file_id) WHERE vector IS NULL;
+    CREATE VIRTUAL TABLE fts_old USING fts5(tokens, content='', contentless_delete=1);`);
+  check.prepare('INSERT INTO vec_old (rowid, id, file_id, payload, vector) VALUES (1, ?, ?, ?, NULL)').run('7', 'c', JSON.stringify({ file_id: 'c', content: 'made again' }));
+  check.close();
+  assert.deepEqual((await rw.missingVectors('old', 5)).map((m) => m.id), [7]);
+  await rw.setVectors('old', [{ id: 7, vector: [0, 1, 0, 0] }]);
+  assert.deepEqual([await rw.refusedVectors('old'), (await rw.search('old', { vector: [0, 1, 0, 0], limit: 1 }))[0].id], [0, 7]);
 });

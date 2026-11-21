@@ -6,7 +6,7 @@
  */
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -17,13 +17,15 @@ for (const k of Object.keys(process.env)) if (/^(GOOGLE_|DRIVE_|QDRANT_|OPENAI_|
 /**
  * An embedding endpoint on this machine. It answers 400 "input is too large" for a text `refuse` picks (one with
  * TOO-LARGE in it), 400 for everything while `down` or after request number `downAfter`, and 401 on request number
- * `failAt`. Each request notes how many passages the index held when it came: storing in rounds shows as that number
- * growing between requests.
+ * `failAt`. Request number `holdAt` is not answered until the test answers `held`. Each request notes how many
+ * passages the index held when it came: storing in rounds shows as that number growing between requests.
  */
 const fake = {
   down: false,
   failAt: 0,
   downAfter: 0,
+  holdAt: 0,
+  held: null as ServerResponse | null,
   refuse: (t: string) => t.includes('TOO-LARGE'),
   requests: [] as Array<{ size: number; stored: number }>,
 };
@@ -36,6 +38,7 @@ const server = createServer((req, res) => {
     fake.requests.push({ size: input.length, stored: await stored() });
     res.setHeader('Content-Type', 'application/json');
     const fail = (status: number, message: string) => void res.writeHead(status).end(JSON.stringify({ error: { message } }));
+    if (fake.holdAt && fake.requests.length === fake.holdAt) return void (fake.held = res);
     if (fake.down || (fake.downAfter && fake.requests.length > fake.downAfter)) return fail(400, 'model not loaded');
     if (fake.failAt && fake.requests.length === fake.failAt) return fail(401, 'key revoked');
     if (input.some(fake.refuse)) return fail(400, 'input is too large to process. increase the physical batch size');
@@ -57,8 +60,10 @@ Object.assign(process.env, {
   KNOWLEDGE_CHUNK_OVERLAP: '0',
 });
 
-const { indexText, getIndexedState, backfillVectors, vectorStatus, embedEach, fillMissingVectors } = await import('../src/plugins/drive/indexer.js');
-const { ensureCollection, getLocalIndex, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
+const indexer = await import('../src/plugins/drive/indexer.js');
+const { indexText, getIndexedState, backfillVectors, vectorStatus, embedEach, fillMissingVectors } = indexer;
+const { chunkMarkdown } = await import('../src/plugins/drive/chunker.js');
+const { ensureCollection, getLocalIndex, vectorForm, DRIVE_COLLECTION } = await import('../src/plugins/drive/qdrant.js');
 await ensureCollection();
 const local = (await getLocalIndex())!;
 stored = async () => (await local.stats(DRIVE_COLLECTION)).chunks;
@@ -79,7 +84,7 @@ test('a long document is embedded and stored a round at a time, with chunk 0 las
   assert.deepEqual(seen, [...seen].sort((a, b) => a - b));
 
   // A failure half way (the key is refused on the sixth request, after one round was stored) leaves the document to
-  // be indexed again: chunk 0, which says it is done, was not written, and what the run did write is gone again.
+  // be indexed again: chunk 0, which says it is done, was not written. The next run that succeeds stores it whole.
   fake.requests = [];
   fake.failAt = 6;
   try {
@@ -88,10 +93,10 @@ test('a long document is embedded and stored a round at a time, with chunk 0 las
     fake.failAt = 0;
   }
   assert.ok(fake.requests.some((r) => r.stored > 0), 'a round was stored before the failure');
-  assert.equal((await local.documentChunks(DRIVE_COLLECTION, 'broken')).length, 0);
   assert.equal(await getIndexedState('broken'), null);
   assert.equal(await indexText(file('broken'), longText(150)), chunks);
   assert.ok((await getIndexedState('broken'))?.content_hash);
+  assert.equal((await local.documentChunks(DRIVE_COLLECTION, 'broken')).length, chunks);
 });
 
 test('a passage the endpoint refuses is set aside: every other passage gets its vector', async () => {
@@ -139,7 +144,7 @@ test('a passage the endpoint refuses is set aside: every other passage gets its 
   assert.ok((await local.missingVectors(DRIVE_COLLECTION, 100_000)).some((m) => m.id === 100_000));
 });
 
-test('a version that fails half way leaves no passages behind, before or after the next version', async () => {
+test('a version that fails half way leaves no passages behind once the next version is stored', async () => {
   const v1 = await indexText(file('versions'), longText(40, 'vone'));
   const stored = async () => (await local.documentChunks(DRIVE_COLLECTION, 'versions')).map((p) => String(p?.content));
   // A longer version fails after one round of passages past the end of the first was stored.
@@ -150,9 +155,9 @@ test('a version that fails half way leaves no passages behind, before or after t
   } finally {
     fake.failAt = 0;
   }
-  const afterFailure = await stored();
-  assert.equal(afterFailure.length, v1);
-  assert.ok(afterFailure.every((t) => !t.includes('vtwo')));
+  // Nothing is deleted on failure (another process may have stored the same chunks meanwhile): what the failed run
+  // wrote past the first version stays until a run succeeds, and chunk 0 still says the first version.
+  assert.ok((await stored()).length > v1);
   assert.equal((await getIndexedState('versions'))?.chunk_count, v1);
   // A shorter third version leaves exactly its own passages, and the failed one's words find nothing.
   const v3 = await indexText(file('versions'), longText(30, 'vthree'));
@@ -200,4 +205,64 @@ test('an endpoint that stops answering while refused passages are looked for set
   // Up again: only the large passage is set aside.
   assert.deepEqual(await fillMissingVectors(128), { handled: 128, made: 127 });
   assert.deepEqual([await local.refusedVectors(DRIVE_COLLECTION), await waiting()], [refusedBefore + 1, 0]);
+});
+
+test('a run that fails while another process stores the same version leaves that version whole', async () => {
+  const doc = file('shared');
+  await indexText(doc, longText(40, 'vone'));
+  // Process A (a sync) indexes version 2 and waits on the embedding request of its last round (chunk 0)...
+  const v2 = longText(150, 'vtwo');
+  fake.requests = [];
+  fake.holdAt = 7; // rounds 128-255 (requests 1-4) and 256-300 (5-6) are stored; 7 is the first of the round with chunk 0
+  const a = indexText(doc, v2);
+  while (!fake.held) await new Promise((r) => setTimeout(r, 5));
+  fake.holdAt = 0;
+  // ...while process B (a reindex) deletes the document and stores version 2 whole.
+  const chunks = chunkMarkdown(v2);
+  const hash = indexer.contentHash(v2);
+  const form = await vectorForm();
+  await local.delete(DRIVE_COLLECTION, { filter: { must: [{ key: 'file_id', match: { value: doc.id } }] } });
+  await indexer.storeChunks(local, {
+    fileId: doc.id,
+    chunks,
+    pointOf: (c, idx) => ({
+      id: indexer.makeChunkId(doc.id, idx),
+      payload: indexer.buildChunkPayload(c, doc, idx, chunks.length, indexer.classifyFile(doc.path, doc.source), indexer.deriveBizMeta(doc.path, doc.source), hash),
+    }),
+    embedInput: (c) => indexer.embedInputForChunk(c, doc.name, form),
+    wait: false,
+    sweep: false,
+  });
+  assert.equal((await local.documentChunks(DRIVE_COLLECTION, doc.id)).length, chunks.length);
+  // A then fails. What it wrote is B's version now: nothing of it is deleted, and the next sync finds it done.
+  fake.held!.writeHead(401).end(JSON.stringify({ error: { message: 'key revoked' } }));
+  fake.held = null;
+  await assert.rejects(a, /401/);
+  assert.equal((await local.documentChunks(DRIVE_COLLECTION, doc.id)).length, chunks.length);
+  assert.equal(await indexText(doc, v2), 0);
+  assert.equal((await local.documentChunks(DRIVE_COLLECTION, doc.id)).length, chunks.length);
+});
+
+test('refused passages the index file cannot mark are left out for the run, not asked for again and again', async () => {
+  await fillMissingVectors(100_000); // what the tests before left without a vector
+  await local.upsert(DRIVE_COLLECTION, {
+    points: [0, 1, 2].map((i) => ({ id: 700_000 + i, payload: { file_id: `000-unmarked-${i}`, file_name: 'u.md', heading: 'h', content: `TOO-LARGE unmarked ${i}` } })),
+  });
+  // As when the file is read-only, or another process holds the write lock: the mark cannot be stored.
+  const refuse = local.refuseVectors;
+  local.refuseVectors = async () => false;
+  try {
+    fake.requests = [];
+    assert.deepEqual(await fillMissingVectors(20_000), { handled: 3, made: 0 });
+    assert.ok(fake.requests.length < 30, `${fake.requests.length} requests`);
+    // Not fetched again by this process: no requests at all.
+    fake.requests = [];
+    assert.deepEqual(await fillMissingVectors(20_000), { handled: 0, made: 0 });
+    assert.equal(fake.requests.length, 0);
+  } finally {
+    local.refuseVectors = refuse;
+  }
+  // Still there for keyword search, and waiting for a vector in the file.
+  assert.equal((await local.keywordSearch(DRIVE_COLLECTION, { query: 'unmarked', limit: 5 })).length, 3);
+  assert.equal((await local.missingVectors(DRIVE_COLLECTION, 10_000)).filter((m) => String(m.payload?.file_id).startsWith('000-unmarked')).length, 3);
 });

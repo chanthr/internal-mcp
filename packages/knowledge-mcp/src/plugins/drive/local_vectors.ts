@@ -185,25 +185,29 @@ const META_FIELDS = ['file_id', 'source', 'cluster', 'has_image', 'doc_status', 
 
 /** Keyword search keeps every word of a question below this many passages: there, even a long question is fast. */
 const KEYWORD_TRIM_FROM = 5_000;
-/** A word found in more than this share of the passages is dropped from a question while rarer words remain. */
-const KEYWORD_COMMON_SHARE = 0.2;
-/** At most this many words of a question are searched for: the rarest. */
+/** A longer question is searched first with this many of its words (keywordTerms); a shorter one with all of them. */
 const KEYWORD_MAX_TERMS = 16;
+/** How many passages hold a word is remembered when it is more than this share of them: those take long to count. */
+const KEYWORD_REMEMBER_SHARE = 0.2;
 
 /**
  * How long a chunk the embedding endpoint refused is left out of missingVectors. Then it is tried again: an endpoint
  * that refused it may have changed (another model behind the same name, a larger context, another address).
  */
-const REFUSAL_RETRY_MS = 24 * 60 * 60 * 1000;
+export const REFUSAL_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The pieces FTS5's tokenizer (unicode61) makes of a word from tokens.ts: it splits at anything but letters and
- * digits, "_" included, and drops accents from Latin letters. "search_knowledge" is held as "search" and
- * "knowledge", "café" as "cafe".
+ * digits, "_" included, and drops the accent from a Latin letter that is one plain letter and one mark. So
+ * "search_knowledge" is held as "search" and "knowledge", and "café" as "cafe", but "cổ", whose letter has two marks,
+ * stays "cổ" (dropping both counted it as the common word "co").
  */
-function ftsPieces(term: string): string[] {
+export function ftsPieces(term: string): string[] {
   return term
-    .replace(/\p{Script=Latin}/gu, (c) => c.normalize('NFD').replace(/\p{M}/gu, ''))
+    .replace(/\p{Script=Latin}/gu, (c) => {
+      const parts = c.normalize('NFD');
+      return /^[a-zA-Z]\p{M}$/u.test(parts) ? parts[0] : c;
+    })
     .split(/[^\p{L}\p{N}\p{Co}]+/u)
     .filter(Boolean);
 }
@@ -238,8 +242,8 @@ export class LocalVectorClient {
   private memory = new Map<string, MemoryIndex>();
   private meta = new Map<string, MetaIndex>();
   private checked = new Set<string>();
-  /** Collections whose table has the vector_error column (canRefuse). */
-  private refusable = new Map<string, boolean>();
+  /** Collections whose table has the vector_error column (canRefuse), and the file's layout version then. */
+  private refusable = new Map<string, { ok: boolean; schema: number }>();
   private reads = new Map<string, Reads>();
   /** Words found in many passages, with how many: counting those is what costs (see keywordTerms). */
   private commonTerms = new Map<string, { total: number; version: number; docs: Map<string, number>; count: StatementSync }>();
@@ -277,7 +281,7 @@ export class LocalVectorClient {
    * do not move data_version.
    */
   private applyWrite(name: string, ops: WriteOp[]): void {
-    // A chunk removed or rewritten may make a common word rarer: what was counted is counted again (termDocs).
+    // A chunk removed or rewritten may make a common word rarer: what was counted is counted again (pieceDocs).
     if (ops.some((op) => op.kind === 'remove')) this.commonTerms.delete(name);
     if (!this.memory.has(name) && !this.meta.has(name)) return;
     const version = this.dataVersion();
@@ -454,15 +458,21 @@ export class LocalVectorClient {
    * later call.
    */
   private canRefuse(name: string): boolean {
-    if (this.refusable.get(name)) return true;
+    // Looked at again when the file's layout changed: an older version may have made the table again without it.
+    const known = this.refusable.get(name);
+    if (known?.ok && known.schema === this.schemaVersion()) return true;
     const table = tableOf(name);
     const has = () => (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === 'vector_error');
     if (!has()) this.tryChange(`ALTER TABLE ${table} ADD COLUMN vector_error TEXT`);
     const ok = has();
     // Counting the refused chunks reads this small index. Without it the count reads the table, which still works.
     if (ok) this.tryChange(`CREATE INDEX IF NOT EXISTS ${table}_refused ON ${table} (file_id) WHERE vector_error IS NOT NULL`);
-    this.refusable.set(name, ok);
+    this.refusable.set(name, { ok, schema: this.schemaVersion() });
     return ok;
+  }
+
+  private schemaVersion(): number {
+    return Number((this.db.prepare('PRAGMA schema_version').get() as { schema_version: number }).schema_version);
   }
 
   /**
@@ -891,38 +901,41 @@ export class LocalVectorClient {
   }
 
   /**
-   * The words an unfiltered keyword search looks for first. In a small index, all of them. In a large one a word
-   * found in more than a fifth of the passages is dropped while rarer words remain, and the rarest KEYWORD_MAX_TERMS
-   * are kept. A common word matches nearly every passage, and BM25 then ranks each one: a long Korean question (every
-   * pair of characters is a word) took 400 ms at 70,000 passages and blocked the server meanwhile. It adds little to
-   * the ranking, which weighs a word by how rare it is. A word the index does not hold is kept (it costs nothing to
-   * look for), and when the words kept find fewer passages than asked for, keywordSearch looks for all of them.
+   * The words an unfiltered keyword search looks for first. A question of KEYWORD_MAX_TERMS words or fewer, or one in
+   * a small index, is searched with all of them, as it always was. A longer one is cut down to that many of the words
+   * the index holds by leaving out its most common words: BM25 ranks every passage that holds any word, so a long
+   * Korean question (every pair of characters is a word) took 400 ms at 70,000 passages and blocked the server
+   * meanwhile. A word of several pieces is never left out (FTS5 looks for "search_tool" as "search" next to "tool",
+   * far rarer than either piece), nor a word the index does not hold. When the words kept find fewer passages than
+   * asked for, keywordSearch looks for all of them.
    */
   keywordTerms(name: string, question: string): string[] {
     const terms = queryTerms(question);
-    if (terms.length <= 1) return terms;
+    if (terms.length <= KEYWORD_MAX_TERMS) return terms;
     const total = Number((this.db.prepare(`SELECT count(*) AS n FROM ${tableOf(name)}`).get() as { n: number }).n);
     if (total < KEYWORD_TRIM_FROM) return terms;
-    const common = total * KEYWORD_COMMON_SHARE;
-    const counted: Array<{ term: string; at: number; docs: number }> = [];
+    const counted: Array<{ at: number; docs: number; single: boolean }> = [];
     for (const [at, term] of terms.entries()) {
-      const docs = this.termDocs(name, term, total, common);
-      if (docs === null) return terms; // the word list cannot be read here: nothing is dropped
-      counted.push({ term, at, docs });
+      const pieces = ftsPieces(term);
+      let docs = Infinity;
+      for (const piece of pieces) {
+        const n = this.pieceDocs(name, piece, total);
+        if (n === null) return terms; // the word list cannot be read here: nothing is left out
+        docs = Math.min(docs, n);
+      }
+      counted.push({ at, docs: docs === Infinity ? 0 : docs, single: pieces.length === 1 });
     }
-    const unknown = counted.filter((t) => t.docs === 0);
-    const known = counted.filter((t) => t.docs > 0);
-    const rare = known.filter((t) => t.docs <= common);
-    const kept = [...unknown, ...(rare.length ? rare : known).sort((a, b) => a.docs - b.docs || a.at - b.at).slice(0, KEYWORD_MAX_TERMS)];
-    return kept.sort((a, b) => a.at - b.at).map((t) => t.term);
+    const held = counted.filter((t) => t.docs > 0).length;
+    const commonest = counted.filter((t) => t.single && t.docs > 0).sort((a, b) => b.docs - a.docs || b.at - a.at);
+    const left = new Set(commonest.slice(0, Math.max(0, held - KEYWORD_MAX_TERMS)).map((t) => t.at));
+    return terms.filter((_, at) => !left.has(at));
   }
 
   /**
-   * How many passages hold a word, from the keyword index's own word list (fts5vocab, made for this connection).
-   * The index splits a word as FTS5's tokenizer does (ftsPieces), so a word of several pieces is counted by its rarest
-   * piece: no passage can hold it more often. Null when the word list cannot be made (a read-only connection).
+   * How many passages hold one piece of a word (ftsPieces), from the keyword index's own word list (fts5vocab, made
+   * for this connection). Null when the word list cannot be made (a read-only connection).
    */
-  private termDocs(name: string, term: string, total: number, common: number): number | null {
+  private pieceDocs(name: string, piece: string, total: number): number | null {
     let known = this.commonTerms.get(name);
     // What was remembered is dropped when another process wrote (data_version), and once the index has grown or
     // shrunk by a tenth. This process's removals drop it too (applyWrite).
@@ -936,22 +949,18 @@ export class LocalVectorClient {
       }
       this.commonTerms.set(name, known);
     }
-    let fewest = Infinity;
-    for (const piece of ftsPieces(term)) {
-      let docs = known.docs.get(piece);
-      if (docs === undefined) {
-        docs = Number((known.count.get(piece) as { doc: number } | undefined)?.doc ?? 0);
-        // Counting a common word reads its whole list of passages (about a millisecond at 70,000), so those are
-        // remembered: a common word stays common while a few documents are added. A rarer word is counted every
-        // time, which is quick, so a word that a new document brings is never taken for absent.
-        if (docs > common) {
-          if (known.docs.size >= 10_000) known.docs.clear();
-          known.docs.set(piece, docs);
-        }
+    let docs = known.docs.get(piece);
+    if (docs === undefined) {
+      docs = Number((known.count.get(piece) as { doc: number } | undefined)?.doc ?? 0);
+      // Counting a common word reads its whole list of passages (about a millisecond at 70,000), so those are
+      // remembered: a common word stays common while a few documents are added. A rarer word is counted every time,
+      // which is quick, so a word that a new document brings is never taken for absent.
+      if (docs > total * KEYWORD_REMEMBER_SHARE) {
+        if (known.docs.size >= 10_000) known.docs.clear();
+        known.docs.set(piece, docs);
       }
-      fewest = Math.min(fewest, docs);
     }
-    return fewest === Infinity ? 0 : fewest;
+    return docs;
   }
 
   /** How many chunks there are, and how many of them still wait for a vector. Both read an index, not the table. */
@@ -1103,12 +1112,15 @@ export class LocalVectorClient {
   async missingVectors(name: string, limit: number): Promise<Array<{ id: number; payload: Payload | null }>> {
     this.requireDim(name);
     // Through the index of chunks without a vector: the cost is the batch, however many chunks are already done.
-    // A refusal starts with when it was made (refuseVectors), so an older one compares as smaller than the cutoff.
+    // A refusal starts with when it was made (refuseVectors), so an older one compares as smaller than the cutoff. One
+    // that does not start with a time was written before refusals carried one: it is old enough.
     const refusable = this.canRefuse(name);
     const rows = (
       refusable
         ? this.db
-            .prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL AND (vector_error IS NULL OR vector_error < ?) LIMIT ?`)
+            .prepare(
+              `SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL AND (vector_error IS NULL OR vector_error < ? OR vector_error NOT GLOB '[0-9]*') LIMIT ?`,
+            )
             .all(new Date(Date.now() - REFUSAL_RETRY_MS).toISOString(), limit)
         : this.db.prepare(`SELECT id, payload FROM ${tableOf(name)} WHERE vector IS NULL LIMIT ?`).all(limit)
     ) as Array<{ id: string; payload: string }>;

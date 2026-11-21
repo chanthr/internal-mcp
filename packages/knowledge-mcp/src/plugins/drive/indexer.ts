@@ -10,6 +10,7 @@ import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.
 import { extractText } from './extract_text.js';
 import { getQdrantClient, getLocalIndex, vectorForm, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload, type PointId, type VectorClient } from './qdrant.js';
 import { withLock } from '../../core/lock.js';
+import { REFUSAL_RETRY_MS } from './local_vectors.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
 import { normalizeFolderName } from './exclude.js';
@@ -286,7 +287,6 @@ export async function indexText(
     pointOf: (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
     embedInput: form ? (c) => embedInputForChunk(c, file.name, form) : null,
     wait: true,
-    stored: prev?.chunk_count ?? 0,
   });
   return chunks.length;
 }
@@ -300,11 +300,12 @@ const STORE_BATCH = 128;
  * hundred megabytes, and more than a gigabyte for a file at the size limit.
  *
  * The round with chunk 0 goes last. Chunk 0 carries the content hash that says the document is indexed, so a run
- * that fails half way leaves the document to be indexed again instead of looking done. What that run wrote past the
- * `stored` chunks of the earlier version is deleted at once, and after a run that succeeds every stored chunk from
- * the new count on is deleted (`sweep`), so no failed run leaves passages behind. In the built-in index a passage the
- * endpoint refuses (too long for the model, say) is stored for keyword search and set aside without a vector
- * (embedEach); Qdrant holds nothing without a vector, so there the document fails as before.
+ * that fails half way leaves the document to be indexed again instead of looking done. Nothing is deleted when a run
+ * fails: another process may have stored the same chunks meanwhile (a reindex beside a sync), and deleting them left
+ * the document short for good. Instead every run that succeeds deletes the stored chunks from the new count on
+ * (`sweep`), so the next success removes what a failed longer run left. In the built-in index a passage the endpoint
+ * refuses (too long for the model, say) is stored for keyword search and set aside without a vector (embedEach);
+ * Qdrant holds nothing without a vector, so there the document fails as before.
  */
 export async function storeChunks(
   client: VectorClient,
@@ -314,8 +315,6 @@ export async function storeChunks(
     pointOf: (chunk: RawChunk, idx: number) => { id: number; payload: ChunkPayload };
     embedInput: ((chunk: RawChunk) => string) | null;
     wait: boolean;
-    /** How many chunks the version already stored has (chunk 0's chunk_count; 0 when there is none). */
-    stored: number;
     /** Look for chunks past the new count afterwards. Not needed when the caller deleted the document first. */
     sweep?: boolean;
   },
@@ -325,25 +324,16 @@ export async function storeChunks(
   const starts: number[] = [];
   for (let start = STORE_BATCH; start < chunks.length; start += STORE_BATCH) starts.push(start);
   starts.push(0);
-  const written: number[] = [];
-  try {
-    for (const start of starts) {
-      const part = chunks.slice(start, start + STORE_BATCH);
-      const vectors = embedInput ? await (local ? embedEach : embedTexts)(part.map(embedInput)) : null;
-      const points = part.map((c, i) => {
-        const v = vectors?.[i];
-        return { ...pointOf(c, start + i), vector: Array.isArray(v) ? v : undefined };
-      });
-      await client.upsert(DRIVE_COLLECTION, { wait, points });
-      for (let i = 0; i < part.length; i++) if (start + i >= doc.stored) written.push(points[i].id);
-      const refused = points.flatMap((p, i) => (vectors && !Array.isArray(vectors[i]) ? [{ id: p.id, reason: (vectors[i] as Refused).refused }] : []));
-      if (local && refused.length) await setAside(local, refused);
-    }
-  } catch (e) {
-    // The chunks the earlier version did not have go again: chunk 0 still gives the earlier count, and the next run
-    // would not know of them. (Those within that count were overwritten, and the next run overwrites them again.)
-    if (written.length) await client.delete(DRIVE_COLLECTION, { wait: true, points: written }).catch(() => undefined);
-    throw e;
+  for (const start of starts) {
+    const part = chunks.slice(start, start + STORE_BATCH);
+    const vectors = embedInput ? await (local ? embedEach : embedTexts)(part.map(embedInput)) : null;
+    const points = part.map((c, i) => {
+      const v = vectors?.[i];
+      return { ...pointOf(c, start + i), vector: Array.isArray(v) ? v : undefined };
+    });
+    await client.upsert(DRIVE_COLLECTION, { wait, points });
+    const refused = points.flatMap((p, i) => (vectors && !Array.isArray(vectors[i]) ? [{ id: p.id, reason: (vectors[i] as Refused).refused }] : []));
+    if (local && refused.length) await setAside(local, refused);
   }
   if (doc.sweep !== false) await deleteChunksFrom(client, fileId, chunks.length, wait);
 }
@@ -464,9 +454,21 @@ async function oneByOne(inputs: string[]): Promise<Array<number[] | Refused>> {
   return out;
 }
 
+/**
+ * Refused passages the index file could not mark (it is read-only, or another process was writing), with when, by
+ * chunk id: left out of fillMissingVectors in this process for as long as a mark would have kept them out. Without
+ * this the same passages were fetched and refused again at once, tens of thousands of requests a minute.
+ */
+const leftOut = new Map<number, number>();
+
 /** Passages the endpoint refused: kept for keyword search, and no longer offered for a vector (missingVectors). */
 async function setAside(index: NonNullable<Awaited<ReturnType<typeof getLocalIndex>>>, refused: Array<{ id: number; reason: string }>): Promise<void> {
-  if (!(await index.refuseVectors(DRIVE_COLLECTION, refused))) return; // the file cannot hold the mark now: offered again later
+  if (!(await index.refuseVectors(DRIVE_COLLECTION, refused))) {
+    const now = Date.now();
+    for (const r of refused) leftOut.set(r.id, now);
+    console.error(`[index] the embedding endpoint refused ${refused.length} passage(s); the index file cannot mark them now (read-only, or busy), so this process leaves them out for a day`);
+    return;
+  }
   console.error(`[index] the embedding endpoint refused ${refused.length} passage(s); they are found by keywords only: ${refused[0].reason.slice(0, 200)}`);
 }
 
@@ -499,8 +501,12 @@ export async function fillMissingVectors(max: number): Promise<{ handled: number
   if (!index) return { handled: 0, made: 0 };
   let handled = 0;
   let made = 0;
+  const now = Date.now();
+  for (const [id, at] of leftOut) if (now - at > REFUSAL_RETRY_MS) leftOut.delete(id);
   while (handled < max) {
-    const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(STORE_BATCH, max - handled));
+    const want = Math.min(STORE_BATCH, max - handled);
+    // Past the passages this process could not mark as refused (setAside), which would come first again.
+    const batch = (await index.missingVectors(DRIVE_COLLECTION, want + leftOut.size)).filter((b) => !leftOut.has(b.id)).slice(0, want);
     if (batch.length === 0) break;
     const form = await vectorForm();
     const inputs = batch.map((b) =>

@@ -390,14 +390,13 @@ export async function runReindex(argv: string[]): Promise<void> {
         filter: { must: [{ key: 'file_id', match: { value: file.id } }] },
       });
       // Embedded and stored a batch at a time (storeChunks); the payload is built by buildChunkPayload, shared with indexer.ts.
-      // Nothing of the file is left from before (deleted above), so a failure removes all this run wrote.
+      // Nothing of the file is left from before (deleted above), so there is nothing past the new count to look for.
       await storeChunks(qdrant, {
         fileId: file.id,
         chunks,
         pointOf: (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
         embedInput: form ? (c) => embedInputForChunk(c, file.name, form) : null,
         wait: false,
-        stored: 0,
         sweep: false,
       });
       if (form) await noteVectorModel(form);
