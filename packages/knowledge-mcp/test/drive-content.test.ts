@@ -148,7 +148,7 @@ test('cleaning: text anyone can send is cleaned in time, and ordinary text as be
   const page = ['\\section{Introduction}  ', 'Text with <b>bold</b> and <span class="x">a span</span><br/>next line &amp; more &lt;tags&gt;, 3 < 4.', '', '', '', '-- 1 of 2 --', '\\textbf{Key} point\t', '  -- 2 of 2 --  ', '한국어 문장입니다. ', 'Last line.'].join('\n');
   assert.equal(cleanExtractedText(page), 'Introduction\nText with bold and a span\nnext line & more <tags>, 3 < 4.\n\nKey point\n\n한국어 문장입니다.\nLast line.');
   const exported = 'Intro\n\n![chart][image1]\n\nText ![inline](data:image/png;base64,iVBORw0KGgo=) and ![kept](https://example.com/a.png).\n\n[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==>\n';
-  assert.equal(stripEmbeddedImages(exported), 'Intro\n\nText  and ![kept](https://example.com/a.png).\n\n');
+  assert.equal(stripEmbeddedImages(exported), 'Intro\n\nchart\n\nText inline and ![kept](https://example.com/a.png).\n\n');
 });
 
 test('chunker: one long word is cut in time, and every piece is within the cap', () => {
@@ -469,7 +469,7 @@ test('extraction: pictures embedded in a Markdown or text file are dropped befor
   const { text } = await extractLocalFile(md, 'text/markdown');
   const chunks = chunkMarkdown(text);
   assert.ok(performance.now() - at < 500, `${Math.round(performance.now() - at)} ms`);
-  assert.equal(text, '# Report\n\nSales went up.\n\nCosts went down.');
+  assert.equal(text, '# Report\n\nSales went up.\n\nchart\n\nCosts went down.');
   assert.equal(chunks.length, 1);
   assert.equal((await extractLocalFile(txt, 'text/plain')).text, 'Summary');
 });
@@ -482,25 +482,50 @@ test('extraction: in a file someone wrote, small pictures are kept and large one
     'Inline: `![dot](data:image/gif;base64,R0lGOD==)` works in most viewers.\n\nReference style:\n\n' +
     '```md\n![logo][l]\n\n[l]: data:image/png;base64,iVBORw0KGgo=\n```\n\nA small one: ![dot](data:image/png;base64,iVBORw0KGgo=).\n';
   assert.equal(stripEmbeddedImages(doc, { written: true }), doc);
-  // A picture of real size goes, with its definition and its reference, in code too.
+  // A picture of real size goes, with its definition, in code too; its alt text stays in its place, as it does for a
+  // picture with an address (found by review: it went too).
   const big = 'iVBORw0KGgo'.repeat(200);
   const pictures = `Intro\n\n![chart](data:image/png;base64,${big})\n\n\`![chart](data:image/png;base64,${big})\`\n\n![ref][big]\n\n[big]: <data:image/png;base64,${big}>\n`;
-  assert.equal(stripEmbeddedImages(pictures, { written: true }), 'Intro\n\n``\n\n');
+  assert.equal(stripEmbeddedImages(pictures, { written: true }), 'Intro\n\nchart\n\n`chart`\n\nref\n\n');
+  assert.equal(stripEmbeddedImages(`before ![Architecture of the sync service](data:image/png;base64,${big}) after`, { written: true }), 'before Architecture of the sync service after');
   // A step of a numbered list, indented as code is, was taken for code and kept (found by review: a picture of 1 MB
   // became 855 passages). So were nested lists, and a picture after a heading or a list item with a backtick.
   const pic = `![Settings](data:image/png;base64,${big})`;
   for (const [text, left] of [
-    [`1. Open settings.\n\n    ${pic}\n\n2. Save.`, '1. Open settings.\n\n    \n\n2. Save.'],
-    [`- Step\n    - Sub step\n\n      ${pic}\n`, '- Step\n    - Sub step\n\n      \n'],
-    [`## The \` key\n${pic}\nPress \` again`, '## The ` key\n\nPress ` again'],
-    [`Use \`\` ${pic} \`\` to embed.`, 'Use ``  `` to embed.'],
+    [`1. Open settings.\n\n    ${pic}\n\n2. Save.`, '1. Open settings.\n\n    Settings\n\n2. Save.'],
+    [`- Step\n    - Sub step\n\n      ${pic}\n`, '- Step\n    - Sub step\n\n      Settings\n'],
+    [`## The \` key\n${pic}\nPress \` again`, '## The ` key\nSettings\nPress ` again'],
+    [`Use \`\` ${pic} \`\` to embed.`, 'Use `` Settings `` to embed.'],
   ]) {
     assert.equal(stripEmbeddedImages(text, { written: true }), left);
   }
-  // From a Google Doc, every picture of data goes, as before.
-  assert.equal(stripEmbeddedImages('Text ![dot](data:image/png;base64,iVBORw0KGgo=) here.'), 'Text  here.');
-  // In time, with "![" that never closes and backticks.
-  for (const text of ['` `` ``` ````'.repeat(20_000) + pic, `${'![a `b\n'.repeat(50_000)}${pic}`, `${'![x](data:image/png;base64,'.repeat(8_000)}`]) {
+  // Data written otherwise was kept whole (found by review): an SVG with a character set before ";base64", an SVG
+  // URL-encoded after ";utf8", a name among the parameters, base64 broken every 76 characters, and capitals.
+  const wrapped = Array.from({ length: 30 }, () => 'A'.repeat(76)).join('\n');
+  for (const data of [
+    `data:image/svg+xml;charset=utf-8;base64,${big}`,
+    `data:image/svg+xml;utf8,${'%3Cpath%20d%3D%22M0%200%22%2F%3E'.repeat(40)}`,
+    `data:image/png;name=a.png;base64,${big}`,
+    `data:image/png;base64,${wrapped}`,
+    `DATA:IMAGE/PNG;BASE64,${big}`,
+  ]) {
+    assert.equal(stripEmbeddedImages(`a ![x](${data}) b`, { written: true }), 'a x b', data.slice(0, 40));
+    assert.equal(stripEmbeddedImages(`a ![][p] b\n\n[p]: <${data.replace(/\n/g, '')}> "Title"\n`, { written: true }), 'a  b\n\n', data.slice(0, 40));
+  }
+  // A small one of each kind is kept. A line with words after a definition is a paragraph, not a definition, and stays.
+  assert.equal(stripEmbeddedImages('a ![x](data:image/svg+xml;utf8,%3Csvg%2F%3E) b', { written: true }), 'a ![x](data:image/svg+xml;utf8,%3Csvg%2F%3E) b');
+  const paragraph = `[p]: <data:image/png;base64,${big}> trailing words here\nnext line`;
+  assert.equal(stripEmbeddedImages(paragraph, { written: true }), paragraph);
+  // From a Google Doc, every picture of data goes, and its alt text stays.
+  assert.equal(stripEmbeddedImages('Text ![dot](data:image/png;base64,iVBORw0KGgo=) here.'), 'Text dot here.');
+  // In time, with "![" that never closes, backticks, line breaks inside, and many definitions.
+  for (const text of [
+    '` `` ``` ````'.repeat(20_000) + pic,
+    `${'![a `b\n'.repeat(50_000)}${pic}`,
+    `${'![x](data:image/png;base64,'.repeat(8_000)}`,
+    `${'![x](data:image/png;base64,AAAA\n'.repeat(20_000)}`,
+    `${'[x]: <data:image/png;base64,AAAAAAAAAA\n'.repeat(50_000)}${'![][x]'.repeat(50_000)}`,
+  ]) {
     const took = ms(() => stripEmbeddedImages(text, { written: true }));
     assert.ok(took < 500, `${Math.round(took)} ms`);
   }
@@ -531,17 +556,18 @@ test('workbook: what a sheet says of its size is not believed past what is read,
     return { text, took: performance.now() - at };
   };
   // Said to be 200,000 rows by 100 columns: 20 million commas and four seconds before. A million rows by 16,384
-  // columns would have run for an hour.
-  for (const ref of ['A1:CV200000', 'A1:XFD1048576']) {
+  // columns would have run for an hour. What the tab says is passed on, and is true even when it is stale.
+  for (const [ref, rows] of [['A1:CV200000', '200,000'], ['A1:XFD1048576', '1,048,576']]) {
     const { text, took } = await timed(workbook(ref));
-    assert.equal(text, '## S\nonly', ref);
+    assert.equal(text, `## S\nonly\n(The tab says it runs to row ${rows}; rows after 100,000 are not read.)`, ref);
     assert.ok(took < 500, `${ref}: ${Math.round(took)} ms`);
   }
-  // What a tab says of its rows is believed when its rows run to the last that is read: rows past the one after it
-  // were dropped without a word when that row was empty. A tab of a few rows that says it has 200,000 has no note
-  // (found by review: it did).
-  assert.equal(await workbookText(workbook('A1:A100002', { 100000: ['A'], 100002: ['A'] })), '## S\nonly\nfar\n(Only rows up to 100,000 are read.)');
-  assert.equal(await workbookText(workbook('A1:C200000', { 5: ['A', 'C'], 10: ['B'] })), '## S\nonly,,\nfar,,far\n,far,');
+  // Rows past 100,001 are not read. After rows that stop well before, they went without a word (found by review: 10
+  // rows and a total on row 150,001); after an empty row 100,001 too. Now the tab's own word is passed on.
+  const says = (rows: string) => `(The tab says it runs to row ${rows}; rows after 100,000 are not read.)`;
+  assert.equal(await workbookText(workbook('A1:B150001', { 5: ['A', 'B'], 150001: ['A'] })), `## S\nonly,\nfar,far\n${says('150,001')}`);
+  assert.equal(await workbookText(workbook('A1:A100002', { 100000: ['A'], 100002: ['A'] })), `## S\nonly\nfar\n${says('100,002')}`);
+  assert.equal(await workbookText(workbook('A1:C200000', { 5: ['A', 'C'], 10: ['B'] })), `## S\nonly,,\nfar,,far\n,far,\n${says('200,000')}`);
   // A real cell at the far edge: read, and only the rows that hold a cell are visited.
   const far = await timed(workbook('A1:XFD90000', { 90000: ['XFD'] }));
   assert.ok(far.took < 500, `${Math.round(far.took)} ms`);

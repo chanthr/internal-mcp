@@ -134,10 +134,12 @@ export async function workbookText(buffer: Buffer): Promise<string> {
       if (any) rows.push(r);
     }
     if (rows.length === 0) continue;
-    // Rows past SHEET_ROWS + 1 are not kept, and a tab that says it has more (SheetJS keeps what it says in !fullref)
-    // may have them: row 100,002 with row 100,001 empty was dropped without a word. What a tab says is believed only
-    // when its rows run to the last that is read: a tab of 10 rows that said 200,000 got the note.
-    if (ws['!fullref'] && rows[rows.length - 1] >= SHEET_ROWS - 1) more = true;
+    // Rows past SHEET_ROWS + 1 are not kept. A tab that says it runs further (SheetJS keeps what it says in !fullref)
+    // may have them, after rows that stop well before: 10 rows and a total on row 150,001 lost the total without a
+    // word. What the tab says is passed on as what it says: it may be stale, and a note that more rows are read than
+    // there are would not be true.
+    const fullref = ws['!fullref'];
+    const says = fullref ? XLSX.utils.decode_range(fullref).e.r + 1 : 0;
     if (left <= 0 || chars <= 0) {
       out.push(notRead(name));
       continue;
@@ -170,7 +172,12 @@ export async function workbookText(buffer: Buffer): Promise<string> {
     // Written by SheetJS from the rows taken only, one after another: rows without a cell are not visited.
     const compact = { '!data': taken, '!ref': XLSX.utils.encode_range({ s: { r: 0, c: from }, e: { r: taken.length - 1, c: to } }) } as unknown as import('xlsx').WorkSheet;
     const csv = XLSX.utils.sheet_to_csv(compact, { blankrows: false }).trim();
-    const note = stopped || more ? `\n(Only rows up to ${(stopped ? lastRow : SHEET_ROWS).toLocaleString('en-US')} are read.)` : '';
+    const note =
+      stopped || more
+        ? `\n(Only rows up to ${(stopped ? lastRow : SHEET_ROWS).toLocaleString('en-US')} are read.)`
+        : says > SHEET_ROWS
+          ? `\n(The tab says it runs to row ${says.toLocaleString('en-US')}; rows after ${SHEET_ROWS.toLocaleString('en-US')} are not read.)`
+          : '';
     if (csv) out.push(`## ${name}\n${csv}${note}`);
   }
   return out.join('\n\n');

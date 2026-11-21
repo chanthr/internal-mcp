@@ -51,8 +51,8 @@ export function cleanExtractedText(text: string): string {
 /**
  * Drop picture data embedded in a document. A Google Doc exported as Markdown appends every picture as a definition
  * line (`[image1]: <data:image/png;base64,...>`) and leaves a reference (`![][image1]`) in the text. Removes those
- * definitions, the references to them, and inline `![alt](data:image/...)`. Pictures with a real address
- * (`![alt](https://...)`) are kept.
+ * definitions, and puts the alt text in place of the references to them and of inline `![alt](data:image/...)`, as
+ * the chunker does for a picture with an address. Pictures with a real address (`![alt](https://...)`) are kept.
  *
  * With `written` (a Markdown or text file someone wrote): a picture whose data is less than LARGE_PICTURE characters
  * (a dot, an icon, an example in code) is kept, and costs little to index; a larger one is dropped wherever it is, as
@@ -60,7 +60,7 @@ export function cleanExtractedText(text: string): string {
  * numbered step, indented as code is, was taken for code, kept and cut into 855 passages.
  */
 export function stripEmbeddedImages(text: string, opts: { written?: boolean } = {}): string {
-  if (!text || !text.includes('data:image/')) return text;
+  if (!text || !/data:image\//i.test(text)) return text;
   return dropPictures(text, opts.written ? LARGE_PICTURE : 0);
 }
 
@@ -68,19 +68,42 @@ export function stripEmbeddedImages(text: string, opts: { written?: boolean } = 
 const LARGE_PICTURE = 1024;
 
 /**
- * Pictures of data in text whose data has at least `least` characters: definitions, references to them and inline
- * pictures. A reference or a picture does not read past the next "[": a line of "![" over and over was read to its
- * end from every one of them. Base64 has no "[" in it.
+ * The start of a data address for a picture, up to the comma its data follows: any type, parameters such as
+ * ";charset=utf-8" or ";name=a.png", and ";base64" or not, in any case (an SVG as ";charset=utf-8;base64,", or as
+ * ";utf8," and URL-encoded, was kept whole). Each parameter begins with ";", which nothing inside one matches, so it is
+ * read once.
+ */
+const DATA_IMAGE = String.raw`data:image\/[\w.+-]+(?:;[\w.+-]+(?:=[^;,)>\s]*)?)*,`;
+/**
+ * A definition line and nothing else (an optional title may follow): `[label]: <data:image/...>` or `[label]:
+ * data:image/...`. A line with other words after it is a paragraph, not a definition, and stays.
+ */
+const DEFINITION = new RegExp(String.raw`^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:<${DATA_IMAGE}([^>\n]*)>|${DATA_IMAGE}(\S*))(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^)\n]*\)))?[ \t]*(?:\n|$)`, 'gim');
+/** A reference to a definition: `![alt][label]`. */
+const REFERENCE = /!\[([^[\]\n]*)\]\[([^[\]\n]+)\]/g;
+/**
+ * An inline picture of data: `![alt](data:image/...)`. Its data may run over lines (base64 is often broken every 76
+ * characters). It does not read past the next "[" or ")": a line of "![" over and over was read to its end from every
+ * one of them. Base64 has neither in it.
+ */
+const INLINE = new RegExp(String.raw`!\[([^[\]\n]*)\]\(\s*<?${DATA_IMAGE}([^)[]*)\)`, 'gi');
+
+/** A label as CommonMark matches it: in any case, white space taken as one space. */
+const label = (s: string) => s.trim().replace(/\s+/g, ' ').toLowerCase();
+
+/**
+ * Pictures of data in text whose data has at least `least` characters: definitions go, and references to them and
+ * inline pictures become their alt text.
  */
 function dropPictures(text: string, least: number): string {
   const labels = new Set<string>();
-  let t = text.replace(/^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,([^\n]*)\n?/gm, (m, label: string, data: string) => {
-    if (data.length < least) return m;
-    labels.add(label);
+  let t = text.replace(DEFINITION, (m, name: string, bracketed: string | undefined, bare: string | undefined) => {
+    if ((bracketed ?? bare ?? '').length < least) return m;
+    labels.add(label(name));
     return '';
   });
-  if (labels.size > 0) t = t.replace(/!\[[^[\]\n]*\]\[([^[\]\n]+)\]/g, (m, label: string) => (labels.has(label) ? '' : m));
-  t = t.replace(/!\[[^[\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,([^)[\n]*)\)/g, (m, data: string) => (data.length < least ? m : ''));
+  if (labels.size > 0) t = t.replace(REFERENCE, (m, alt: string, name: string) => (labels.has(label(name)) ? alt : m));
+  t = t.replace(INLINE, (m, alt: string, data: string) => (data.length < least ? m : alt));
   // A file someone wrote with nothing dropped is left as it is.
   return least > 0 && t === text ? text : t.replace(/\n{3,}/g, '\n\n');
 }

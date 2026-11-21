@@ -296,7 +296,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   it, and the document was listed as one that could not be indexed. Such strings are now text like any other.
 - **Pictures embedded as base64 in Markdown and text files are dropped before indexing**, as they already were for
   Google Docs. A Markdown file with one picture of 1.6 MB took 7.5 s to cut and became 374 passages of letters
-  sent to the embedding model. A picture whose data is under 1 KB (a dot, an icon, an example in code) is kept.
+  sent to the embedding model. Its alt text stays in its place. A picture whose data is under 1 KB (a dot, an icon,
+  an example in code) is kept.
 - **A `.docx` with paragraphs that never close is read in one pass.** A file of 1.6 KB holding 1 MB of such XML
   took 25 s to read (the 64 MB a part may hold: hours). It now takes milliseconds.
 - **An `.xlsx` no longer makes millions of commas out of the size it says it has.** A file of 1.5 KB with one cell
@@ -305,7 +306,8 @@ Changes that affect people who run or extend the server. Dates are release dates
   used when it is no larger than what is left of 2,000,000 cells for the whole workbook, and otherwise the range of
   the cells that are there; only rows that hold a cell are visited, empty rows are left out, a tab is read to
   100,000 rows and a workbook to 10 million characters of CSV (a file of 44 KB whose 3,000 cells shared one text
-  of 32,767 characters became 98 MB of text), and where reading stops a line says so.
+  of 32,767 characters became 98 MB of text), and where reading stops, or a tab says it runs past what is read, a
+  line says so.
 - **Comparing ways of cutting no longer holds the server.** It cut 200 sample documents in one go, five ways in a
   row (up to 2.3 s each). Other requests now wait at most one document.
 - **The Wiki page no longer lists every folder while a run goes.** It asks how far the run is every 1.5 s, and each
