@@ -862,14 +862,17 @@ you delete it in the Cloudflare dashboard (My Profile, API Tokens).
 ## Connect a client
 
 The console's **Connect** page does this for you: one button per client, with the entry made for your
-folder and your server name. A desktop app does not have the PATH of your terminal, so the entry it writes names
-Node by its full path and the server starts there too.
+folder and your server name. Every entry is Node by its full path and the file it runs by its full path. A desktop
+app does not have the PATH of your terminal, and a client starts the server in whatever project you have open: an
+entry that looks anything up there (`npx`, a bare `node`, a version manager's shim) can run that project's files.
+Without a project, the entry runs a copy of the server pinned in your settings folder; **Add** installs it the first
+time. By hand, `"$(node -p process.execPath)"` below is your Node's real path.
 
 | Client | How |
 | --- | --- |
-| Claude Code, local | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- node /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
-| Claude Code, local, without a project | `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- npx --prefix /abs/path/folder -y @chnxthr/knowledge-mcp serve --stdio` |
-| Claude Code, local, a project run from source | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- node /abs/path/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /abs/path/my-mcp/tsconfig.json /abs/path/my-mcp/src/server.ts serve --stdio` |
+| Claude Code, local | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- "$(node -p process.execPath)" /abs/path/my-mcp/dist/server.js serve --stdio` (run `npm run build` first) |
+| Claude Code, local, without a project | `npm install --prefix /abs/path/folder --save-exact --ignore-scripts @chnxthr/knowledge-mcp@<version>`, then `claude mcp add --scope user my-mcp -e MCP_HOME=/abs/path/folder -- "$(node -p process.execPath)" /abs/path/folder/node_modules/@chnxthr/knowledge-mcp/dist/cli.js serve --stdio` |
+| Claude Code, local, a project run from source | `claude mcp add my-mcp -e MCP_HOME=/abs/path/my-mcp -- "$(node -p process.execPath)" /abs/path/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /abs/path/my-mcp/tsconfig.json /abs/path/my-mcp/src/server.ts serve --stdio` |
 | Claude Desktop, Cursor, VS Code, local | The same command and `MCP_HOME` in the client's config file, under `command`, `args` and `env` |
 | Claude Code, remote | `claude mcp add --transport http my-mcp https://<host>/mcp --header "Authorization: Bearer <key>"` |
 | Claude and ChatGPT connectors | Console → Connect: your own address, then **Sign-in for connectors → Turn on**. Add a custom connector with `https://<host>/mcp`; it asks for a key once ([OAUTH_SETUP.md](OAUTH_SETUP.md)) |
@@ -879,7 +882,7 @@ Node by its full path and the server starts there too.
 
 | Change | What to do |
 | --- | --- |
-| A stdio server needs `MCP_HOME` | Unless your project folder holds `.env` or `mcp.config.json`, a stdio server without `MCP_HOME` does not start. Add `-e MCP_HOME=/full/path` to `claude mcp add` (`"env": { "MCP_HOME": "/full/path" }` in a JSON config), or add the server again from the console's **Connect** page. Entries made that way also get `--tsconfig` (tsx) or `--prefix` (npx), which keep the open project from choosing the code that runs |
+| A stdio server needs `MCP_HOME` | Unless your project folder holds `.env` or `mcp.config.json`, a stdio server without `MCP_HOME` does not start. Add `-e MCP_HOME=/full/path` to `claude mcp add` (`"env": { "MCP_HOME": "/full/path" }` in a JSON config), or add the server again from the console's **Connect** page. Entries made that way are Node and a file by full paths (no `npx`), with `--tsconfig` for tsx, which keeps the open project from choosing the code that runs |
 | Drive scope is `shared` by default | Documents that a trusted owner shared with the service account outside `drive.roots` can be searched, read and indexed. Nothing changes until you list owners in `drive.trustedOwners` (`knowledge-mcp setup trust acme.com`). Excluded folders stay hidden. `drive.scope: "roots"` turns it off |
 | zod 4 | Plugins get zod 4 through the exported `z`. Change `z.record(valueSchema)` to `z.record(z.string(), valueSchema)`; an object `.default({})` that relies on inner defaults becomes `.prefault({})` |
 | `source` is a free label | `dev` and `biz` keep working with their old meaning. `--dev-only` and `--biz-only` still work; the general form is `--source <label>` |

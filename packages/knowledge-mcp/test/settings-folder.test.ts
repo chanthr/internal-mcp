@@ -210,3 +210,26 @@ test('settings in the working directory that are not read are named, once, on st
   const stdio = start(entry, own, {}, ['serve', '--stdio']);
   assert.deepEqual([stdio.status, stdio.stderr, stdio.stdout.trim().split('\n').length], [0, '', 1]);
 });
+
+test('a stdio server takes no program from the opened repository: its folders and relative entries leave the PATH', async () => {
+  const { pathForStdio } = await import('../src/core/paths.js');
+  const path = ['/x/repo/node_modules/.bin', '/x/repo', '.', '', '/usr/bin', 'relative/bin', '/home/me/.local/bin', '/x/repo-other/bin'].join(':');
+  const kept = (cwd: string) => pathForStdio(path, { cwd, settings: '/home/me/kmcp', home: '/home/me' }).split(':');
+  assert.deepEqual(kept('/x/repo'), ['/usr/bin', '/home/me/.local/bin', '/x/repo-other/bin']);
+  // Started in the settings folder, in the home folder, or in / (as Claude Desktop does), the folders below are the
+  // person's own: only the relative entries go.
+  for (const cwd of ['/home/me/kmcp', '/home/me', '/']) assert.deepEqual(kept(cwd), ['/x/repo/node_modules/.bin', '/x/repo', '/usr/bin', '/home/me/.local/bin', '/x/repo-other/bin']);
+
+  // The server itself, started over stdio in a repository whose node_modules/.bin a client put first on the PATH.
+  const repo = repository();
+  const { dir } = project(mine);
+  const entry = join(dir, 'path.mts');
+  writeFileSync(entry, `await import(${JSON.stringify(src('bootstrap.ts'))});\nconsole.log(process.env.PATH);\n`);
+  const bin = join(repo, 'node_modules', '.bin');
+  const r = start(entry, repo, { MCP_HOME: dir, PATH: [bin, '.', process.env.PATH].join(':') }, ['serve', '--stdio']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim(), pathForStdio(process.env.PATH ?? '', { cwd: repo, settings: dir, home: '/nowhere' }));
+  assert.ok(!r.stdout.includes(bin));
+  // HTTP and the other commands are started by the person, in a folder they chose: the PATH is left as it is.
+  assert.equal(start(entry, repo, { MCP_HOME: dir, PATH: [bin, process.env.PATH].join(':') }, ['doctor']).stdout.trim(), [bin, process.env.PATH].join(':'));
+});

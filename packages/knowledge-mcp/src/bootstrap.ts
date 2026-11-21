@@ -5,7 +5,8 @@
  *
  *   1. Check MCP_HOME: a relative one, or a folder that does not exist, stops the process.
  *   2. A stdio server that would read the settings of the working directory stops (core/paths.ts stdioProblem),
- *      before any file there is read.
+ *      before any file there is read. Otherwise its PATH loses the folders of the working directory
+ *      (keepOpenFolderOffPath).
  *   3. Load .env — MCP_ENV_FILE if set (a relative one is in the settings folder), else the .env of the settings
  *      folder (core/paths.ts: MCP_HOME, else the app root, else the working directory). Existing env vars win.
  *      A named file that does not exist stops the process: running on the wrong settings is worse.
@@ -16,7 +17,7 @@
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { config as loadDotenv } from 'dotenv';
-import { expandHome, home, homeProblem, SETTINGS, settingsFile, settingsFolder, stdioProblem } from './core/paths.js';
+import { expandHome, home, homeProblem, keepOpenFolderOffPath, SETTINGS, settingsFile, settingsFolder, stdioProblem } from './core/paths.js';
 import { installLogMasking } from './core/log_mask.js';
 
 /**
@@ -46,6 +47,7 @@ if (wrongHome) stop(wrongHome);
 if (stdio) {
   const problem = stdioProblem();
   if (problem) stop(problem);
+  keepOpenFolderOffPath();
 }
 
 const explicit = process.env.MCP_ENV_FILE?.trim();

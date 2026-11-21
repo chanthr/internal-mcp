@@ -66,7 +66,7 @@ Throw `ToolError` for an expected failure. Files starting with `_` are skipped.
 
 | Client | How |
 | --- | --- |
-| Claude Code (local) | `claude mcp add __NAME__ -e MCP_HOME=/absolute/path/__NAME__ -- node /absolute/path/__NAME__/dist/server.js serve --stdio` after `npm run build` |
+| Claude Code (local) | `claude mcp add __NAME__ -e MCP_HOME=/absolute/path/__NAME__ -- "$(node -p process.execPath)" /absolute/path/__NAME__/dist/server.js serve --stdio` after `npm run build` |
 | Any HTTP client | URL `http://localhost:8080/mcp`, header `Authorization: Bearer <key>` |
 | Claude web and desktop connectors | Deploy behind HTTPS and turn on OAuth ([guide](https://github.com/chanthr/internal-mcp/blob/main/OAUTH_SETUP.md)) |
 

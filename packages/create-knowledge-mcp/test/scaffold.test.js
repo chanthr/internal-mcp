@@ -69,6 +69,7 @@ test('the documents of a new project give the same entry: MCP_HOME and the proje
   const dir = join(mkdtempSync(join(tmpdir(), 'kmcp-create-')), 'team-mcp');
   scaffold(dir, { name: 'team-mcp', coreSpec: '^9.9.9' });
   const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8').split('\n').find((l) => l.startsWith('claude mcp add'));
-  assert.equal(agents, 'claude mcp add team-mcp -e MCP_HOME="$PWD" -- "$PWD/node_modules/.bin/tsx" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio');
-  assert.match(readFileSync(join(dir, 'README.md'), 'utf8'), /claude mcp add team-mcp -e MCP_HOME=\/absolute\/path\/team-mcp -- node /);
+  // Node's real path, not a name looked up when the client starts it in another project (nor a version manager's shim).
+  assert.equal(agents, 'claude mcp add team-mcp -e MCP_HOME="$PWD" -- "$(node -p process.execPath)" "$PWD/node_modules/tsx/dist/cli.mjs" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio');
+  assert.ok(readFileSync(join(dir, 'README.md'), 'utf8').includes('claude mcp add team-mcp -e MCP_HOME=/absolute/path/team-mcp -- "$(node -p process.execPath)" /absolute/path/team-mcp/dist/server.js serve --stdio'));
 });

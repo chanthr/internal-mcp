@@ -200,12 +200,12 @@ npm run doctor                   # which tools are on
 Connect it to the person's AI client. For Claude Code on this machine, no key is needed:
 
 ```bash
-claude mcp add __NAME__ -e MCP_HOME="$PWD" -- "$PWD/node_modules/.bin/tsx" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio
+claude mcp add __NAME__ -e MCP_HOME="$PWD" -- "$(node -p process.execPath)" "$PWD/node_modules/tsx/dist/cli.mjs" --tsconfig "$PWD/tsconfig.json" "$PWD/src/server.ts" serve --stdio
 ```
 
-Keep `MCP_HOME` and `--tsconfig` in the line. The client starts the server in whatever project the person has open.
-Without them the server would read that project's `.env`, and tsx would read its `tsconfig.json`, which can replace
-the code that runs.
+Keep the line as it is. The client starts the server in whatever project the person has open. Without `MCP_HOME`
+the server would read that project's `.env`; without `--tsconfig` tsx would read its `tsconfig.json`, which can
+replace the code that runs; and a `node` looked up there could be that project's own.
 
 The console's page **Connect a client** has the entry for Claude Desktop, Cursor and VS Code as well.
 

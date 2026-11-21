@@ -27,7 +27,7 @@ import {
 import { isTrusted, trustEntryFor, validTrustEntry } from '../plugins/drive/trust.js';
 import { checkPostgresUrl, checkSqliteFile } from './checks.js';
 import { readEnvKeys, updateEnvFile } from './envfile.js';
-import { cli, shellQuote, stdioCommand } from '../core/invocation.js';
+import { cli, installCommandLine, installPackage, shellQuote, stdioEntry } from '../core/invocation.js';
 import { expandHome } from '../core/paths.js';
 
 export interface SetupIO {
@@ -45,7 +45,7 @@ export interface SetupOptions {
   /** Overrides for tests: base URLs of the services (openai: OpenAI's API), and how the admin key is created. */
   endpoints?: { drive?: string; slack?: string; github?: string; railway?: string; openai?: string };
   createAdmin?: (email: string) => Promise<{ key: string; existed: boolean }>;
-  /** How the server is started, for the client command. Default: as an AI client starts it from `dir` (stdioCommand). */
+  /** How the server is started, for the client command. Default: as an AI client starts it from `dir` (stdioEntry). */
   serveCommand?: string[];
   /** Run `claude mcp add` when the user agrees. Tests turn this off. */
   canRunClient?: boolean;
@@ -586,16 +586,27 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   // ── Connect a client ──
   io.say();
   io.say('Connect an AI client');
-  const serve = opts.serveCommand ?? stdioCommand(dir);
+  // Node by its full path and the file it runs by its full path (stdioEntry): Claude Code starts the server in the
+  // project that is open, and nothing there is looked up.
+  const entry = opts.serveCommand ? { command: opts.serveCommand[0], args: opts.serveCommand.slice(1), install: undefined } : stdioEntry(dir);
   const name = String(config.branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'knowledge';
   // MCP_HOME names this folder, so the server reads these settings whichever folder Claude Code starts it in.
-  const addArgs = ['mcp', 'add', name, '-e', `MCP_HOME=${dir}`, '--', ...serve];
+  const addArgs = ['mcp', 'add', name, '-e', `MCP_HOME=${dir}`, '--', entry.command, ...entry.args];
+  if (entry.install) io.say(`  First, a copy of the server in this folder:  ${installCommandLine(entry.install)}`);
   io.say(`  Claude Code (this machine):  claude ${addArgs.map(shellQuote).join(' ')}`);
   io.say('  Any client over HTTP:        start the server, then use http://localhost:8080/mcp with header "Authorization: Bearer <key>"');
   if (opts.canRunClient !== false && spawnSync('claude', ['--version'], { stdio: 'ignore' }).status === 0) {
     if (yes(await io.ask('  Claude Code is installed. Add this server to it now? (y/N)', 'n'))) {
-      const r = spawnSync('claude', addArgs, { cwd: dir, stdio: 'inherit' });
-      io.say(r.status === 0 ? '  ✓ Added. Start a new Claude Code session to use it.' : '  ✗ `claude mcp add` failed. Run the command above yourself.');
+      if (entry.install) io.say(`  Installing ${entry.install.spec} into ${dir} ...`);
+      const installed = entry.install ? (await installPackage(entry.install, { output: 'inherit' })).ok : true;
+      const r = installed ? spawnSync('claude', addArgs, { cwd: dir, stdio: 'inherit' }) : null;
+      io.say(
+        !installed
+          ? '  ✗ The install did not work (see above). Nothing was added.'
+          : r?.status === 0
+            ? '  ✓ Added. Start a new Claude Code session to use it.'
+            : '  ✗ `claude mcp add` failed. Run the command above yourself.',
+      );
     }
   }
 

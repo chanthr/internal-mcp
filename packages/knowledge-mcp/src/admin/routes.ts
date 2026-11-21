@@ -27,9 +27,9 @@ import { configSource, getConfig, settingsDir } from '../core/config.js';
 import { authStore, CONSOLE_EMAIL } from '../core/context.js';
 import { logToolCall } from '../store/tool_log.js';
 import type { AuthContext } from '../core/auth.js';
-import { cli, stdioEntry } from '../core/invocation.js';
+import { cli, installCommandLine, stdioEntry } from '../core/invocation.js';
 import { expandHome } from '../core/paths.js';
-import { addToClient, CLIENT_IDS, describeClients, type Entry } from './clients.js';
+import { addToClient, CLIENT_IDS, cursorLink, describeClients, installForEntry, type Entry } from './clients.js';
 import { getStore } from '../store/index.js';
 import type { Registry } from '../plugin/registry.js';
 import { isOAuthConfigured, OAUTH_ISSUER_URL, oauthGoogleProblems, oauthSignIns } from '../core/oauth.js';
@@ -1607,6 +1607,9 @@ export function mountConsole(app: Express, registry: Registry): boolean {
       res.json({
         name: entry.name,
         url,
+        // The entry runs a copy of the server installed in the settings folder, and it is not there yet: Add
+        // installs it first. This is the same install, to type by hand.
+        install: entry.install ? installCommandLine(entry.install) : null,
         clients: describeClients(entry),
         http: JSON.stringify({ mcpServers: { [entry.name]: { url, headers: { Authorization: 'Bearer <key>' } } } }, null, 2),
       });
@@ -1616,7 +1619,12 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     '/clients/:id/add',
     wrap(async (req, res) => {
       const id = z.enum(CLIENT_IDS).parse(req.params.id);
-      res.json({ ok: true, message: addToClient(id, clientEntry()) });
+      const entry = clientEntry();
+      // Nothing is installed for a client that is not on this machine: addToClient says so instead.
+      const installed = describeClients(entry).find((c) => c.id === id)?.installed ? await installForEntry(entry) : null;
+      // Cursor adds a server through its own link, which the page opens once the copy is in place.
+      if (id === 'cursor') return res.json({ ok: true, link: cursorLink(entry), message: `${installed ?? ''} Confirm in Cursor.`.trim() });
+      res.json({ ok: true, message: [installed, addToClient(id, entry)].filter(Boolean).join(' ') });
     }),
   );
 

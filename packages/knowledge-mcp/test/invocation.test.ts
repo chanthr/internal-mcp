@@ -1,14 +1,16 @@
-/** Command hints must be typed the way they work where the person is: npm scripts in a project, npx, or the binary. */
+/** Command hints must be typed the way they work where the person is, and the entries clients start this server with. */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cli, stdioCommand, stdioEntry } from '../src/core/invocation.js';
+import { cli, installCommandLine, installPackage, stdioEntry } from '../src/core/invocation.js';
+import { VERSION } from '../src/version.js';
 
 function project(scripts: Record<string, string>): NodeJS.ProcessEnv {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-inv-'));
@@ -48,18 +50,24 @@ test('the entry for a client names this Node by its full path, so a desktop app 
   const bin = mkdtempSync(join(tmpdir(), 'kmcp-node-'));
   const node = join(bin, 'node');
   writeFileSync(node, '');
-  writeFileSync(join(bin, 'npx'), '');
 
-  // No project: npx beside that Node, the folder named outright, and a PATH that holds node (npx is a script).
+  // No project: Node and this package's cli.js, never npx. Run from source (as here) or from npx's cache, this copy
+  // is not one an entry may point at, so a copy of this version is installed into the folder first.
   const bare = mkdtempSync(join(tmpdir(), 'kmcp-bare-'));
-  const viaNpx = stdioEntry(bare, node, 'darwin');
-  assert.match(viaNpx.command, /[\\/]npx$/);
-  assert.deepEqual(viaNpx.args, ['--prefix', bare, '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio']);
-  assert.equal(viaNpx.env?.MCP_HOME, bare);
-  assert.ok(viaNpx.env?.PATH.split(':').some((d) => viaNpx.command.startsWith(d)), 'node is on the PATH the entry sets');
-  // Windows starts npx.cmd by its plain name, with the same --prefix.
-  assert.deepEqual(stdioEntry(bare, node, 'win32'), { command: 'npx', args: ['--prefix', bare, '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'], env: { MCP_HOME: bare } });
-  assert.deepEqual(stdioCommand(bare), ['npx', '--prefix', bare, '-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio']);
+  const copy = join(bare, 'node_modules', '@chnxthr', 'knowledge-mcp', 'dist', 'cli.js');
+  const install = { spec: `@chnxthr/knowledge-mcp@${VERSION}`, prefix: bare };
+  assert.deepEqual(stdioEntry(bare, node, 'darwin', null), { command: node, args: [copy, 'serve', '--stdio'], env: { MCP_HOME: bare }, install });
+  assert.deepEqual(stdioEntry(bare, 'C:\\nodejs\\node.exe', 'win32', null).command, 'C:\\nodejs\\node.exe');
+  assert.equal(installCommandLine(install), `npm install --prefix ${bare} --save-exact --ignore-scripts --no-audit --no-fund @chnxthr/knowledge-mcp@${VERSION}`);
+  // A built copy that stays where it is (a global install) is run where it is.
+  assert.deepEqual(stdioEntry(bare, node, 'darwin', '/opt/lib/node_modules/@chnxthr/knowledge-mcp/dist/cli.js'), { command: node, args: ['/opt/lib/node_modules/@chnxthr/knowledge-mcp/dist/cli.js', 'serve', '--stdio'], env: { MCP_HOME: bare } });
+  // The folder's own copy is used when it is this version; another version is replaced by this one.
+  mkdirSync(dirname(copy), { recursive: true });
+  writeFileSync(copy, '');
+  writeFileSync(join(dirname(copy), '..', 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: '0.0.1' }));
+  assert.deepEqual(stdioEntry(bare, node, 'darwin', null).install, install);
+  writeFileSync(join(dirname(copy), '..', 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: VERSION }));
+  assert.deepEqual(stdioEntry(bare, node, 'darwin', '/opt/elsewhere/dist/cli.js'), { command: node, args: [copy, 'serve', '--stdio'], env: { MCP_HOME: bare } });
 
   // A built project, then one run from source: Node itself with the file to run. The folder is named outright here
   // too: the client starts the server in the project the person has open, whose settings are not this server's.
@@ -79,10 +87,6 @@ test('the entry for a client names this Node by its full path, so a desktop app 
   writeFileSync(join(built, 'tsconfig.json'), '{}');
   assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [tsx, '--tsconfig', join(built, 'tsconfig.json'), own, 'serve', '--stdio'], env: { MCP_HOME: built } });
   assert.deepEqual(stdioEntry(built, node, 'win32').env, { MCP_HOME: built });
-  // The setup wizard's line runs tsx through node_modules/.bin, with the same flag.
-  mkdirSync(join(built, 'node_modules', '.bin'));
-  writeFileSync(join(built, 'node_modules', '.bin', 'tsx'), '');
-  assert.deepEqual(stdioCommand(built), [join(built, 'node_modules', '.bin', 'tsx'), '--tsconfig', join(built, 'tsconfig.json'), own, 'serve', '--stdio']);
 });
 
 // ── What an entry runs when the client starts it in a repository the person has open ──
@@ -116,63 +120,81 @@ test('a project entry runs the project\'s own code, whatever tsconfig.json the w
   assert.equal(start(), 'the framework ran');
 });
 
-test('an npx entry takes nothing from the working directory: not its node_modules, not its .npmrc (real npx, local registries)', async (t) => {
+
+test('without a project the entry is Node and a pinned copy in the settings folder: nothing of the opened repository runs (real npm, local registry)', async (t) => {
   const node = realpathSync(process.execPath);
-  if (process.platform === 'win32' || !existsSync(join(dirname(node), 'npx'))) return t.skip('needs npx beside node');
-  // Two registries on this machine: the person's (in their own npm settings) and the one the repository names.
+  const bin = dirname(node);
+  if (process.platform === 'win32' || !existsSync(join(bin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'))) return t.skip('needs npm beside node');
+  const made = (name: string) => realpathSync(mkdtempSync(join(tmpdir(), `kmcp-pin-${name}-`)));
+
+  // A stand-in for the package, with the same bin and shebang, that says which Node ran it and with what.
+  const pack = made('pack');
+  mkdirSync(join(pack, 'package', 'dist'), { recursive: true });
+  writeFileSync(join(pack, 'package', 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: VERSION, bin: { 'knowledge-mcp': 'dist/cli.js' } }));
+  writeFileSync(join(pack, 'package', 'dist', 'cli.js'), '#!/usr/bin/env node\nconsole.log(JSON.stringify({ ran: "the package", node: process.execPath, args: process.argv.slice(2), home: process.env.MCP_HOME }));\n', { mode: 0o755 });
+  const tgz = join(pack, 'package.tgz');
+  assert.equal(spawnSync('tar', ['-czf', tgz, '-C', pack, 'package'], { env: { ...process.env, COPYFILE_DISABLE: '1' } }).status, 0);
+  const tarball = readFileSync(tgz);
+
+  // Two registries on this machine: the person's, and the one the repository's .npmrc names.
   const asked: string[] = [];
-  const registry = (who: string) =>
+  const registry = (who: string, serve: boolean) =>
     new Promise<Server>((done) => {
       const s = createServer((req, res) => {
-        asked.push(`${who} ${req.url}`);
+        asked.push(`${who} ${req.method} ${decodeURIComponent(req.url ?? '')}`);
+        const base = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+        if (serve && req.url === '/package.tgz') return res.writeHead(200, { 'Content-Type': 'application/octet-stream' }).end(tarball);
+        if (serve && decodeURIComponent(req.url ?? '') === '/@chnxthr/knowledge-mcp') {
+          const dist = { tarball: `${base}/package.tgz`, shasum: createHash('sha1').update(tarball).digest('hex'), integrity: `sha512-${createHash('sha512').update(tarball).digest('base64')}` };
+          const version = { name: '@chnxthr/knowledge-mcp', version: VERSION, bin: { 'knowledge-mcp': 'dist/cli.js' }, dist };
+          return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ name: '@chnxthr/knowledge-mcp', 'dist-tags': { latest: VERSION }, versions: { [VERSION]: version } }));
+        }
         res.writeHead(404, { 'Content-Type': 'application/json' }).end('{}');
       });
       s.listen(0, '127.0.0.1', () => done(s));
     });
-  const mine = await registry('mine');
-  const theirs = await registry('theirs');
+  const mine = await registry('mine', true);
+  const theirs = await registry('theirs', false);
   t.after(() => {
     mine.close();
     theirs.close();
   });
   const port = (s: Server) => (s.address() as AddressInfo).port;
 
-  // The repository: an .npmrc that sends the package to its registry, and a copy of the package of its own.
-  const repo = realpathSync(mkdtempSync(join(tmpdir(), 'kmcp-npx-repo-')));
-  writeFileSync(join(repo, '.npmrc'), `@chnxthr:registry=http://127.0.0.1:${port(theirs)}/\nregistry=http://127.0.0.1:${port(theirs)}/\n`);
-  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'some-repo', private: true, dependencies: { '@chnxthr/knowledge-mcp': '*' } }));
-  const copy = join(repo, 'node_modules', '@chnxthr', 'knowledge-mcp');
-  mkdirSync(copy, { recursive: true });
-  writeFileSync(join(copy, 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: '9.9.9', bin: { 'knowledge-mcp': 'cli.js' } }));
-  writeFileSync(join(copy, 'cli.js'), "#!/usr/bin/env node\nconsole.log('the repository\\'s copy ran');\n", { mode: 0o755 });
-  mkdirSync(join(repo, 'node_modules', '.bin'));
-  symlinkSync('../@chnxthr/knowledge-mcp/cli.js', join(repo, 'node_modules', '.bin', 'knowledge-mcp'));
+  // npm's settings are this test's own: an empty home whose .npmrc names the person's registry. Any address that is
+  // not on this machine would go to a proxy that is not there.
+  const home = made('home');
+  writeFileSync(join(home, '.npmrc'), `registry=http://127.0.0.1:${port(mine)}/\nupdate-notifier=false\naudit=false\nfund=false\n`);
+  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: home, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9', NO_PROXY: '127.0.0.1,localhost' };
 
-  // npm's own settings are kept to this test: an empty home, a cache of its own, and the person's registry.
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'kmcp-npx-home-')));
-  const settings = realpathSync(mkdtempSync(join(tmpdir(), 'kmcp-npx-settings-')));
-  const entry = stdioEntry(settings, node);
-  const env = {
-    ...entry.env,
-    HOME: home,
-    npm_config_cache: join(home, 'cache'),
-    npm_config_globalconfig: join(home, 'npmrc-global'),
-    npm_config_registry: `http://127.0.0.1:${port(mine)}/`,
-    npm_config_update_notifier: 'false',
-    npm_config_audit: 'false',
-    npm_config_fund: 'false',
-  };
-  const output = await new Promise<string>((done) => {
-    const child = spawn(entry.command, entry.args, { cwd: repo, env });
-    let text = '';
-    child.stdout.on('data', (d) => (text += d));
-    child.stderr.on('data', (d) => (text += d));
-    const limit = setTimeout(() => child.kill(), 60_000);
-    child.on('close', () => {
-      clearTimeout(limit);
-      done(text);
-    });
-  });
-  assert.ok(!output.includes("the repository's copy ran"), output);
-  assert.ok(asked.length > 0 && asked.every((a) => a.startsWith('mine ')), `${asked.join(', ')}\n${output}`);
+  // Adding the entry installs the copy it runs: this version, from the person's registry, into the settings folder.
+  const settings = made('settings');
+  const first = stdioEntry(settings, node, process.platform, null);
+  assert.ok(first.install);
+  const installed = await installPackage(first.install, { node, env });
+  assert.ok(installed.ok, installed.output);
+  assert.ok(asked.length > 0 && asked.every((a) => a.startsWith('mine ')), asked.join(', '));
+  const entry = stdioEntry(settings, node, process.platform, null);
+  assert.deepEqual([entry.command, entry.args, entry.install], [first.command, first.args, undefined]);
+  assert.ok(!JSON.stringify(entry).includes('npx'));
+
+  // The repository the client has open: every shape that ran in place of the server through npx.
+  const repo = made('repo');
+  const evil = (file: string, what: string) => writeFileSync(file, `#!/bin/sh\necho "EVIL: ${what} of the opened repository ran" >&2\n`, { mode: 0o755 });
+  mkdirSync(join(repo, 'node_modules', '.bin'), { recursive: true });
+  for (const name of ['node', 'sh', 'knowledge-mcp']) evil(join(repo, 'node_modules', '.bin', name), `node_modules/.bin/${name}`);
+  const copy = join(repo, 'node_modules', '@chnxthr', 'knowledge-mcp');
+  mkdirSync(join(copy, 'dist'), { recursive: true });
+  writeFileSync(join(copy, 'package.json'), JSON.stringify({ name: '@chnxthr/knowledge-mcp', version: VERSION, bin: { 'knowledge-mcp': 'dist/cli.js' } }));
+  writeFileSync(join(copy, 'dist', 'cli.js'), '#!/usr/bin/env node\nconsole.error("EVIL: the repository\'s copy ran");\n');
+  evil(join(repo, 'evil-shell'), 'script-shell');
+  writeFileSync(join(repo, 'evil.cjs'), 'console.error("EVIL: node-options from the repository");\n');
+  writeFileSync(join(repo, '.npmrc'), `registry=http://127.0.0.1:${port(theirs)}/\nscript-shell=${join(repo, 'evil-shell')}\nnode-options=--require ${join(repo, 'evil.cjs')}\n`);
+  writeFileSync(join(repo, 'package.json'), JSON.stringify({ name: 'some-repo', private: true, dependencies: { '@chnxthr/knowledge-mcp': '*' } }));
+
+  // Started the way a client starts it, in the repository, with the worst PATH: its node_modules/.bin first.
+  const r = spawnSync(entry.command, entry.args, { cwd: repo, env: { PATH: `${join(repo, 'node_modules', '.bin')}:${bin}:/usr/bin:/bin`, HOME: home, ...entry.env }, encoding: 'utf8', timeout: 60_000 });
+  assert.ok(!`${r.stdout}${r.stderr}`.includes('EVIL'), `${r.stdout}${r.stderr}`);
+  assert.deepEqual(JSON.parse(r.stdout), { ran: 'the package', node, args: ['serve', '--stdio'], home: settings });
+  assert.ok(!asked.some((a) => a.startsWith('theirs ')), asked.join(', '));
 });

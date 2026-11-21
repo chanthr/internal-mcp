@@ -683,3 +683,19 @@ test('wizard, search by meaning: a saved key stays with its address, and choosin
   const openai = await wizard(voyage, ['1', 'good-openai']);
   assert.deepEqual([openai.sent, openai.saved.get('OPENAI_API_KEY'), openai.saved.has('EMBEDDING_API_KEY'), openai.saved.has('EMBEDDING_BASE_URL')], [['Bearer good-openai'], 'good-openai', false, false]);
 });
+
+test('wizard: the Claude Code line is Node by its full path and a pinned copy in this folder, never npx', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kmcp-setup-'));
+  const s = scripted(['', '']);
+  await runSetup(s.io, { dir, canRunClient: false, exec: noTools });
+  const text = s.said.join('\n');
+  const { shellQuote } = await import('../src/core/invocation.js');
+  const { VERSION } = await import('../src/version.js');
+  const copy = join(dir, 'node_modules', '@chnxthr', 'knowledge-mcp', 'dist', 'cli.js');
+  // Run from source here, so the copy this folder needs is installed first; the line says how.
+  assert.ok(text.includes(`First, a copy of the server in this folder:  npm install --prefix ${shellQuote(dir)} --save-exact --ignore-scripts --no-audit --no-fund @chnxthr/knowledge-mcp@${VERSION}`), text);
+  assert.ok(text.includes(`claude ${['mcp', 'add', 'knowledge', '-e', `MCP_HOME=${dir}`, '--', process.execPath, copy, 'serve', '--stdio'].map(shellQuote).join(' ')}`), text);
+  // (Hints for commands typed in a terminal may say npx; the lines for the client do not.)
+  const lines = s.said.filter((l) => l.includes('claude mcp add') || l.includes('a copy of the server'));
+  assert.ok(lines.length === 2 && lines.every((l) => !/\bnpx\b/.test(l)), lines.join('\n'));
+});

@@ -140,7 +140,10 @@ test('a key saved for Claude goes to Anthropic only, whatever ANTHROPIC_BASE_URL
   const gateway = await fake(() => ({ status: 401, json: { type: 'error', error: { type: 'authentication_error', message: 'no' } } }));
   const anthropic = await fake((r) => (r.url.startsWith('/v1/models') ? { json: { data: [{ type: 'model', id: 'claude-haiku-5-5', display_name: 'Claude Haiku 5.5', created_at: '2026-01-01T00:00:00Z' }], has_more: false, first_id: 'claude-haiku-5-5', last_id: 'claude-haiku-5-5' } } : { status: 404, json: {} }));
   const before = anthropicEndpoint.baseURL;
-  Object.assign(process.env, { ANTHROPIC_BASE_URL: gateway.url, ANTHROPIC_CUSTOM_HEADERS: 'X-Gateway-Token: gw-secret\nX-Team: research' });
+  // The gateway's own credentials too: a line for Authorization or anthropic-version must neither replace nor remove
+  // the SDK's own.
+  const custom = 'X-Gateway-Token: gw-secret\nX-Team: research\nAuthorization: Bearer gw-token\nX-Api-Key: gw-key\nanthropic-version: 1999-01-01';
+  Object.assign(process.env, { ANTHROPIC_BASE_URL: gateway.url, ANTHROPIC_CUSTOM_HEADERS: custom });
   t.after(() => {
     delete process.env.ANTHROPIC_BASE_URL;
     delete process.env.ANTHROPIC_CUSTOM_HEADERS;
@@ -150,7 +153,11 @@ test('a key saved for Claude goes to Anthropic only, whatever ANTHROPIC_BASE_URL
   anthropicEndpoint.baseURL = anthropic.url;
   assert.deepEqual(await listLlmModels({ kind: 'anthropic', apiKey: 'sk-ant-person-000000' }), [{ id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5' }]);
   const sent = anthropic.seen.at(-1)!.headers;
-  assert.deepEqual([sent['x-gateway-token'], sent['x-team'], gateway.seen.length], [undefined, undefined, 0]);
+  assert.deepEqual([sent['x-gateway-token'], sent['x-team'], sent['x-api-key'], gateway.seen.length], [undefined, undefined, undefined, 0]);
+  // The saved key arrives, with the SDK's own API version.
+  assert.equal(sent.authorization, 'Bearer sk-ant-person-000000');
+  assert.ok(sent['anthropic-version'] && sent['anthropic-version'] !== '1999-01-01', String(sent['anthropic-version']));
+  assert.equal(process.env.ANTHROPIC_CUSTOM_HEADERS, custom, 'the variable is back for whatever else reads it');
   // And the address is Anthropic's own unless a test names its fake: never the one in the environment.
   delete anthropicEndpoint.baseURL;
   assert.equal(claudeClient({ apiKey: 'sk-ant-person-000000' }).baseURL, 'https://api.anthropic.com');

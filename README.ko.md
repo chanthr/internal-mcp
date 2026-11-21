@@ -817,14 +817,17 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 ## 클라이언트 연결
 
 콘솔의 **Connect a client** 화면이 대신 해 줍니다. 클라이언트마다 버튼이 하나 있고, 내 폴더와 서버 이름에 맞춘
-항목을 넣습니다. 데스크톱 앱에는 터미널의 PATH가 없습니다. 그래서 콘솔이 쓰는 항목은 Node를 전체 경로로
-가리키고, 서버가 거기서도 시작됩니다.
+항목을 넣습니다. 모든 항목은 Node와 실행할 파일을 둘 다 전체 경로로 적습니다. 데스크톱 앱에는 터미널의 PATH가
+없습니다. 클라이언트는 사용자가 열어 둔 프로젝트에서 서버를 띄웁니다. 그곳에서 무언가를 찾는 항목(`npx`, 경로 없는
+`node`, 버전 관리자의 shim)은 그 프로젝트의 파일을 실행할 수 있습니다. 프로젝트가 없으면 항목은 설정 폴더에 고정해
+설치한 서버 사본을 실행합니다. 처음 **Add**를 누를 때 설치합니다. 손으로 적을 때 아래의 `"$(node -p process.execPath)"`는
+지금 쓰는 Node의 실제 경로입니다.
 
 | 클라이언트 | 방법 |
 | --- | --- |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- node /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- npx --prefix /절대경로/폴더 -y @chnxthr/knowledge-mcp serve --stdio` |
-| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠소⁠스⁠로⁠ ⁠실⁠행⁠하⁠는⁠ ⁠프⁠로⁠젝⁠트 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- node /절대경로/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /절대경로/my-mcp/tsconfig.json /절대경로/my-mcp/src/server.ts serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- "$(node -p process.execPath)" /절대경로/my-mcp/dist/server.js serve --stdio`(먼저 `npm run build`) |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠프⁠로⁠젝⁠트⁠ ⁠없⁠이 | `npm install --prefix /절대경로/폴더 --save-exact --ignore-scripts @chnxthr/knowledge-mcp@<버전>` 다음에 `claude mcp add --scope user my-mcp -e MCP_HOME=/절대경로/폴더 -- "$(node -p process.execPath)" /절대경로/폴더/node_modules/@chnxthr/knowledge-mcp/dist/cli.js serve --stdio` |
+| C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠로⁠컬⁠,⁠ ⁠소⁠스⁠로⁠ ⁠실⁠행⁠하⁠는⁠ ⁠프⁠로⁠젝⁠트 | `claude mcp add my-mcp -e MCP_HOME=/절대경로/my-mcp -- "$(node -p process.execPath)" /절대경로/my-mcp/node_modules/tsx/dist/cli.mjs --tsconfig /절대경로/my-mcp/tsconfig.json /절대경로/my-mcp/src/server.ts serve --stdio` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠D⁠e⁠s⁠k⁠t⁠o⁠p⁠,⁠ ⁠C⁠u⁠r⁠s⁠o⁠r⁠,⁠ ⁠V⁠S⁠ ⁠C⁠o⁠d⁠e | 같은 명령과 `MCP_HOME`을 클라이언트 설정 파일의 `command`, `args`, `env`에 적습니다 |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠C⁠o⁠d⁠e⁠,⁠ ⁠원⁠격 | `claude mcp add --transport http my-mcp https://<호스트>/mcp --header "Authorization: Bearer <키>"` |
 | C⁠l⁠a⁠u⁠d⁠e⁠ ⁠웹⁠,⁠ ⁠데⁠스⁠크⁠톱 | OAuth를 켜고 `https://<호스트>/mcp`로 커스텀 커넥터를 추가합니다 |
@@ -834,7 +837,7 @@ Homebrew나 winget이 있으면 콘솔이 cloudflared를 설치하고, 터널과
 
 | 바뀐 것 | 할 일 |
 | --- | --- |
-| stdio 서버에 `MCP_HOME` 필요 | 프로젝트 폴더에 `.env`나 `mcp.config.json`이 없으면 `MCP_HOME` 없는 stdio 서버는 시작하지 않습니다. `claude mcp add`에 `-e MCP_HOME=/전체/경로`를 넣거나(JSON 설정은 `"env": { "MCP_HOME": "/전체/경로" }`), 콘솔의 **Connect** 화면에서 서버를 다시 추가하십시오. 그렇게 만든 항목에는 `--tsconfig`(tsx)나 `--prefix`(npx)도 들어갑니다. 열어 둔 프로젝트가 실행할 코드를 고르지 못하게 막는 옵션입니다 |
+| stdio 서버에 `MCP_HOME` 필요 | 프로젝트 폴더에 `.env`나 `mcp.config.json`이 없으면 `MCP_HOME` 없는 stdio 서버는 시작하지 않습니다. `claude mcp add`에 `-e MCP_HOME=/전체/경로`를 넣거나(JSON 설정은 `"env": { "MCP_HOME": "/전체/경로" }`), 콘솔의 **Connect** 화면에서 서버를 다시 추가하십시오. 그렇게 만든 항목은 Node와 파일을 전체 경로로 적고(`npx` 없음), tsx에는 `--tsconfig`를 줍니다. 열어 둔 프로젝트가 실행할 코드를 고르지 못하게 막습니다 |
 | Drive 범위 기본값이 `shared` | 신뢰하는 소유자가 `drive.roots` 밖에서 서비스 계정에 공유한 문서를 검색하고, 읽고, 색인할 수 있습니다. `drive.trustedOwners`에 소유자를 넣기 전에는 달라지는 것이 없습니다(`knowledge-mcp setup trust acme.com`). 제외 폴더는 계속 숨깁니다. `drive.scope: "roots"`로 끕니다 |
 | zod 4 | 플러그인이 쓰는 `z`가 zod 4가 됩니다. `z.record(값스키마)`는 `z.record(z.string(), 값스키마)`로, 안쪽 기본값에 기대는 객체의 `.default({})`는 `.prefault({})`로 고치십시오 |
 | `source`가 자유 이름 | `dev`와 `biz`는 옛 뜻 그대로 동작합니다. `--dev-only`, `--biz-only`도 그대로 되고, 일반형은 `--source <이름>`입니다 |

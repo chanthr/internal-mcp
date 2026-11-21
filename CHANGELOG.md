@@ -231,15 +231,27 @@ Changes that affect people who run or extend the server. Dates are release dates
   Remedy: add `-e MCP_HOME=/full/path/of/your/settings` to `claude mcp add` (`"env": { "MCP_HOME": "..." }` in a
   JSON config), or add the server again from the console's Connect page. HTTP and the other commands keep the lookup.
 - **Found by a review of that fix, and closed.** Each let the repository open in a client run its code as this
-  server, or choose its settings, with `MCP_HOME` set. Entries written before this version lack the new flags: add
-  the server to the client again.
+  server, or choose its settings, with `MCP_HOME` set. Entries written before this version are not safe this way:
+  add the server to each client again (console, Connect).
+  - *An entry could look something up in the working directory.* Every entry the console, `setup` and
+    `create-knowledge-mcp` write is now Node by its full path and the file it runs by its full path. The setup
+    wizard printed a bare `node`, or `node_modules/.bin/tsx`, whose `#!/usr/bin/env node` takes the first node on
+    the PATH; a version manager's shim picks one by the files of the working directory. A stdio server also takes
+    the working directory's folders, and relative entries, off its own PATH, so a program it starts by name (git,
+    gh, cloudflared) never comes from the repository.
   - *tsx read the repository's `tsconfig.json`.* A project run from source starts through tsx, which looks for
     `tsconfig.json` in the working directory. A repository whose `paths` mapped `@chnxthr/knowledge-mcp` to a file
     of its own had that file run as the server. Every entry the console, `setup` and `create-knowledge-mcp` write
     now passes `--tsconfig` with the project's own file (the null device when the project has none).
-  - *npx used the repository's `node_modules` and `.npmrc`.* A copy of the package in the repository's
-    `node_modules` ran instead of the real one, and its `.npmrc` could send the download to another registry.
-    Entries now run `npx --prefix <settings folder> -y @chnxthr/knowledge-mcp`, so npm's project is that folder.
+  - *npx ran the repository's programs.* npm exec runs a package's bin in the working directory, through a shell,
+    with every `node_modules/.bin` of that folder and its parents first on the PATH. A repository's
+    `node_modules/.bin/node`, `sh` or `knowledge-mcp` ran in place of the server, its `node_modules` copy of the
+    package did too, and its `.npmrc` could send the download to another registry; `--prefix` changed none of the
+    first three. No entry goes through npx now. Without a project, the entry runs this package's own `cli.js`: the
+    running copy when it is installed to stay (globally, or a linked checkout), else a copy of this very version
+    that **Add** (and the wizard) installs into the settings folder with npm, run in that folder, without install
+    scripts. A copy in npx's cache is never used: every `npx @chnxthr/knowledge-mcp` shares it, including runs a
+    repository's `.npmrc` sent to another registry.
   - *A relative `MCP_HOME` was found in the working directory.* `MCP_HOME=~/kmcp` arrives as typed from
     `-e MCP_HOME=~/kmcp` in zsh and from every JSON config, and pointed into the repository. A leading `~` is now the
     home folder, and a relative path or a folder that does not exist stops the server. A relative `MCP_ENV_FILE` is
@@ -253,7 +265,8 @@ Changes that affect people who run or extend the server. Dates are release dates
     a saved key is used, and kept, only at its own address. `setup embeddings --api-key` asks for a key unseen.
   - *The Anthropic key followed `ANTHROPIC_BASE_URL`.* The SDK reads it, and `ANTHROPIC_CUSTOM_HEADERS`, from the
     environment, which a stdio server inherits from a client set up for a gateway. Claude is now called at
-    `https://api.anthropic.com` only, without those headers.
+    `https://api.anthropic.com` only, without those headers: a line there for `Authorization` or
+    `anthropic-version` neither replaces nor removes the saved key or the SDK's own version.
 - **The server says which settings it uses when the working directory has others.** Run inside a folder with its
   own `.env` while the program's folder (a checkout linked with `npm link`) holds settings too, the server used the
   program's folder without a word. It now says on stderr which folder it uses and that `MCP_HOME` picks this one.

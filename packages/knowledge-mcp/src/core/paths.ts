@@ -26,7 +26,7 @@
  */
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
 /** A path as a person types it: a leading ~ is their home directory. */
 export const expandHome = (path: string): string => path.replace(/^~(?=$|[\\/])/, () => homedir());
@@ -121,6 +121,41 @@ export function stdioProblem(): string | null {
     'else\'s. Add it to the client\'s entry: claude mcp add <name> -e MCP_HOME=/full/path -- ..., or ' +
     '"env": { "MCP_HOME": "/full/path" } in a JSON config.'
   );
+}
+
+/** The real path of a folder, or the folder resolved as given when it does not exist. */
+function real(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return resolve(dir);
+  }
+}
+const within = (dir: string, folder: string): boolean => dir === folder || dir.startsWith(folder.endsWith(sep) ? folder : folder + sep);
+
+/**
+ * PATH as a stdio server keeps it: without relative entries (an empty one or "." is the working directory), and
+ * without the folders inside the working directory, such as its node_modules/.bin, when that is the opened project
+ * and not the settings folder. Programs the server starts by name (git, gh, ps, cloudflared) then never come from
+ * the repository the client has open. A working directory that is the home folder, or above it (Claude Desktop
+ * starts servers in /), is not a project: the folders under it are the person's own tools, and they stay.
+ */
+export function pathForStdio(path: string, o: { cwd: string; settings: string; home: string }): string {
+  const cwd = real(o.cwd);
+  const opened = cwd !== real(o.settings) && !within(real(o.home), cwd);
+  return path
+    .split(delimiter)
+    .filter((dir) => dir && isAbsolute(dir) && !(opened && within(real(dir), cwd)))
+    .join(delimiter);
+}
+
+/**
+ * Apply pathForStdio to this process, for a stdio server. On Windows a program named without a folder is also looked
+ * for in the working directory before the PATH, unless NoDefaultCurrentDirectoryInExePath is set.
+ */
+export function keepOpenFolderOffPath(): void {
+  process.env.PATH = pathForStdio(process.env.PATH ?? '', { cwd: process.cwd(), settings: settingsFolder(), home: homedir() });
+  if (process.platform === 'win32') process.env.NoDefaultCurrentDirectoryInExePath = '1';
 }
 
 /** Where a settings file is read from: in the settings folder. */
