@@ -204,6 +204,20 @@ async function sampleFor(asked: EvalQuestion[]): Promise<Array<LocalFile & { tex
 }
 
 /**
+ * The passages of the sample cut one way, as they would be embedded. One document at a time, with what else waits let
+ * in between: cutting 200 documents in one go held the server for 0.7 to 2.3 seconds a way, five ways in a row.
+ */
+export async function samplePassages(docs: ReadonlyArray<{ name: string; text: string }>, way: IndexProfile, signal?: AbortSignal): Promise<Array<{ doc: number; input: string }>> {
+  const passages: Array<{ doc: number; input: string }> = [];
+  for (const [d, doc] of docs.entries()) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (signal?.aborted) throw new Error('Stopped.');
+    for (const c of chunkMarkdown(doc.text, way)) passages.push({ doc: d, input: embedInputForChunk(c, doc.name, way) });
+  }
+  return passages;
+}
+
+/**
  * Cut a sample of the documents each way, embed it, and ask the questions of each by meaning. Nothing is stored
  * but the result: the index stays as it is.
  */
@@ -224,8 +238,7 @@ export async function compare(opts: { fresh?: boolean; signal?: AbortSignal; pro
   const result: Compared = { at: new Date().toISOString(), model: EMBEDDING_MODEL, documents: docs.length, questions: asked.length, ways: [] };
 
   for (const way of ways) {
-    const passages: Array<{ doc: number; input: string }> = [];
-    for (const [d, doc] of docs.entries()) for (const c of chunkMarkdown(doc.text, way)) passages.push({ doc: d, input: embedInputForChunk(c, doc.name, way) });
+    const passages = await samplePassages(docs, way, signal);
     Object.assign(at, { phase: 'embedding', way: cutMark(way), done: 0, total: passages.length });
     const vectors: Float32Array[] = [];
     for (let i = 0; i < passages.length; i += 64) {

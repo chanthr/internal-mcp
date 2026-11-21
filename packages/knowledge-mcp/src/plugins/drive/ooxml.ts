@@ -96,24 +96,108 @@ export function decodeXml(s: string): string {
 }
 
 /**
+ * Where `what` next occurs in `text` at or after `from`. A stretch searched once is not searched again while `from`
+ * grows: reading on to the end from every opening tag is what made this slow.
+ */
+function finder(text: string, what: string): (from: number) => number {
+  let searchedFrom = Infinity;
+  let found = -1;
+  return (from) => {
+    if (from < searchedFrom || (found >= 0 && found < from)) {
+      searchedFrom = from;
+      found = text.indexOf(what, from);
+    }
+    return found;
+  };
+}
+
+const isSpace = (c: string | undefined): boolean => c !== undefined && /\s/.test(c);
+
+/**
  * Paragraph texts of one XML part. `ns` is the text namespace prefix: "w" for Word, "a" for DrawingML.
  * Inside a paragraph: <ns:t> text, <ns:tab/> → tab, <ns:br/> and <w:cr/> → newline. Empty paragraphs are kept
  * as "" so callers can decide how to join them.
+ *
+ * Read in one pass with indexOf. A pattern that looked from every "<w:p>" for the next "</w:p>" read a file with 1 MB
+ * of unclosed paragraphs for 25 seconds (and 64 MB, the most one part may hold, for hours).
  */
 export function paragraphs(xml: string, ns: 'w' | 'a'): string[] {
   const out: string[] = [];
-  const paraRe = new RegExp(`<${ns}:p[\\s>][\\s\\S]*?</${ns}:p>|<${ns}:p/>`, 'g');
-  const tokenRe = new RegExp(`<${ns}:t(?:\\s[^>]*)?>([\\s\\S]*?)</${ns}:t>|<${ns}:t(?:\\s[^>]*)?/>|<${ns}:tab/>|<${ns}:br(?:\\s[^>]*)?/?>|<w:cr/>`, 'g');
-  for (const para of xml.match(paraRe) ?? []) {
-    let text = '';
-    for (const m of para.matchAll(tokenRe)) {
-      if (m[1] !== undefined) text += decodeXml(m[1]);
-      else if (m[0].startsWith(`<${ns}:tab`)) text += '\t';
-      else if (m[0].startsWith(`<${ns}:br`) || m[0] === '<w:cr/>') text += '\n';
+  const open = `<${ns}:p`;
+  const close = `</${ns}:p>`;
+  const nextOpen = finder(xml, open);
+  const nextClose = finder(xml, close);
+  let at = 0;
+  for (;;) {
+    const i = nextOpen(at);
+    if (i < 0) break;
+    const after = i + open.length;
+    at = after;
+    if (xml.startsWith('/>', after)) {
+      // <w:p/>: an empty paragraph
+      out.push('');
+      at = after + 2;
+    } else if (xml[after] === '>' || isSpace(xml[after])) {
+      // <w:p> or <w:p attributes>: the paragraph runs to the next </w:p>. (<w:pPr> and the like are not paragraphs.)
+      const end = nextClose(after + 1);
+      if (end >= 0) {
+        out.push(paragraphText(xml.slice(i, end), ns));
+        at = end + close.length;
+      }
     }
-    out.push(text);
   }
   return out;
+}
+
+/** The text of one paragraph, read in one pass: the runs' text, with tabs and line breaks. */
+function paragraphText(para: string, ns: 'w' | 'a'): string {
+  const t = `<${ns}:t`;
+  const endT = `</${ns}:t>`;
+  const tab = `<${ns}:tab/>`;
+  const br = `<${ns}:br`;
+  const nextTag = finder(para, '<');
+  const nextGt = finder(para, '>');
+  const nextEndT = finder(para, endT);
+  /** Where the tag `name` that starts at i ends (its ">"), for <name>, <name/> (with `selfClosing`) and <name attributes>. */
+  const tagEnd = (i: number, name: string, selfClosing: boolean): number => {
+    const c = para[i + name.length];
+    if (c === '>') return i + name.length;
+    if (c === '/') return selfClosing && para[i + name.length + 1] === '>' ? i + name.length + 1 : -1;
+    return isSpace(c) ? nextGt(i + name.length) : -1;
+  };
+  let text = '';
+  let at = 0;
+  for (;;) {
+    const i = nextTag(at);
+    if (i < 0) break;
+    at = i + 1;
+    if (para.startsWith(tab, i)) {
+      text += '\t';
+      at = i + tab.length;
+    } else if (para.startsWith(t, i)) {
+      // <w:t>text</w:t>, with or without attributes. <w:t/> and <w:t attributes/> hold none.
+      const gt = tagEnd(i, t, true);
+      if (gt < 0) continue;
+      const end = para[gt - 1] === '/' ? -1 : nextEndT(gt + 1);
+      if (end >= 0) {
+        text += decodeXml(para.slice(gt + 1, end));
+        at = end + endT.length;
+      } else if (para[gt - 1] === '/') {
+        at = gt + 1;
+      }
+    } else if (para.startsWith(br, i)) {
+      // <w:br>, <w:br/>, <w:br attributes/>
+      const gt = tagEnd(i, br, true);
+      if (gt >= 0) {
+        text += '\n';
+        at = gt + 1;
+      }
+    } else if (para.startsWith('<w:cr/>', i)) {
+      text += '\n';
+      at = i + '<w:cr/>'.length;
+    }
+  }
+  return text;
 }
 
 /** .docx → plain text, paragraphs separated by a blank line. */

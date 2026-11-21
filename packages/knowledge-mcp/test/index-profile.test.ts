@@ -71,7 +71,7 @@ const { backfillVectors } = await import('../src/plugins/drive/indexer.js');
 const { DRIVE_COLLECTION, getLocalIndex, vectorForm } = await import('../src/plugins/drive/qdrant.js');
 const { reembed } = await import('../src/plugins/knowledge/reembed.js');
 const { searchIndex } = await import('../src/plugins/knowledge/hybrid.js');
-const { compare, measure, measureView } = await import('../src/plugins/knowledge/measure.js');
+const { compare, measure, measureView, samplePassages } = await import('../src/plugins/knowledge/measure.js');
 
 test('the setting: the config, then the environment over it; values out of range are passed over', () => {
   const p = indexProfile();
@@ -201,6 +201,31 @@ test('measuring asks the kept questions three ways; comparing cuts a sample each
   assert.ok(c.ways.every((w) => w.passages > 0 && w.score.top10 >= 1));
   assert.deepEqual(await local.stats(DRIVE_COLLECTION), stats, 'the index is as it was');
   assert.ok(measureView().compared);
+});
+
+test('comparing cuts the sample one document at a time, and lets other work run in between', async () => {
+  // 200 documents were cut in one go, five ways in a row: 0.7 to 2.3 seconds each with nothing else running.
+  const order: string[] = [];
+  const docs = [0, 1, 2].map((i) => ({
+    name: `doc${i}.md`,
+    get text() {
+      order.push(`cut ${i}`);
+      return `# Document ${i}\n\nWhat document ${i} says.`;
+    },
+  }));
+  let ticks = 0;
+  const tick = () => {
+    order.push('other');
+    if (++ticks < 20) setImmediate(tick);
+  };
+  setImmediate(tick);
+  const passages = await samplePassages(docs, indexProfile());
+  assert.deepEqual([...new Set(passages.map((p) => p.doc))], [0, 1, 2]);
+  for (const i of [1, 2]) assert.ok(order.slice(order.indexOf(`cut ${i - 1}`), order.indexOf(`cut ${i}`)).includes('other'), order.join(', '));
+  // Stopped from the page: no document after that is cut.
+  const stop = new AbortController();
+  stop.abort();
+  await assert.rejects(samplePassages(docs, indexProfile(), stop.signal), /Stopped/);
 });
 
 test('without questions and without a model to write them, measuring says what to do', async () => {

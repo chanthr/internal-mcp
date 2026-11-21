@@ -19,6 +19,8 @@
  * table is not a note), and a path that climbs out of the folder (it points at something this server was not
  * given).
  */
+import { createHash } from 'node:crypto';
+import { closeSync, openSync, readSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dataFile } from '../../core/data_file.js';
 import { parseFrontmatter } from '../drive/chunker.js';
@@ -44,12 +46,44 @@ export interface LinkMap {
   folders: Record<string, Record<string, DocEntry>>;
 }
 
-const file = dataFile<LinkMap>('links.json');
+/** links.json: the link map, with `key` first, a fingerprint of what the links are (linksKey). */
+const file = dataFile<LinkMap & { key?: string }>('links.json');
+const usable = (m: (LinkMap & { key?: string }) | null): m is LinkMap & { key?: string } => m?.version === 1 && !!m.folders && typeof m.folders === 'object';
 export const readLinkMap = (): LinkMap => {
   const m = file.read();
-  return m?.version === 1 && m.folders && typeof m.folders === 'object' ? m : { version: 1, folders: {} };
+  return usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
 };
-export const writeLinkMap = (map: LinkMap): void => file.write(map);
+export const writeLinkMap = (map: LinkMap): void => file.write({ version: 1, key: linksKey(map), folders: map.folders });
+
+/**
+ * A fingerprint of what the graph is made from: the documents, their titles and other names, and their links. Not
+ * when each was modified: a scan writes the map again whenever a file is saved, and building the graph again for
+ * that took a quarter of a second at 20,000 documents, on the next search.
+ */
+function linksKey(map: LinkMap): string {
+  const h = createHash('sha1');
+  for (const [folder, docs] of Object.entries(map.folders)) {
+    h.update(`\u0000${folder}\u0000`);
+    for (const [path, d] of Object.entries(docs)) h.update(JSON.stringify([path, d.title ?? null, d.aliases ?? [], d.links]));
+  }
+  return h.digest('hex');
+}
+
+/** The fingerprint at the head of links.json, read without reading the rest; null when it has none. */
+function keyOnDisk(): string | null {
+  try {
+    const fd = openSync(file.path(), 'r');
+    try {
+      const head = Buffer.alloc(80);
+      const n = readSync(fd, head, 0, head.length, 0);
+      return /^\{"version":1,"key":"([0-9a-f]{40})"/.exec(head.toString('utf8', 0, n))?.[1] ?? null;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
 
 const DOC_EXT = /\.(md|markdown|mdx|txt|pdf|docx|pptx|xlsx)$/i;
 /** Things a wiki link embeds that are not documents. */
@@ -341,12 +375,22 @@ export function buildGraph(map: LinkMap): Graph {
   return g;
 }
 
-let cached: { stamp: string; graph: Graph } | null = null;
+let cached: { stamp: string; key: string | null; graph: Graph } | null = null;
 
-/** The graph of what is written down now. Built once per change of links.json, whichever process wrote it. */
+/**
+ * The graph of what is written down now, whichever process wrote it. Built again only when the links changed: a
+ * links.json written again because a file was saved, with the same links, keeps the graph built before.
+ */
 export function getGraph(): Graph {
   const stamp = file.stamp();
-  if (!cached || cached.stamp !== stamp) cached = { stamp, graph: buildGraph(readLinkMap()) };
+  if (cached?.stamp === stamp) return cached.graph;
+  const key = keyOnDisk();
+  if (cached && key && cached.key === key) {
+    cached.stamp = stamp;
+    return cached.graph;
+  }
+  const m = file.read();
+  cached = { stamp, key: usable(m) ? (m.key ?? null) : null, graph: buildGraph(usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} }) };
   return cached.graph;
 }
 

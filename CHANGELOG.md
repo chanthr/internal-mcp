@@ -263,6 +263,41 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **Google Sheets are read tab by tab.** Only the first tab was read and indexed.
 - **Google Docs with pictures are read in full.** The Markdown export carries pictures as base64, which used up
   `maxChars` and cut the text short. Picture data is now removed.
+- **A note of blank lines or spaces no longer stops the server.** Cleaning text tried some patterns again from
+  every line or every space: one 200,000-character note sent to `POST /inbox` held every client for 17 to 98
+  seconds. Text is now cleaned in time proportional to its length (200,000 blank lines: 17 s before, under 5 ms
+  now), and ordinary text comes out as before.
+- **One long word no longer stops the server while it is cut into passages.** The tokenizer's work on a run with no
+  space in it grows with the square of its length, and the chunker counted the same text several times and again
+  at every step of a search: 8,000 Korean characters without a space took 1 s, 100 KB of "a" 29 s, 100 KB of "|"
+  50 s. Such runs are now counted in pieces, and a piece counted once is not counted again (each of those now
+  takes under 50 ms). Passages of ordinary text are the same as before.
+- **A passage of thousands of blank lines is counted for tables in time.** The pattern that counts table rows read
+  every blank line on to the end of the run (40,000 lines: 2 to 9 s).
+- **A document that contains a special token string such as `<|endoftext|>` is indexed.** The tokenizer refused
+  it, and the document was listed as one that could not be indexed. Such strings are now text like any other.
+- **Pictures embedded as base64 in Markdown and text files are dropped before indexing**, as they already were for
+  Google Docs. A Markdown file with one picture of 1.6 MB took 7.5 s to cut and became 374 passages of letters
+  sent to the embedding model.
+- **A `.docx` with paragraphs that never close is read in one pass.** A file of 1.6 KB holding 1 MB of such XML
+  took 25 s to read (the 64 MB a part may hold: hours). It now takes milliseconds.
+- **An `.xlsx` no longer makes millions of commas out of the size it says it has.** A file of 1.5 KB with one cell
+  that said it spanned 200,000 rows by 100 columns became 20 million commas in 4 s, and one that said a million
+  rows by 16,384 columns would have run for an hour. The size now comes from the cells that are there, empty rows
+  are left out, a tab is read to 100,000 rows, and a tab whose cells span more than 2,000,000 cells is not read
+  and says so.
+- **Comparing ways of cutting no longer holds the server.** It cut 200 sample documents in one go, five ways in a
+  row (up to 2.3 s each). Other requests now wait at most one document.
+- **The Wiki page no longer lists every folder while a run goes.** It asks how far the run is every 1.5 s, and each
+  answer read every file's details again (20,000 files: about 0.2 s each time, for the whole run). While a run
+  goes the answer comes from what the run listed when it started; a document added meanwhile is counted when the
+  run ends.
+- **Listing conversations no longer reads every conversation.** The list was read from all of them after every
+  answer (500 conversations of 150 KB: 74 MB, a quarter of a second). It is now kept beside them and made again
+  from the files when it is missing, cannot be read, or a file changed.
+- **Saving a file no longer makes the next search build the link graph again.** The links file changes whenever a
+  document's modified time does, and the next `search_knowledge` built the whole graph again (20,000 documents:
+  0.25 s). The graph is now built again only when titles, other names or links change.
 
 ## 0.3.2
 
