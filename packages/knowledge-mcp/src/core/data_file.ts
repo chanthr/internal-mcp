@@ -2,43 +2,130 @@
  * A JSON file under the data directory that several processes read and one writes at a time: readable by the
  * owner only, written whole and swapped in, so a reader never sees half of it.
  */
-import { accessSync, closeSync, constants, fchmodSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fsyncSync,
+  ftruncateSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync,
+  type Stats,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { dataDir } from './paths.js';
+
+const code = (e: unknown): string => String((e as NodeJS.ErrnoException)?.code ?? '');
+/**
+ * Why a file cannot be swapped in, though it can be written: the folder may not be written (EACCES, EPERM), the
+ * file is mounted on its own (a single file mounted into a container: EBUSY), or it is on another device (EXDEV).
+ */
+const IN_PLACE = new Set(['EACCES', 'EPERM', 'EBUSY', 'EXDEV']);
+
+/** Where a write to `path` lands: through links, also a link to a file that does not exist yet. */
+function destination(path: string): { target: string; st: Stats | null } {
+  let target = resolve(path);
+  for (let hops = 0; hops < 40; hops++) {
+    let st: Stats;
+    try {
+      st = lstatSync(target);
+    } catch (e) {
+      if (code(e) === 'ENOENT') return { target, st: null };
+      throw e;
+    }
+    if (!st.isSymbolicLink()) return { target, st };
+    target = resolve(realpathSync(dirname(target)), readlinkSync(target));
+  }
+  throw Object.assign(new Error(`${path}: too many links`), { code: 'ELOOP' });
+}
+
+function writeAll(fd: number, bytes: Uint8Array): void {
+  for (let at = 0; at < bytes.length; ) at += writeSync(fd, bytes, at, bytes.length - at, at);
+}
+
+/** Write over the file where it is: what a plain write did, for files that cannot be swapped. */
+function writeInPlace(target: string, bytes: Uint8Array, mode: number | undefined): void {
+  const fd = openSync(target, 'r+');
+  try {
+    if (mode !== undefined) fchmodSync(fd, mode);
+    writeAll(fd, bytes);
+    ftruncateSync(fd, bytes.length);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Windows refuses a rename for a moment while another program (a virus scanner, an indexer) has the new file open:
+ * asked again a few times, briefly.
+ */
+function renameOver(from: string, to: string): void {
+  for (let tries = 0; ; tries++) {
+    try {
+      return renameSync(from, to);
+    } catch (e) {
+      if (process.platform !== 'win32' || tries >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(code(e))) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20 << tries);
+    }
+  }
+}
 
 /**
  * Write a file whole and swap it in. The text goes to a temporary file beside it, is flushed to the disk, and takes
  * the file's place in one rename: a full disk or a crash in the middle leaves the file as it was, never cut short (a
  * config cut short stops the next start; a .env cut short loses keys). The file keeps its permissions (a config or a
- * .env may be readable by its owner only), or gets `mode` when one is given. A file that is a link to another is
- * written where it points, so the link stays. A file that may not be written (made read-only) is refused, as a
- * write in place would be: a rename could replace it all the same.
+ * .env may be readable by its owner only), or gets `mode` when one is given. A file that may not be written (made
+ * read-only) is refused, as a write in place would be: a rename could replace it all the same.
+ *
+ * Some files cannot be swapped, and are written in place as before, without that protection: one in a folder that
+ * may not be written, one mounted on its own (a config mounted into a container), one on another device, and one
+ * with more than one name (a hard link: a new file would leave the other names on the old text). A link is written
+ * where it points, also when that file does not exist yet, so the link stays.
  */
 export function writeFileAtomic(path: string, data: string | Uint8Array, opts: { mode?: number } = {}): void {
-  let target = path;
-  let mode = opts.mode;
-  let exists = true;
+  const bytes = typeof data === 'string' ? Buffer.from(data) : data;
+  const { target, st } = destination(path);
+  if (st) accessSync(target, constants.W_OK);
+  const mode = opts.mode ?? (st ? st.mode & 0o777 : undefined);
+  if (st && st.nlink > 1) return writeInPlace(target, bytes, opts.mode);
+  // A name of its own: two processes writing the same file (two containers on one volume can both be pid 1) do not
+  // write into each other's temporary file.
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  let fd: number;
   try {
-    target = realpathSync(path);
-    mode ??= statSync(target).mode & 0o777;
-  } catch {
-    exists = false; // a new file
+    fd = openSync(tmp, 'wx', mode ?? 0o666);
+  } catch (e) {
+    if (st && IN_PLACE.has(code(e))) return writeInPlace(target, bytes, opts.mode);
+    throw e;
   }
-  if (exists) accessSync(target, constants.W_OK);
-  const tmp = `${target}.${process.pid}.tmp`;
-  const fd = openSync(tmp, 'w', mode ?? 0o666);
   try {
     try {
       if (mode !== undefined) fchmodSync(fd, mode); // the mode given to open is narrowed by the umask
-      const bytes = typeof data === 'string' ? Buffer.from(data) : data;
-      for (let at = 0; at < bytes.length; ) at += writeSync(fd, bytes, at);
+      writeAll(fd, bytes);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
-    renameSync(tmp, target);
   } catch (e) {
     rmSync(tmp, { force: true });
+    throw e;
+  }
+  try {
+    renameOver(tmp, target);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    if (st && IN_PLACE.has(code(e))) return writeInPlace(target, bytes, opts.mode);
     throw e;
   }
   // The rename itself is on the disk once the folder is flushed. Not every system can flush a folder (Windows).

@@ -64,7 +64,7 @@ const { consoleToken } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
-const { certPath, cloudflareApi, cloudflaredHome, lookup, reach, resumeTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
+const { certPath, cloudflareApi, cloudflaredHome, lookup, processes, reach, resumeTunnel, startQuickTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
 
 // Public DNS, Cloudflare's API and the address seen from outside, as the tests need them.
 const NS: Record<string, string[]> = { 'example.com': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'other.org': ['ns1.other-host.net', 'ns2.other-host.net'] };
@@ -322,8 +322,8 @@ test('a program given the id of a cloudflared that is gone is not taken for the 
 
     // A cloudflared with the id written down, but one that started at another time, is not it either.
     const kept = JSON.parse(readFileSync(file, 'utf8'));
-    assert.equal(typeof kept.started, 'number');
-    writeFileSync(file, JSON.stringify({ ...kept, started: kept.started - 3_600_000 }));
+    assert.equal(typeof kept.mark, 'string');
+    writeFileSync(file, JSON.stringify({ ...kept, mark: `${kept.mark}0` }));
     assert.equal((await tunnelView()).running, false);
     stopTunnel();
     assert.ok(alive(pid), 'as far as the note goes, it is another process, so it was not stopped');
@@ -333,4 +333,37 @@ test('a program given the id of a cloudflared that is gone is not taken for the 
   } finally {
     other.kill();
   }
+});
+
+test('a cloudflared that cannot be checked (ps failed) is kept, shown as running, never signalled, and not started twice', async () => {
+  const on = await startQuickTunnel(server.port);
+  assert.equal(on.running, true);
+  const pid = pidOf();
+  const launches = () => said().filter((l) => l.includes(' --url ')).length;
+  const before = launches();
+  const real = processes.info;
+  // As when ps fails or takes too long on a busy machine: the process is there, and nothing more is known.
+  processes.info = () => null;
+  try {
+    const view = await tunnelView();
+    assert.deepEqual([view.running, view.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    assert.match(view.problem ?? '', new RegExp(`cloudflared \\(process ${pid}\\) could not be checked just now`));
+    // Stop: not signalled, and not forgotten, so the page does not say "off" while the address still answers.
+    stopTunnel();
+    assert.ok(alive(pid), 'not signalled');
+    assert.equal(pidOf(), pid, 'still in the note');
+    assert.equal((await tunnelView()).running, true);
+    // A restart of the server does not start a second one beside it, and neither does the console.
+    const note = JSON.parse(readFileSync(join(data, 'tunnel.json'), 'utf8'));
+    writeFileSync(join(data, 'tunnel.json'), JSON.stringify({ ...note, on: true }));
+    await resumeTunnel(server.port);
+    await assert.rejects(startQuickTunnel(server.port), /could not be checked, so it was not stopped/);
+    assert.equal(launches(), before);
+  } finally {
+    processes.info = real;
+  }
+  // Once it can be checked again, it is stopped as usual.
+  stopTunnel();
+  assert.ok(await gone(pid));
+  assert.equal((await tunnelView()).running, false);
 });

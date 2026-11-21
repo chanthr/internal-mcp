@@ -24,6 +24,7 @@ import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { getConfig, settingsDir } from '../../core/config.js';
 import { appRoot, dataDir } from '../../core/paths.js';
 import { withLock } from '../../core/lock.js';
+import { MAX_INTERVAL_MIN } from '../../core/env.js';
 import { isExcludedName } from '../drive/exclude.js';
 import { extractLocalFile, mimeForFileName } from '../drive/extract_text.js';
 import { backfillVectors, deleteFileVectors, indexText } from '../drive/indexer.js';
@@ -474,7 +475,7 @@ export function startFolderScans(intervalMin: number, log: (...a: unknown[]) => 
     }
   };
   const next = () => {
-    _timer = setTimeout(() => void run().finally(next), intervalMin * 60_000);
+    _timer = setTimeout(() => void run().finally(next), Math.min(intervalMin, MAX_INTERVAL_MIN) * 60_000);
     _timer.unref?.();
   };
   void run().finally(next);

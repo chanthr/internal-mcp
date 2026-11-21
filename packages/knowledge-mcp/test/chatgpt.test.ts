@@ -297,7 +297,8 @@ test('the data folder cannot be written when the browser comes back: the tab say
   back.searchParams.set('code', 'the-code');
   back.searchParams.set('state', url.searchParams.get('state')!);
   back.searchParams.set('client_id', 'oaiapp_123');
-  // A full disk, or a volume that became read-only.
+  // A volume that became read-only: neither the folder nor the file in it may be written.
+  chmodSync(join(dir, 'data', 'chatgpt-account.json'), 0o400);
   chmodSync(join(dir, 'data'), 0o500);
   try {
     // Before, the failed save was a rejection nobody caught: the tab got no answer, and the server stopped.
@@ -306,6 +307,7 @@ test('the data folder cannot be written when the browser comes back: the tab say
     assert.match(await r.text(), /Not signed in<\/h1><p>The sign-in could not be checked \(EACCES/);
   } finally {
     chmodSync(join(dir, 'data'), 0o700);
+    chmodSync(join(dir, 'data', 'chatgpt-account.json'), 0o600);
   }
   assert.equal((await fetch(`http://localhost:${server.port}/health`)).status, 200);
   assert.match((await api('GET', '/llm/chatgpt')).json.error, /could not be checked/);

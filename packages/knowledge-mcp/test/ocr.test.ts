@@ -31,7 +31,8 @@ Object.assign(process.env, {
 // A vision model: it "reads" a page by answering with what the test says the page holds, and keeps what it was sent.
 const seen: Array<{ model: string; prompt: string; image: string }> = [];
 let reads: (n: number) => string = () => '';
-let failing = false;
+/** The status the model answers its n-th request with (counted from the start of the file). */
+let status: (n: number) => number = () => 200;
 const read = (req: IncomingMessage) =>
   new Promise<string>((resolve) => {
     let body = '';
@@ -42,7 +43,8 @@ const model = createServer(async (req: IncomingMessage, res: ServerResponse) => 
   const body = JSON.parse(await read(req));
   const parts = body.messages[0].content;
   seen.push({ model: body.model, prompt: parts.find((p: any) => p.type === 'text').text, image: parts.find((p: any) => p.type === 'image_url').image_url.url.slice(0, 22) });
-  if (failing) return void res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'the page could not be read' } }));
+  const code = status(seen.length);
+  if (code !== 200) return void res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'the page could not be read' } }));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ choices: [{ message: { content: reads(seen.length) } }] }));
 });
@@ -159,30 +161,58 @@ test('a folder scan leaves a scan for the OCR run, which reads it page by page a
   assert.equal((await (await getLocalIndex())!.keywordSearch(DRIVE_COLLECTION, { query: 'lease agreement', limit: 5, with_payload: true })).length, 2);
 });
 
+/** A scan of two pages, each with a line on it, drawn as checkPdf draws one. */
+function twoPages(first: string, second: string): Buffer {
+  const text = (line: string) => {
+    const stream = `BT /F1 36 Tf 60 400 Td (${line}) Tj ET`;
+    return `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  };
+  const page = (contents: number) => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents ${contents} 0 R /Resources << /Font << /F1 7 0 R >> >> >>`;
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>', page(5), page(6), text(first), text(second), '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'];
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  objects.forEach((o, i) => {
+    offsets.push(out.length);
+    out += `${i + 1} 0 obj\n${o}\nendobj\n`;
+  });
+  const xref = out.length;
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  return Buffer.from(`${out}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`, 'latin1');
+}
+/** Folder passes, each followed by the run that starts by itself: how many runs started. */
+async function autoPasses(n: number): Promise<number> {
+  let started = 0;
+  for (let pass = 0; pass < n; pass++) {
+    if (startAutoOcrRun()) started++;
+    await until(() => !ocrRun()?.running);
+  }
+  return started;
+}
+
 test('a scan the model cannot read is tried again by itself only a few times while it is unchanged; the console still tries it', async () => {
   useModel();
   process.env.OCR_AUTO = 'true';
-  failing = true;
+  writeFileSync(join(docs, 'torn.pdf'), twoPages('Torn copy', 'Torn page two'));
+  await scanFolders();
+  assert.equal(ocrWaiting(), 1);
+  // The model reads the first page of each try and cannot read the second: the file's fault, not the model's.
+  const before = seen.length;
+  status = (n) => ((n - before) % 2 === 0 ? 400 : 200);
   try {
-    writeFileSync(join(docs, 'torn.pdf'), checkPdf('Torn copy'));
-    await scanFolders();
-    assert.equal(ocrWaiting(), 1);
     // After every folder pass (every ten minutes, and after every change) a run would start by itself.
-    const before = seen.length;
-    let started = 0;
-    for (let pass = 0; pass < 6; pass++) {
-      if (startAutoOcrRun()) started++;
-      await until(() => !ocrRun()?.running);
-    }
-    assert.equal(started, 3);
-    assert.equal(seen.length - before, 3, 'its one page, asked once a try');
+    assert.equal(await autoPasses(6), 3);
+    assert.equal(seen.length - before, 6, 'two pages a try');
     assert.equal(ocrWaiting(), 1, 'it still waits');
     // A run started from the console tries it all the same.
     startOcrRun();
     await until(() => !ocrRun()?.running);
-    assert.deepEqual([ocrRun()!.failed.length, seen.length - before], [1, 4]);
+    assert.deepEqual([ocrRun()!.failed.length, seen.length - before], [1, 8]);
+    // Another OCR may read it: with another model it is tried again by itself.
+    process.env.OCR_MODEL = 'deepseek-ocr:3b';
+    assert.equal(await autoPasses(1), 1);
+    useModel();
     // Changed, it is tried again by itself, and now the model reads it.
-    failing = false;
+    status = () => 200;
     reads = () => 'A torn copy, read at last.';
     const later = new Date(Date.now() + 5000);
     utimesSync(join(docs, 'torn.pdf'), later, later);
@@ -191,8 +221,35 @@ test('a scan the model cannot read is tried again by itself only a few times whi
     await until(() => !ocrRun()?.running);
     assert.deepEqual([ocrRun()!.read, ocrWaiting()], [1, 0]);
   } finally {
-    failing = false;
+    status = () => 200;
     delete process.env.OCR_AUTO;
+  }
+});
+
+test('an OCR that is not running, or broken for a moment, gives up on no file: once it answers, the waiting files are read', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  for (const name of ['p.pdf', 'q.pdf']) writeFileSync(join(docs, name), checkPdf(`Copy ${name}`));
+  try {
+    // The OCR on this computer is not running: nothing answers on its port.
+    process.env.OCR_BASE_URL = 'http://127.0.0.1:9/v1';
+    await scanFolders();
+    assert.equal(ocrWaiting(), 2);
+    assert.equal(await autoPasses(4), 4);
+    // Then it runs, and fails for a moment (it is still loading the model).
+    useModel();
+    status = () => 503;
+    assert.equal(await autoPasses(4), 4);
+    // It answers: the next run reads both.
+    status = () => 200;
+    reads = () => 'A copy, readable again.';
+    assert.ok(startAutoOcrRun());
+    await until(() => !ocrRun()?.running);
+    assert.deepEqual([ocrRun()!.read, ocrWaiting()], [2, 0]);
+  } finally {
+    status = () => 200;
+    delete process.env.OCR_AUTO;
+    useModel();
   }
 });
 

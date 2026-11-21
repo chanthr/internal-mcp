@@ -10,10 +10,15 @@
  * A file that failed (one page the model could not read fails the whole file) stays waiting. A run started from the
  * console tries it again; a run that starts by itself after a pass leaves it alone once it failed AUTO_TRIES times
  * as it is now, instead of reading up to 200 pages of it again after every pass. A file that changes is tried again.
+ *
+ * Only a failure that is the file's counts: the OCR answered, and could not read it. An OCR that cannot be used
+ * (not running, too slow, broken for a moment, a model it does not have: drive/ocr.ts) fails every file, and a run
+ * that could read nothing at all, not one page, does not tell a bad file from a bad OCR: neither is held against
+ * the files. What was held against them is let go once the OCR reads something again, or is changed.
  */
 import { extractLocalFile } from '../drive/extract_text.js';
 import { backfillVectors, indexText } from '../drive/indexer.js';
-import { ocrConfigured, ocrIsLocal } from '../drive/ocr.js';
+import { ocrBy, ocrConfigured, ocrIsLocal, ocrSettings, ocrUnavailable } from '../drive/ocr.js';
 import { noTextSince, readByOcr, resolveLocalId, waitingForOcr } from './folders.js';
 
 export interface OcrRun {
@@ -38,11 +43,18 @@ export interface OcrRun {
 let current: (OcrRun & { stop: AbortController }) | null = null;
 
 const AUTO_TRIES = 3;
-/** Files whose reading failed: how often, at which modified time. Only waiting files are kept, so it stays small. */
-const failures = new Map<string, { modified: string; tries: number }>();
+/**
+ * Files whose reading failed: how often, at which modified time, with which OCR. Only waiting files are kept, so it
+ * stays small.
+ */
+const failures = new Map<string, { modified: string; by: string; tries: number }>();
+const ocrNow = (): string => {
+  const s = ocrSettings();
+  return s ? ocrBy(s) : '';
+};
 const givenUp = (id: string): boolean => {
   const f = failures.get(id);
-  return !!f && f.tries >= AUTO_TRIES && f.modified === noTextSince(id);
+  return !!f && f.tries >= AUTO_TRIES && f.modified === noTextSince(id) && f.by === ocrNow();
 };
 
 export function ocrRun(): OcrRun | null {
@@ -74,6 +86,9 @@ export function startOcrRun(opts: { limit?: number; ids?: string[]; afterRead?: 
   const ids = (opts.ids ?? waitingForOcr()).slice(0, opts.limit ?? Infinity);
   const run: NonNullable<typeof current> = { running: true, done: 0, total: ids.length, current: null, page: null, read: 0, pages: 0, empty: 0, failed: [], stopped: null, startedAt: Date.now(), endedAt: null, stop: new AbortController() };
   current = run;
+  // The files that failed by their own fault in this run (id → modified time), and whether the OCR read any page.
+  const faults = new Map<string, string>();
+  let answered = false;
   void (async () => {
     for (const id of ids) {
       if (run.stop.signal.aborted) break;
@@ -87,7 +102,14 @@ export function startOcrRun(opts: { limit?: number; ids?: string[]; afterRead?: 
       run.current = file.path;
       run.page = null;
       try {
-        const r = await extractLocalFile(file.abs, file.mimeType, { ocr: true, signal: run.stop.signal, onPage: (done, total) => (run.page = { done, total }) });
+        const r = await extractLocalFile(file.abs, file.mimeType, {
+          ocr: true,
+          signal: run.stop.signal,
+          onPage: (done, total) => {
+            run.page = { done, total };
+            if (done > 0) answered = true; // a page was read
+          },
+        });
         if (r.needsOcr || !r.text.trim()) run.empty++;
         else {
           await indexText({ id: file.id, name: file.name, path: file.path, modifiedTime: file.modifiedTime, source: file.folder.source, mimeType: file.mimeType, size: file.size }, r.text, undefined, { vectors: false });
@@ -99,8 +121,7 @@ export function startOcrRun(opts: { limit?: number; ids?: string[]; afterRead?: 
       } catch (e) {
         if (run.stop.signal.aborted) break;
         run.failed.push({ name: file.path, why: (e instanceof Error ? e.message : String(e)).slice(0, 200) });
-        const before = failures.get(id);
-        failures.set(id, { modified: file.modifiedTime, tries: before?.modified === file.modifiedTime ? before.tries + 1 : 1 });
+        if (!ocrUnavailable(e)) faults.set(id, file.modifiedTime);
         // The OCR itself is down (not this one file): the rest would fail the same way.
         if (run.failed.length >= 3 && run.read === 0) {
           run.stopped = 'Stopped after three files failed in a row.';
@@ -110,6 +131,15 @@ export function startOcrRun(opts: { limit?: number; ids?: string[]; afterRead?: 
       run.done++;
     }
     if (run.stop.signal.aborted && !run.stopped) run.stopped = 'Stopped.';
+    // The OCR read something: what was held against files before (perhaps while it was half broken) is let go.
+    if (run.read > 0) failures.clear();
+    if (run.read > 0 || answered) {
+      const by = ocrNow();
+      for (const [id, modified] of faults) {
+        const before = failures.get(id);
+        failures.set(id, { modified, by, tries: before?.modified === modified && before.by === by ? before.tries + 1 : 1 });
+      }
+    }
     run.running = false;
     run.current = null;
     run.page = null;

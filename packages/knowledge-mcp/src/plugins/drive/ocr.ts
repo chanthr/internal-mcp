@@ -84,6 +84,14 @@ function pageText(raw: string): string {
   return t.trim();
 }
 
+/**
+ * The OCR could not be used at all: not reached, too slow, broken for a moment (5xx), or set up wrong (a key it
+ * does not take, a model it does not have). Not a fault of the file being read: a file that failed this way is
+ * not given up on (ocr_run.ts).
+ */
+const unavailable = (message: string): Error => Object.assign(new Error(message), { ocrUnavailable: true });
+export const ocrUnavailable = (e: unknown): boolean => !!(e as { ocrUnavailable?: boolean } | null)?.ocrUnavailable;
+
 /** One image to text through the model. */
 export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSettings, signal?: AbortSignal): Promise<string> {
   const limit = AbortSignal.timeout(5 * 60_000);
@@ -102,14 +110,15 @@ export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSetti
   } catch (e) {
     if (signal?.aborted) throw e;
     const cause = (e as { cause?: { code?: string } }).cause;
-    throw new Error(`${host(s.baseUrl)} could not be reached (${cause?.code ?? (e instanceof Error ? e.message : String(e))}).`);
+    throw unavailable(`${host(s.baseUrl)} could not be reached (${cause?.code ?? (e instanceof Error ? e.message : String(e))}).`);
   }
   const body = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: { content?: unknown } }>; error?: { message?: string } | string };
   if (res.status !== 200) {
     const said = String((typeof body.error === 'string' ? body.error : body.error?.message) ?? '').slice(0, 200);
-    if (res.status === 401 || res.status === 403) throw new Error(`${host(s.baseUrl)} did not accept the key.`);
-    if (res.status === 404) throw new Error(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`);
-    throw new Error(`${host(s.baseUrl)} answered ${res.status}${said ? `: ${said}` : ''}`);
+    if (res.status === 401 || res.status === 403) throw unavailable(`${host(s.baseUrl)} did not accept the key.`);
+    if (res.status === 404) throw unavailable(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`);
+    const why = `${host(s.baseUrl)} answered ${res.status}${said ? `: ${said}` : ''}`;
+    throw res.status >= 500 || res.status === 408 || res.status === 429 ? unavailable(why) : new Error(why);
   }
   const content = body.choices?.[0]?.message?.content;
   const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('') : '';
