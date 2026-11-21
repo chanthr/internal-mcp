@@ -251,3 +251,153 @@ test('keyword search with a filter finds a match that is far down the ranking', 
   assert.deepEqual(await local.keywordSearch(K, { query: 'alpha', limit: 5, filter: { must: [{ key: 'source', match: { value: 'nobody' } }] } }), []);
 });
 
+
+// ── The memory copies follow this process's writes ──
+
+const { LocalVectorClient, localVectorPath } = await import('../src/plugins/drive/local_vectors.js');
+const { queryTerms } = await import('../src/plugins/drive/tokens.js');
+const { DatabaseSync } = await import('node:sqlite');
+/** Another connection to the same file: what a fresh process reads, and a writer that is not this process. */
+const freshClient = () => new LocalVectorClient(new DatabaseSync(localVectorPath()));
+
+test('vectors written here are applied in memory: no reading again, room grows by the policy, the same answers as a fresh read', async () => {
+  const L = 'unit_live';
+  await client.createCollection(L, { vectors: { size: 8 } });
+  let x = 11;
+  const rnd = () => (x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff) / 0x7fffffff - 0.5;
+  const vec = () => Array.from({ length: 8 }, rnd);
+  // One vector on several chunks, some of them given it later: equal scores must come out in a fresh read's order.
+  const twin = vec();
+  const payload = (i: number) => ({ file_id: `doc${i % 50}`, source: i % 3 ? 'docs' : 'wiki', doc_tags: [`t${i % 4}`], content: `passage ${i}` });
+  await client.upsert(L, { points: Array.from({ length: 1000 }, (_, i) => ({ id: i + 1, vector: i % 100 === 0 ? twin : vec(), payload: payload(i) })) });
+  await client.upsert(L, { points: Array.from({ length: 40 }, (_, i) => ({ id: 5000 + i, payload: payload(i) })) }); // text only, for now
+  const q = vec();
+  await client.search(L, { vector: q, limit: 5 });
+  const first = local.memoryUse(L);
+  assert.deepEqual([first.loads, first.allocations, first.vectors, first.capacity], [1, 1, 1000, 1064]); // 1,000 and room for 64 more
+
+  // Twenty rounds of "write, then search": new chunks, a changed one, a removed one, a vector added to an old chunk.
+  for (let round = 0; round < 20; round++) {
+    const base = 2000 + round * 10;
+    await client.upsert(L, { points: Array.from({ length: 10 }, (_, i) => ({ id: base + i, vector: i === 0 ? twin : vec(), payload: payload(base + i) })) });
+    await client.upsert(L, { points: [{ id: round * 7 + 2, vector: vec(), payload: payload(round) }] });
+    await client.delete(L, { points: [round * 7 + 5] });
+    await local.setVectors(L, [{ id: 5000 + round, vector: round % 4 ? vec() : twin }]);
+    await client.search(L, { vector: q, limit: 5 });
+  }
+  const after = local.memoryUse(L);
+  assert.equal(after.loads, 1, 'never read from the file again');
+  assert.equal(after.vectors, 1200);
+  // 1,240 slots were needed, more than the 1,064 there were: one larger array, 1.5 times the room.
+  assert.deepEqual([after.allocations, after.capacity], [2, 1596]);
+
+  // A fresh read of the file gives the same answers, filtered or not, equal scores included.
+  let fresh = freshClient();
+  const wiki = { must: [{ key: 'source', match: { value: 'wiki' } }] };
+  for (const query of [q, twin, vec(), vec()]) {
+    assert.deepEqual(await client.search(L, { vector: query, limit: 2000 }), await fresh.search(L, { vector: query, limit: 2000 }));
+    assert.deepEqual(await client.search(L, { vector: query, limit: 50, filter: wiki }), await fresh.search(L, { vector: query, limit: 50, filter: wiki }));
+  }
+  assert.equal(local.memoryUse(L).loads, 1);
+
+  // A write by another process is noticed: read again, into the same array while the vectors fit.
+  await fresh.upsert(L, { points: [{ id: 9999, vector: q, payload: payload(9999) }] });
+  assert.equal((await client.search(L, { vector: q, limit: 1 }))[0].id, 9999);
+  assert.deepEqual([local.memoryUse(L).loads, local.memoryUse(L).allocations], [2, 2]);
+
+  // Removing most chunks squeezes the gaps out in place; still the same answers as a fresh read.
+  await client.delete(L, { points: Array.from({ length: 700 }, (_, i) => i + 300) });
+  await client.search(L, { vector: q, limit: 5 });
+  const squeezed = local.memoryUse(L);
+  assert.deepEqual([squeezed.loads, squeezed.allocations, squeezed.slots], [2, 2, squeezed.vectors]);
+  fresh = freshClient();
+  for (const query of [q, twin]) assert.deepEqual(await client.search(L, { vector: query, limit: 2000 }), await fresh.search(L, { vector: query, limit: 2000 }));
+});
+
+test('filters keep only the fields they look at, follow the writes made here, and answer as a fresh read', async () => {
+  const M = 'unit_meta';
+  await client.createCollection(M, { vectors: { size: 4 } });
+  await client.upsert(M, {
+    points: [
+      { id: 1, vector: [1, 0, 0, 0], payload: { file_id: 'a', source: 'docs', doc_customer: null, has_image: false, doc_tags: ['x', 'y'], content: 'alpha one' } },
+      { id: 2, vector: [0.9, 0.1, 0, 0], payload: { file_id: 'b', source: 'wiki', has_image: true, doc_tags: ['y'], content: 'alpha two' } }, // no doc_customer at all
+      { id: 3, payload: { file_id: 'c', source: 'wiki', doc_customer: 'Initech', doc_tags: [], content: 'alpha three' } },
+    ],
+  });
+  const byNull = { must: [{ key: 'doc_customer', match: { value: null } }] };
+  assert.deepEqual((await local.keywordSearch(M, { query: 'alpha', limit: 5, filter: byNull })).map((h) => h.id), [1]); // a null value, not a missing field
+  assert.deepEqual((await client.search(M, { vector: [1, 0, 0, 0], limit: 5, filter: { must: [{ key: 'has_image', match: { value: false } }] } })).map((h) => h.id), [1]);
+  const loads = local.memoryUse(M).metadataLoads;
+  assert.equal(loads, 1);
+
+  // Written here: a new document, a changed one, a removed one. The filters see them without reading again.
+  await client.upsert(M, { points: [{ id: 4, vector: [0, 1, 0, 0], payload: { file_id: 'd', source: 'wiki', doc_tags: ['z'], content: 'alpha four' } }] });
+  await client.upsert(M, { points: [{ id: 2, vector: [0.9, 0.1, 0, 0], payload: { file_id: 'b', source: 'docs', has_image: true, doc_tags: ['y', 'z'], content: 'alpha two again' } }] });
+  await client.delete(M, { points: [3] });
+  const wiki = { must: [{ key: 'source', match: { value: 'wiki' } }] };
+  assert.deepEqual((await local.keywordSearch(M, { query: 'alpha', limit: 5, filter: wiki })).map((h) => h.id), [4]);
+  assert.deepEqual(await local.fieldValues(M, 'doc_tags'), [{ value: 'y', documents: 2 }, { value: 'z', documents: 2 }, { value: 'x', documents: 1 }]);
+  assert.deepEqual([local.memoryUse(M).metadataLoads, local.memoryUse(M).chunks], [loads, 3], 'not read again after a write made here');
+
+  // A field no filter asked for before is read once, and kept from then on.
+  const byName = { must: [{ key: 'file_name', match: { value: 'nope' } }] };
+  assert.deepEqual(await local.keywordSearch(M, { query: 'alpha', limit: 5, filter: byName }), []);
+  await local.keywordSearch(M, { query: 'alpha', limit: 5, filter: byName });
+  assert.equal(local.memoryUse(M).metadataLoads, loads + 1);
+
+  const fresh = freshClient();
+  for (const filter of [byNull, wiki, byName, { must: [{ key: 'doc_tags', match: { value: 'z' } }, { key: 'has_image', match: { value: true } }] }]) {
+    assert.deepEqual(await local.keywordSearch(M, { query: 'alpha', limit: 5, filter }), await fresh.keywordSearch(M, { query: 'alpha', limit: 5, filter }));
+    assert.deepEqual(await client.search(M, { vector: [1, 0, 0, 0], limit: 5, filter }), await fresh.search(M, { vector: [1, 0, 0, 0], limit: 5, filter }));
+  }
+  for (const key of ['doc_tags', 'source', 'file_id', 'has_image']) assert.deepEqual(await local.fieldValues(M, key), await fresh.fieldValues(M, key));
+});
+
+test('a long question in a large index is searched by its rarer words, at most 16, and still finds its passage', async () => {
+  const W = 'unit_words';
+  await client.createCollection(W, { vectors: { size: 4 } });
+  // 5,200 passages share a boilerplate sentence; each also has a word of its own.
+  const common = '회사 규정 안내 문서입니다 연차 휴가 신청 절차와 승인 기준을 설명합니다';
+  for (let i = 0; i < 5200; i += 650) {
+    await client.upsert(W, { points: Array.from({ length: 650 }, (_, j) => ({ id: i + j + 1, payload: { file_id: `f${i + j}`, content: `${common} code${i + j}` } })) });
+  }
+  await client.upsert(W, { points: [{ id: 9000, payload: { file_id: 'target', content: `${common} 두루미 서식지 보호 quokka zebra 관찰 기록` } }] });
+
+  const question = `${common} 그리고 두루미 서식지 보호 quokka zebra 관찰 기록에 대해 ${Array.from({ length: 40 }, (_, i) => `code${i * 97}`).join(' ')}`;
+  const terms = local.keywordTerms(W, question);
+  assert.ok(queryTerms(question).length > 50);
+  assert.ok(terms.length <= 16, String(terms));
+  assert.ok(!terms.some((t) => tokenize(common).includes(t)), `words in every passage are dropped: ${terms}`);
+  assert.ok(['두루', '루미', 'quokka', 'zebra'].every((t) => terms.includes(t)), String(terms));
+  assert.equal((await local.keywordSearch(W, { query: question, limit: 5 }))[0].id, 9000);
+
+  // An ordinary question keeps its words; a common one goes only while a rarer one remains.
+  assert.deepEqual(local.keywordTerms(W, '두루미 quokka'), queryTerms('두루미 quokka'));
+  assert.deepEqual(local.keywordTerms(W, '회사 quokka'), ['quokka']);
+  assert.deepEqual(local.keywordTerms(W, '회사 규정'), ['회사', '규정']);
+  assert.deepEqual((await local.keywordSearch(W, { query: '두루미 quokka', limit: 5 })).map((h) => h.id), [9000]);
+  // A word that a new document brings is found at once, whatever was counted before.
+  await client.upsert(W, { points: [{ id: 9001, payload: { file_id: 'new', content: `${common} wombat` } }] });
+  assert.equal((await local.keywordSearch(W, { query: '회사 wombat', limit: 5 }))[0].id, 9001);
+  // A small index keeps every word.
+  assert.deepEqual(local.keywordTerms('unit_meta', '회사 alpha quokka'), queryTerms('회사 alpha quokka'));
+});
+
+test('a keyword index out of step is rebuilt from the chunks, one chunk at a time', async () => {
+  const R = 'unit_rebuild';
+  await client.createCollection(R, { vectors: { size: 4 } });
+  await client.upsert(R, { points: [{ id: 1, payload: { file_id: 'a', content: 'rebuild me please' } }, { id: 2, payload: { file_id: 'b', content: 'another passage' } }] });
+  const db = new DatabaseSync(localVectorPath());
+  db.exec(`DROP TABLE fts_${R}`);
+  // Reading every chunk at once (.all()) held the whole index's text in memory: refused here.
+  const prepare = db.prepare.bind(db);
+  db.prepare = ((sql: string) => {
+    const statement = prepare(sql);
+    if (/SELECT rowid AS rid, payload FROM/.test(sql)) statement.all = () => assert.fail(`read every chunk at once: ${sql}`);
+    return statement;
+  }) as typeof db.prepare;
+  const rebuilt = new LocalVectorClient(db);
+  assert.deepEqual((await rebuilt.keywordSearch(R, { query: 'rebuild', limit: 5 })).map((h) => h.id), [1]);
+  await rebuilt.delete(R, { filter: { must: [{ key: 'content', match: { value: 'another passage' } }] } }); // a filter other than file_id walks the chunks too
+  assert.deepEqual((await rebuilt.stats(R)).chunks, 1);
+});

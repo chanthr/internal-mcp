@@ -8,7 +8,7 @@ import { chunkMarkdown, type RawChunk } from './chunker.js';
 import { cutMark, indexProfile, LEGACY_CUT, passageMark, type IndexProfile } from './index_profile.js';
 import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.js';
 import { extractText } from './extract_text.js';
-import { getQdrantClient, getLocalIndex, vectorForm, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload } from './qdrant.js';
+import { getQdrantClient, getLocalIndex, vectorForm, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload, type VectorClient } from './qdrant.js';
 import { withLock } from '../../core/lock.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
@@ -275,18 +275,17 @@ export async function indexText(
   // gets the section context. No embedding model: store the text now, vectors come later (backfillVectors).
   // In the form the vectors already in the index were made in (qdrant.ts vectorForm): the two are not mixed.
   const form = opts.vectors !== false && (await vectorsUsable()) ? await vectorForm() : null;
-  const vectors = form ? await embedTexts(chunks.map((c) => embedInputForChunk(c, file.name, form))) : null;
-
-  const points = chunks.map((c, idx) => ({
-    id: makeChunkId(file.id, idx),
-    vector: vectors?.[idx],
-    payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash),
-  }));
 
   const client = await getQdrantClient();
   if (form) await noteVectorModel(form);
   // Upsert the new chunks 0..M-1 (wait:true: cheap for one file, gives immediate search visibility and failure detection)
-  await client.upsert(DRIVE_COLLECTION, { wait: true, points });
+  await storeChunks(
+    client,
+    chunks,
+    (c, idx) => ({ id: makeChunkId(file.id, idx), payload: buildChunkPayload(c, file, idx, chunks.length, classification, bizMeta, hash) }),
+    form ? (c) => embedInputForChunk(c, file.name, form) : null,
+    true,
+  );
   // If the count shrank, delete the old chunks (index >= M) directly by their deterministic chunk IDs.
   // (A Qdrant range filter returns 400 Bad Request on a non-indexed payload, so delete by ID instead. The set is
   // disjoint from the upserted one.)
@@ -296,6 +295,99 @@ export async function indexText(
     await client.delete(DRIVE_COLLECTION, { wait: true, points: orphanIds });
   }
   return chunks.length;
+}
+
+/** Chunks embedded and stored per round: the vectors of one round are all that is held at a time. */
+const STORE_BATCH = 128;
+
+/**
+ * Store one document's chunks, embedding them when `embedInput` is given, a round of STORE_BATCH at a time. Embedding
+ * a whole document before storing any of it held every vector at once: 7,600 for a 5-million-character document, a
+ * hundred megabytes, and more than a gigabyte for a file at the size limit.
+ *
+ * The round with chunk 0 goes last. Chunk 0 carries the content hash that says the document is indexed, so a run
+ * that fails half way leaves the document to be indexed again instead of looking done. In the built-in index a
+ * passage the endpoint refuses (too long for the model, say) is stored for keyword search and set aside without a
+ * vector (embedEach); Qdrant holds nothing without a vector, so there the document fails as before.
+ */
+export async function storeChunks(
+  client: VectorClient,
+  chunks: RawChunk[],
+  pointOf: (chunk: RawChunk, idx: number) => { id: number; payload: ChunkPayload },
+  embedInput: ((chunk: RawChunk) => string) | null,
+  wait: boolean,
+): Promise<void> {
+  const local = await getLocalIndex();
+  const starts: number[] = [];
+  for (let start = STORE_BATCH; start < chunks.length; start += STORE_BATCH) starts.push(start);
+  starts.push(0);
+  for (const start of starts) {
+    const part = chunks.slice(start, start + STORE_BATCH);
+    const vectors = embedInput ? await (local ? embedEach : embedTexts)(part.map(embedInput)) : null;
+    const points = part.map((c, i) => {
+      const v = vectors?.[i];
+      return { ...pointOf(c, start + i), vector: Array.isArray(v) ? v : undefined };
+    });
+    await client.upsert(DRIVE_COLLECTION, { wait, points });
+    const refused = points.flatMap((p, i) => (vectors && !Array.isArray(vectors[i]) ? [{ id: p.id, reason: (vectors[i] as Refused).refused }] : []));
+    if (local && refused.length) await setAside(local, refused);
+  }
+}
+
+/** A passage the embedding endpoint refused, and what it said. */
+export interface Refused {
+  refused: string;
+}
+
+/**
+ * Statuses with which an embedding endpoint refuses what it was sent rather than failing: llama.cpp and LM Studio
+ * answer 400 "input is too large to process" for a passage longer than the model takes.
+ */
+function refusedInput(e: unknown): boolean {
+  const status = (e as { status?: unknown } | null)?.status;
+  return status === 400 || status === 413 || status === 422;
+}
+
+/**
+ * Embed passages, finding the ones the endpoint refuses instead of failing them all: a vector for each input, or why
+ * it was refused. When a batch is refused, one short probe tells a refused passage from an endpoint that refuses
+ * everything (no model loaded, a wrong model name); only when the probe passes is the batch halved until the refused
+ * passages are found. Otherwise the error is thrown, as embedTexts would.
+ */
+export async function embedEach(inputs: string[]): Promise<Array<number[] | Refused>> {
+  try {
+    return await embedTexts(inputs);
+  } catch (e) {
+    if (!refusedInput(e)) throw e;
+    try {
+      await embedTexts(['probe']);
+    } catch {
+      throw e;
+    }
+    return isolateRefused(inputs, e);
+  }
+}
+
+/** `inputs` were refused together: halve them until each refused passage stands alone. */
+async function isolateRefused(inputs: string[], why: unknown): Promise<Array<number[] | Refused>> {
+  if (inputs.length === 1) return [{ refused: why instanceof Error ? why.message : String(why) }];
+  const out: Array<number[] | Refused> = [];
+  const half = Math.ceil(inputs.length / 2);
+  for (const part of [inputs.slice(0, half), inputs.slice(half)]) {
+    try {
+      out.push(...(await embedTexts(part)));
+    } catch (e) {
+      if (!refusedInput(e)) throw e;
+      out.push(...(await isolateRefused(part, e)));
+    }
+  }
+  return out;
+}
+
+/** Passages the endpoint refused: kept for keyword search, and no longer offered for a vector (missingVectors). */
+async function setAside(index: NonNullable<Awaited<ReturnType<typeof getLocalIndex>>>, refused: Array<{ id: number; reason: string }>): Promise<void> {
+  await index.refuseVectors(DRIVE_COLLECTION, refused);
+  console.error(`[index] the embedding endpoint refused ${refused.length} passage(s); they are found by keywords only: ${refused[0].reason.slice(0, 200)}`);
 }
 
 /** Deletes every chunk of a file from Qdrant (when the file is deleted or trashed). */
@@ -318,25 +410,34 @@ export const BACKFILL_LOCK = 'backfill';
 
 /**
  * Give vectors to up to `max` chunks that have none, from the stored chunk text. For a caller that already holds
- * BACKFILL_LOCK. Returns how many chunks got a vector.
+ * BACKFILL_LOCK. Returns how many chunks were dealt with (`handled`: given a vector, or set aside because the
+ * endpoint refused them) and how many got a vector (`made`). A refused chunk is set aside so that the next batch is
+ * not the same one again: one refused passage at the head of the queue used to keep every other from a vector.
  */
-export async function fillMissingVectors(max: number): Promise<number> {
+export async function fillMissingVectors(max: number): Promise<{ handled: number; made: number }> {
   const index = await getLocalIndex();
-  if (!index) return 0;
-  let n = 0;
-  while (n < max) {
-    const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(128, max - n));
+  if (!index) return { handled: 0, made: 0 };
+  let handled = 0;
+  let made = 0;
+  while (handled < max) {
+    const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(STORE_BATCH, max - handled));
     if (batch.length === 0) break;
     const form = await vectorForm();
     const inputs = batch.map((b) =>
       embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') }, String(b.payload?.file_name ?? ''), form),
     );
-    const vectors = await embedTexts(inputs);
-    await index.setVectors(DRIVE_COLLECTION, batch.map((b, i) => ({ id: b.id, vector: vectors[i] })));
-    await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL, passageMark(form));
-    n += batch.length;
+    const vectors = await embedEach(inputs);
+    const good = batch.flatMap((b, i) => (Array.isArray(vectors[i]) ? [{ id: b.id, vector: vectors[i] as number[] }] : []));
+    if (good.length) {
+      await index.setVectors(DRIVE_COLLECTION, good);
+      await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL, passageMark(form));
+    }
+    const refused = batch.flatMap((b, i) => (Array.isArray(vectors[i]) ? [] : [{ id: b.id, reason: (vectors[i] as Refused).refused }]));
+    if (refused.length) await setAside(index, refused);
+    handled += batch.length;
+    made += good.length;
   }
-  return n;
+  return { handled, made };
 }
 
 /**
@@ -351,9 +452,9 @@ export async function backfillVectors(round = 20_000): Promise<number> {
   try {
     for (;;) {
       const done = await withLock(BACKFILL_LOCK, () => fillMissingVectors(round));
-      if (!done) break; // nothing left, or another run holds the lock
-      total += done;
-      status.filled += done;
+      if (!done?.handled) break; // nothing left, or another run holds the lock
+      total += done.made;
+      status.filled += done.made;
       status.filledAt = new Date().toISOString();
       // A round that made vectors means the model answers again: the last failure is no longer the news.
       status.error = null;

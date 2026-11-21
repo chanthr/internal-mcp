@@ -31,7 +31,8 @@ export function Meaning() {
 
   const job = i?.job ?? null;
   const stale = !!(e.set && i?.problem); // the vectors in the index were made by another model
-  const waiting = i && e.set && !stale ? i.chunks - i.withVectors : 0;
+  const refused = i?.refused ?? 0;
+  const waiting = i && e.set && !stale ? i.chunks - i.withVectors - refused : 0;
   const working = !!job?.running || waiting > 0;
   // While vectors are being made the numbers move: read them again every few seconds, on this page only.
   useEffect(() => {
@@ -56,7 +57,7 @@ export function Meaning() {
           ? `Paused. The index still holds vectors made by ${i?.vectorsFrom ?? 'another model'}, and the two cannot be mixed. Search answers by keywords until new vectors are made.`
           : waiting > 0
             ? `Preparing: ${num((i?.chunks ?? 0) - waiting)} of ${num(i?.chunks ?? 0)} passages. Search works meanwhile.`
-            : 'Search uses keywords and meaning together.';
+            : `Search uses keywords and meaning together.${refused ? ` The model refused ${num(refused)} passage${refused === 1 ? '' : 's'} (too long for it, for example): ${refused === 1 ? 'it is' : 'they are'} found by keywords only.` : ''}`;
 
   return (
     <Section title="Search by meaning" text="Also finds documents worded differently from the question.">

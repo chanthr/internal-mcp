@@ -12,7 +12,8 @@ import { BACKFILL_LOCK, fillMissingVectors } from '../drive/indexer.js';
 import { DRIVE_COLLECTION, getLocalIndex } from '../drive/qdrant.js';
 
 export type Reembedded =
-  | { ok: true; model: string; dropped: number; passages: number; withVectors: number }
+  /** `refused`: passages the model would not take (too long for it, say); they are found by keywords only. */
+  | { ok: true; model: string; dropped: number; passages: number; withVectors: number; refused: number }
   /** Nothing was changed, and `why` says what to do instead. */
   | { ok: false; why: string };
 
@@ -40,9 +41,9 @@ export async function reembed(onProgress?: (done: number, total: number) => void
     onProgress?.(0, before.chunks);
     let done = 0;
     for (;;) {
-      const n = await fillMissingVectors(1280);
-      if (n === 0) break;
-      done += n;
+      const { handled } = await fillMissingVectors(1280);
+      if (handled === 0) break;
+      done += handled;
       onProgress?.(done, before.chunks);
     }
     return dropped;
@@ -50,5 +51,5 @@ export async function reembed(onProgress?: (done: number, total: number) => void
   if (result === null) return { ok: false, why: 'Vectors are being made right now by another run. Wait until it has finished, then try again.' };
   const dropped = result;
   const after = await index.stats(DRIVE_COLLECTION);
-  return { ok: true, model: EMBEDDING_MODEL, dropped, passages: after.chunks, withVectors: after.withVectors };
+  return { ok: true, model: EMBEDDING_MODEL, dropped, passages: after.chunks, withVectors: after.withVectors, refused: await index.refusedVectors(DRIVE_COLLECTION) };
 }
