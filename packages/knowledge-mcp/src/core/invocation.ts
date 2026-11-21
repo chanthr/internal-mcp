@@ -116,16 +116,37 @@ function versionOf(cli: string): string | null {
  * npx (or pnpm dlx, or bunx) fills. That folder is shared by every run of the package name, including runs that a
  * repository's .npmrc sent to another registry while entries still went through npx, and it may be emptied any time.
  */
-export function ownCli(): string | null {
-  if (!import.meta.url.endsWith('.js')) return null;
+function realTmpdir(): string | null {
   try {
-    const cli = realpathSync(fileURLToPath(new URL('../cli.js', import.meta.url)));
-    const parts = cli.split(/[\\/]/);
-    const cached = parts.some((p) => p === '_npx' || p === 'dlx' || p.startsWith('bunx-')) || cli.startsWith(realpathSync(tmpdir()) + sep);
-    return cached ? null : cli;
+    return realpathSync(tmpdir());
   } catch {
     return null;
   }
+}
+
+export function ownCli(): string | null {
+  if (!import.meta.url.endsWith('.js')) return null;
+  try {
+    return lastingCli(realpathSync(fileURLToPath(new URL('../cli.js', import.meta.url))));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `cli` when an entry may point at it, else null. Not in a cache that npx, pnpm dlx or bunx fills, nor in the temporary
+ * folder; and not some project's dependency (a node_modules beside a package.json): that copy changes with the
+ * project's next install or checkout, perhaps to a release without these fixes, and goes when the project is deleted.
+ * A global install's node_modules has no package.json beside it; a linked checkout or the Docker image has no
+ * node_modules on the way at all.
+ */
+export function lastingCli(cli: string, temporary: string | null = realTmpdir()): string | null {
+  const parts = cli.split(/[\\/]/);
+  if (parts.some((p) => p === '_npx' || p === 'dlx' || p.startsWith('bunx-'))) return null;
+  if (temporary && cli.startsWith(temporary + sep)) return null;
+  const at = parts.lastIndexOf('node_modules');
+  if (at > 0 && existsSync(join(parts.slice(0, at).join(sep) || sep, 'package.json'))) return null;
+  return cli;
 }
 
 /**

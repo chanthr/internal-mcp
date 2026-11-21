@@ -123,15 +123,23 @@ export function stdioProblem(): string | null {
   );
 }
 
-/** The real path of a folder, or the folder resolved as given when it does not exist. */
+/**
+ * The real path of a folder, or the folder resolved as given when it does not exist. The system's own call: it also
+ * gives the letters' case as on disk, which the JavaScript one keeps as typed.
+ */
 function real(dir: string): string {
   try {
-    return realpathSync(dir);
+    return realpathSync.native(dir);
   } catch {
     return resolve(dir);
   }
 }
-const within = (dir: string, folder: string): boolean => dir === folder || dir.startsWith(folder.endsWith(sep) ? folder : folder + sep);
+/** Folder names as compared: macOS and Windows do not tell "Repo" from "repo" by default. */
+const fold = (p: string): string => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
+const within = (dir: string, folder: string): boolean => {
+  const [d, f] = [fold(dir), fold(folder)];
+  return d === f || d.startsWith(f.endsWith(sep) ? f : f + sep);
+};
 
 /**
  * PATH as a stdio server keeps it: without relative entries (an empty one or "." is the working directory), and
@@ -142,7 +150,7 @@ const within = (dir: string, folder: string): boolean => dir === folder || dir.s
  */
 export function pathForStdio(path: string, o: { cwd: string; settings: string; home: string }): string {
   const cwd = real(o.cwd);
-  const opened = cwd !== real(o.settings) && !within(real(o.home), cwd);
+  const opened = fold(cwd) !== fold(real(o.settings)) && !within(real(o.home), cwd);
   return path
     .split(delimiter)
     .filter((dir) => dir && isAbsolute(dir) && !(opened && within(real(dir), cwd)))
@@ -154,7 +162,13 @@ export function pathForStdio(path: string, o: { cwd: string; settings: string; h
  * for in the working directory before the PATH, unless NoDefaultCurrentDirectoryInExePath is set.
  */
 export function keepOpenFolderOffPath(): void {
-  process.env.PATH = pathForStdio(process.env.PATH ?? '', { cwd: process.cwd(), settings: settingsFolder(), home: homedir() });
+  // An unset PATH stays unset, and one left with nothing is removed: without a PATH the system searches its own
+  // folders (/usr/bin:/bin), but an empty PATH is one empty entry, which is the working directory.
+  if (process.env.PATH !== undefined) {
+    const kept = pathForStdio(process.env.PATH, { cwd: process.cwd(), settings: settingsFolder(), home: homedir() });
+    if (kept) process.env.PATH = kept;
+    else delete process.env.PATH;
+  }
   if (process.platform === 'win32') process.env.NoDefaultCurrentDirectoryInExePath = '1';
 }
 

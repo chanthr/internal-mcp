@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cli, installCommandLine, installPackage, stdioEntry } from '../src/core/invocation.js';
+import { cli, installCommandLine, installPackage, lastingCli, stdioEntry } from '../src/core/invocation.js';
 import { VERSION } from '../src/version.js';
 
 function project(scripts: Record<string, string>): NodeJS.ProcessEnv {
@@ -197,4 +197,27 @@ test('without a project the entry is Node and a pinned copy in the settings fold
   assert.ok(!`${r.stdout}${r.stderr}`.includes('EVIL'), `${r.stdout}${r.stderr}`);
   assert.deepEqual(JSON.parse(r.stdout), { ran: 'the package', node, args: ['serve', '--stdio'], home: settings });
   assert.ok(!asked.some((a) => a.startsWith('theirs ')), asked.join(', '));
+});
+
+test('an entry never points at a copy that is a project\'s dependency, or at a cache', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'kmcp-lasting-')));
+  const copy = (base: string) => {
+    const file = join(base, 'node_modules', '@chnxthr', 'knowledge-mcp', 'dist', 'cli.js');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '');
+    return file;
+  };
+  // A project that depends on the package: its next install or checkout changes the copy, deleting it breaks entries.
+  const project = join(root, 'project');
+  mkdirSync(project);
+  writeFileSync(join(project, 'package.json'), '{}');
+  assert.equal(lastingCli(copy(project), null), null);
+  // A global install (no package.json beside its node_modules) and a linked checkout (no node_modules) stay.
+  const global = copy(join(root, 'prefix', 'lib'));
+  assert.equal(lastingCli(global, null), global);
+  const checkout = join(root, 'checkout', 'packages', 'knowledge-mcp', 'dist', 'cli.js');
+  assert.equal(lastingCli(checkout, null), checkout);
+  // Caches and the temporary folder never.
+  assert.equal(lastingCli(copy(join(root, '.npm', '_npx', 'ab12')), null), null);
+  assert.equal(lastingCli(global, root), null);
 });

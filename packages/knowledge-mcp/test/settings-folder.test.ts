@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const TSX = import.meta.resolve('tsx');
@@ -232,4 +232,31 @@ test('a stdio server takes no program from the opened repository: its folders an
   assert.ok(!r.stdout.includes(bin));
   // HTTP and the other commands are started by the person, in a folder they chose: the PATH is left as it is.
   assert.equal(start(entry, repo, { MCP_HOME: dir, PATH: [bin, process.env.PATH].join(':') }, ['doctor']).stdout.trim(), [bin, process.env.PATH].join(':'));
+});
+
+test('a stdio server never ends up with an empty PATH, and folders are compared as the disk names them', async () => {
+  const { pathForStdio } = await import('../src/core/paths.js');
+  const repo = repository();
+  const { dir } = project(mine);
+  const entry = join(dir, 'path-left.mts');
+  writeFileSync(entry, `await import(${JSON.stringify(src('bootstrap.ts'))});\nconsole.log(JSON.stringify(process.env.PATH ?? null));\n`);
+  const run = (path: string | null) => {
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && k !== 'PATH' && !/^(MCP_|EMBEDDING_|OPENAI_|QDRANT_|LLM_|GOOGLE_|KMCP_)/.test(k)) env[k] = v;
+    if (path !== null) env.PATH = path;
+    const r = spawnSync(process.execPath, ['--import', TSX, entry, 'serve', '--stdio'], { cwd: repo, env: { ...env, MCP_HOME: dir }, encoding: 'utf8', timeout: 60_000 });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout.trim().split('\n').pop()!) as string | null;
+  };
+  // Unset stays unset (the system then searches its own folders); a PATH left with nothing is removed, never made
+  // empty: an empty PATH is one empty entry, the working directory, where the repository's programs are.
+  assert.equal(run(null), null);
+  assert.equal(run(['./node_modules/.bin', '.', join(repo, 'bin')].join(':')), null);
+  // macOS does not tell "CaseRepo" from "caserepo": a PATH entry typed in another case is still inside the repository.
+  if (process.platform === 'darwin') {
+    const upper = join(realpathSync(mkdtempSync(join(tmpdir(), 'kmcp-case-'))), 'CaseRepo');
+    mkdirSync(join(upper, 'node_modules', '.bin'), { recursive: true });
+    const lower = join(dirname(upper), 'caserepo', 'node_modules', '.bin');
+    assert.equal(pathForStdio([lower, '/usr/bin'].join(':'), { cwd: upper, settings: dir, home: '/nowhere' }), '/usr/bin');
+  }
 });
