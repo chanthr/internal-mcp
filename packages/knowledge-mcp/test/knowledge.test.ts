@@ -49,6 +49,8 @@ writeFileSync(join(docs, 'node_modules', 'pkg', 'README.md'), '# pkg\n\nProducti
 writeFileSync(join(docs, 'image.png'), 'not really a png');
 writeFileSync(join(outside, 'secret.md'), '# Secret\n\nNever index this file.\n');
 symlinkSync(join(outside, 'secret.md'), join(docs, 'link.md'));
+// A link inside the folder to an excluded folder, under a path that passes the exclusions and the guides scope.
+symlinkSync(join('..', 'HR'), join(docs, 'guides', 'team'));
 
 for (const k of Object.keys(process.env)) if (/^(QDRANT_|OPENAI_|EMBEDDING_|GOOGLE_|KNOWLEDGE_)/.test(k)) delete process.env[k];
 Object.assign(process.env, {
@@ -117,6 +119,7 @@ test('read_document: by id, and never outside the folder or the caller\'s scope'
     'local:docs/../secret.md',
     'local:docs/guides/../../etc/passwd',
     'local:docs/link.md', // a link that points outside the folder
+    'local:docs/guides/team/salaries.md', // through a link inside the folder, into an excluded one
     'local:docs/HR/salaries.md', // excluded folder
     'local:docs/node_modules/pkg/README.md',
     'local:docs/image.png',
@@ -128,8 +131,9 @@ test('read_document: by id, and never outside the folder or the caller\'s scope'
     assert.match(text(r as never), /\[not found\]/, id);
     assert.equal(await resolveLocalId(id) === null || id.includes('HR/'), true, id);
   }
-  // A member limited to docs/guides sees guides, not the file one level up.
+  // A member limited to docs/guides sees guides, not the file one level up, and not another folder through a link.
   assert.match(text((await read(scoped, { documentId: 'local:docs/guides/leave.md' })) as never), /사흘 전에/);
+  assert.match(text((await read(scoped, { documentId: 'local:docs/guides/team/salaries.md' })) as never), /\[not found\]/);
   assert.equal(((await read(scoped, { documentId: 'local:docs/notes.txt' })) as { isError?: boolean }).isError, true);
   assert.match(await search(scoped, { query: 'quarterly budget' }), /No results/);
   const batch = text((await read(admin, { documentIds: ['local:docs/notes.txt', 'local:docs/missing.md'] })) as never).split('\n\n---\n\n');

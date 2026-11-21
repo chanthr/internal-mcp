@@ -338,12 +338,14 @@ export function mountConsole(app: Express, registry: Registry): boolean {
     }, 'a full address that starts with http:// or https://');
 
   const modelName = visible(200).regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/, 'a model name');
+  /** The embedding endpoint saved now, without a trailing slash: undefined for OpenAI's own. */
+  const savedEmbeddingBase = (): string | undefined => process.env.EMBEDDING_BASE_URL?.trim().replace(/\/+$/, '') || undefined;
   /**
    * The embedding key that is already saved, for the endpoint it was saved for and no other: a key is never sent
    * to an address it was not given for.
    */
   const savedEmbeddingKey = (baseUrl: string | undefined): string | undefined => {
-    const savedBase = process.env.EMBEDDING_BASE_URL?.trim().replace(/\/+$/, '') || undefined;
+    const savedBase = savedEmbeddingBase();
     if (!baseUrl) return process.env.OPENAI_API_KEY?.trim() || (savedBase ? undefined : process.env.EMBEDDING_API_KEY?.trim()) || undefined;
     return baseUrl === savedBase ? process.env.EMBEDDING_API_KEY?.trim() || undefined : undefined;
   };
@@ -823,11 +825,15 @@ export function mountConsole(app: Express, registry: Registry): boolean {
         if (!baseUrl && !apiKey) return refuse(res, 422, 'OpenAI needs an API key.');
         const r = await checkEmbedding({ baseUrl, model: body.model || undefined, apiKey });
         const standard = !baseUrl && r.model === 'text-embedding-3-small';
+        // The saved key stays only for the address it was given for, as for the language model and OCR above. Kept
+        // for a new address, it would be sent there with every request for vectors after the restart.
+        const moved = baseUrl !== savedEmbeddingBase();
+        const ownKey = typed && baseUrl ? { EMBEDDING_API_KEY: typed } : moved ? { EMBEDDING_API_KEY: undefined } : {};
         updateEnvFile(
           envPath,
           baseUrl
-            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...(typed ? { EMBEDDING_API_KEY: typed } : {}) }
-            : { ...(typed ? { OPENAI_API_KEY: typed } : {}), EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: standard ? undefined : r.model, EMBEDDING_DIM: standard ? undefined : String(r.dim) },
+            ? { EMBEDDING_BASE_URL: baseUrl, EMBEDDING_MODEL: r.model, EMBEDDING_DIM: String(r.dim), ...ownKey }
+            : { ...(typed ? { OPENAI_API_KEY: typed } : {}), ...ownKey, EMBEDDING_BASE_URL: undefined, EMBEDDING_MODEL: standard ? undefined : r.model, EMBEDDING_DIM: standard ? undefined : String(r.dim) },
         );
         return change(res, { found: `${r.model} (${r.dim} dimensions)` });
       }

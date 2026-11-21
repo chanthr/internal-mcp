@@ -235,7 +235,10 @@ async function check(ctx: CommandContext): Promise<number> {
 
   if (has('OPENAI_API_KEY') || has('EMBEDDING_API_KEY') || has('EMBEDDING_BASE_URL')) {
     run('embeddings', async () => {
-      const r = await checkEmbedding({ baseUrl: env.EMBEDDING_BASE_URL, model: env.EMBEDDING_MODEL, apiKey: env.EMBEDDING_API_KEY?.trim() || env.OPENAI_API_KEY?.trim() });
+      // The key the server would send, and only that: the OpenAI key goes to OpenAI's address only. (Loaded here, not
+      // at the top: the module stops on a bad EMBEDDING_DIM, and every other setup command must still run then.)
+      const { embeddingKey } = await import('../plugins/drive/embeddings.js');
+      const r = await checkEmbedding({ baseUrl: env.EMBEDDING_BASE_URL, model: env.EMBEDDING_MODEL, apiKey: embeddingKey(env) });
       const want = env.EMBEDDING_DIM?.trim() || (env.EMBEDDING_BASE_URL?.trim() ? '' : '1536');
       if (want && Number(want) !== r.dim && !/^text-embedding-3/.test(r.model)) {
         throw new Error(`${r.model} returns ${r.dim}-dimension vectors but EMBEDDING_DIM is ${want}. Set EMBEDDING_DIM=${r.dim} and reindex.`);

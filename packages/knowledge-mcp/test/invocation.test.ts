@@ -55,14 +55,16 @@ test('the entry for a client names this Node by its full path, so a desktop app 
   assert.ok(viaNpx.env?.PATH.split(':').some((d) => viaNpx.command.startsWith(d)), 'node is on the PATH the entry sets');
   assert.deepEqual(stdioEntry(bare, node, 'win32'), { command: 'npx', args: ['-y', '@chnxthr/knowledge-mcp', 'serve', '--stdio'], env: { MCP_HOME: bare } });
 
-  // A built project, then one run from source: Node itself with the file to run. The folder is found from the file.
+  // A built project, then one run from source: Node itself with the file to run. The folder is named outright here
+  // too: the client starts the server in the project the person has open, whose settings are not this server's.
   const built = mkdtempSync(join(tmpdir(), 'kmcp-built-'));
   mkdirSync(join(built, 'dist'));
   writeFileSync(join(built, 'dist', 'server.js'), '');
-  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'dist', 'server.js'), 'serve', '--stdio'] });
+  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'dist', 'server.js'), 'serve', '--stdio'], env: { MCP_HOME: built } });
   mkdirSync(join(built, 'src'));
   writeFileSync(join(built, 'src', 'server.ts'), '');
   mkdirSync(join(built, 'node_modules', 'tsx', 'dist'), { recursive: true });
   writeFileSync(join(built, 'node_modules', 'tsx', 'dist', 'cli.mjs'), '');
-  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(built, 'src', 'server.ts'), 'serve', '--stdio'] });
+  assert.deepEqual(stdioEntry(built, node, 'darwin'), { command: node, args: [join(built, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(built, 'src', 'server.ts'), 'serve', '--stdio'], env: { MCP_HOME: built } });
+  assert.deepEqual(stdioEntry(built, node, 'win32').env, { MCP_HOME: built });
 });

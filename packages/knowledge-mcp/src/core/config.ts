@@ -7,8 +7,8 @@
  *
  * Resolution order (first match wins):
  *   1. MCP_CONFIG_JSON   — inline JSON (deploy-friendly: one env var, no file)
- *   2. MCP_CONFIG_PATH   — explicit path to a JSON file
- *   3. mcp.config.json   — in the working directory, then in the app root (see paths.ts)
+ *   2. MCP_CONFIG_PATH   — explicit path to a JSON file (a relative one is in the settings folder)
+ *   3. mcp.config.json   — in the settings folder (paths.ts: MCP_HOME, else the app root, else the working directory)
  *   4. (none)            — neutral built-in defaults (server boots; Drive indexing stays off until
  *                          `drive.roots` is set)
  *
@@ -16,9 +16,9 @@
  * This is only "what to look at".
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { candidates, home } from './paths.js';
+import { settingsFile, settingsFolder } from './paths.js';
 import { ConnectionsSchema, DataToolsSchema, dataConfigProblems } from '../connections/schema.js';
 
 /** First line of the server instructions. Each enabled plugin appends its own notes (plugin `instructions`). */
@@ -224,7 +224,9 @@ function loadRawConfig(): unknown | null {
       throw new Error(`[config] failed to parse MCP_CONFIG_JSON: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  const explicitPath = process.env.MCP_CONFIG_PATH;
+  // A relative path is in the settings folder, like the file it replaces: the working directory may be a folder the
+  // person did not choose (paths.ts).
+  const explicitPath = process.env.MCP_CONFIG_PATH ? resolve(settingsFolder(), process.env.MCP_CONFIG_PATH) : undefined;
   if (explicitPath) {
     try {
       const raw = readFileSync(explicitPath, 'utf8');
@@ -235,8 +237,8 @@ function loadRawConfig(): unknown | null {
     }
   }
   // Default locations may simply not exist → built-in defaults. A file that exists but is broken fails fast.
-  const path = candidates('mcp.config.json').find((p) => existsSync(p));
-  if (!path) return null;
+  const path = settingsFile('mcp.config.json');
+  if (!existsSync(path)) return null;
   try {
     _source = `file:${path}`;
     return JSON.parse(readFileSync(path, 'utf8'));
@@ -264,10 +266,10 @@ export function getConfig(): AppConfig {
 }
 
 /** Which config source was chosen (for boot logs / diagnostics). Valid after getConfig(). */
-/** Folder that holds .env and mcp.config.json: where the loaded config file is, else the home folder or the working directory. */
+/** Folder that holds .env and mcp.config.json: where the loaded config file is, else the settings folder (paths.ts). */
 export function settingsDir(): string {
   const source = configSource();
-  return source.startsWith('file:') ? dirname(source.slice(5)) : (home() ?? process.cwd());
+  return source.startsWith('file:') ? dirname(source.slice(5)) : settingsFolder();
 }
 
 export function configSource(): string {

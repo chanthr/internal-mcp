@@ -86,17 +86,21 @@ export function stdioCommand(dir: string): string[] {
  *   a project with src/server.ts    <node> <dir>/node_modules/tsx/dist/cli.mjs <dir>/src/server.ts serve --stdio
  *   a built project                 <node> <dir>/dist/server.js serve --stdio
  *   no project (started by npx)     <node's folder>/npx -y @chnxthr/knowledge-mcp serve --stdio
- *                                   with MCP_HOME=<dir>, and a PATH that holds node (npx is a script that asks for it)
+ *                                   with a PATH that holds node (npx is a script that asks for it)
+ *
+ * Every entry sets MCP_HOME=<dir>. A client starts the server in the project the person has open, and the settings
+ * of that folder are somebody else's: with MCP_HOME they are never read, whatever the folder holds (core/paths.ts).
  */
-export function stdioEntry(dir: string, node: string = process.execPath, platform: NodeJS.Platform = process.platform): { command: string; args: string[]; env?: Record<string, string> } {
+export function stdioEntry(dir: string, node: string = process.execPath, platform: NodeJS.Platform = process.platform): { command: string; args: string[]; env: Record<string, string> } {
+  const env = { MCP_HOME: dir };
   const own = join(dir, 'src', 'server.ts');
   const tsx = join(dir, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-  if (existsSync(own) && existsSync(tsx)) return { command: node, args: [tsx, own, 'serve', '--stdio'] };
+  if (existsSync(own) && existsSync(tsx)) return { command: node, args: [tsx, own, 'serve', '--stdio'], env };
   const built = join(dir, 'dist', 'server.js');
-  if (existsSync(built)) return { command: node, args: [built, 'serve', '--stdio'] };
+  if (existsSync(built)) return { command: node, args: [built, 'serve', '--stdio'], env };
   const args = ['-y', PACKAGE, 'serve', '--stdio'];
   // Windows starts npx through a .cmd file, and its apps do get the PATH: the plain name is right there.
-  if (platform === 'win32') return { command: 'npx', args, env: { MCP_HOME: dir } };
+  if (platform === 'win32') return { command: 'npx', args, env };
   let bin = dirname(node);
   try {
     bin = dirname(realpathSync(node));
@@ -107,6 +111,6 @@ export function stdioEntry(dir: string, node: string = process.execPath, platfor
   return {
     command: existsSync(npx) ? npx : 'npx',
     args,
-    env: { MCP_HOME: dir, PATH: [bin, '/usr/local/bin', '/usr/bin', '/bin'].filter((d, i, all) => all.indexOf(d) === i).join(delimiter) },
+    env: { ...env, PATH: [bin, '/usr/local/bin', '/usr/bin', '/bin'].filter((d, i, all) => all.indexOf(d) === i).join(delimiter) },
   };
 }

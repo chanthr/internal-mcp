@@ -581,7 +581,8 @@ export async function runSetup(io: SetupIO, opts: SetupOptions = {}): Promise<Se
   io.say('Connect an AI client');
   const serve = opts.serveCommand ?? ['npx', 'knowledge-mcp', 'serve', '--stdio'];
   const name = String(config.branding?.name ?? 'knowledge').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'knowledge';
-  const addArgs = ['mcp', 'add', name, '--', ...serve];
+  // MCP_HOME names this folder, so the server reads these settings whichever folder Claude Code starts it in.
+  const addArgs = ['mcp', 'add', name, '-e', `MCP_HOME=${dir}`, '--', ...serve];
   io.say(`  Claude Code (this machine):  claude ${addArgs.map(shellQuote).join(' ')}`);
   io.say('  Any client over HTTP:        start the server, then use http://localhost:8080/mcp with header "Authorization: Bearer <key>"');
   if (opts.canRunClient !== false && spawnSync('claude', ['--version'], { stdio: 'ignore' }).status === 0) {

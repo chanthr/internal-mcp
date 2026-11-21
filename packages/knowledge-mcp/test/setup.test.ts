@@ -181,7 +181,8 @@ test('wizard: a rejected token is retried, skipped services write nothing, the a
   assert.match(text, /✗ Slack: the token was rejected/);
   assert.match(text, /✓ Acme as kbot/);
   assert.match(text, /kmcp_test_key/);
-  assert.match(text, /claude mcp add knowledge -- node \/app\/dist\/server\.js serve --stdio/);
+  // The entry names this folder, so Claude Code reads these settings whichever project it starts the server in.
+  assert.ok(text.includes(`claude mcp add knowledge -e MCP_HOME=${dir} -- node /app/dist/server.js serve --stdio`), text);
   assert.ok(!text.includes('good-bot') && !text.includes('good-railway'), 'tokens are never printed back');
 });
 
@@ -294,7 +295,9 @@ function collect() {
 test('setup check: verifies what is configured, reports what is not, exit code follows failures', async () => {
   const endpoints = { slack: `${base}/slack`, github: `${base}/github`, railway: `${base}/railway` };
   const ok = collect();
-  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0, ok.lines.join('\n'));
+  // The OpenAI key is not sent to another embedding address (the fake refuses any key it was not given).
+  const openai = { OPENAI_API_KEY: 'sk-given-for-openai-only' };
+  assert.equal(await runSetupCommand(['check'], { dir: '/tmp', out: ok.out, endpoints, env: { ...openai, SLACK_BOT_TOKEN: 'good-bot', GITHUB_PAT: 'good', EMBEDDING_BASE_URL: `${base}/emb/v1`, EMBEDDING_MODEL: 'bge-m3', EMBEDDING_DIM: '1024' } }), 0, ok.lines.join('\n'));
   assert.match(ok.lines.join('\n'), /✓ slack\s+Acme as kbot[\s\S]*✓ github\s+signed in as octo/);
   assert.match(ok.lines.join('\n'), /✓ embeddings\s+bge-m3 \(1024 dimensions\)/);
   assert.match(ok.lines.join('\n'), /· drive\s+not configured/);

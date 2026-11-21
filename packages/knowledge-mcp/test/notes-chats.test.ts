@@ -127,20 +127,55 @@ test('the console saves notes into notes/: never over another file, replaced onl
 test('another caller saves into inbox/<who>/, and a viewer may not save', async () => {
   const member = { ok: true, org_id: 'acme', role: 'member' as const, email: 'member@acme.com' };
   const r = await registry.call('save_note', { title: 'From Claude', content: 'Found on the web.' }, member);
-  assert.match(String((r.content[0] as unknown as { text: string }).text), new RegExp(`^Saved: inbox/member/${today} From Claude\\.md`));
-  assert.ok(existsSync(join(dir, 'inbox', 'member', `${today} From Claude.md`)));
+  assert.match(String((r.content[0] as unknown as { text: string }).text), new RegExp(`^Saved: inbox/member@acme\\.com/${today} From Claude\\.md`));
+  assert.ok(existsSync(join(dir, 'inbox', 'member@acme.com', `${today} From Claude.md`)));
   // Another caller cannot replace it: a path is inside the caller's own folder.
   const other = { ok: true, org_id: 'acme', role: 'member' as const, email: 'other@acme.com' };
-  for (const path of [`member/${today} From Claude.md`, `../member/${today} From Claude.md`]) {
+  for (const path of [`member@acme.com/${today} From Claude.md`, `../member@acme.com/${today} From Claude.md`]) {
     const r2 = await registry.call('save_note', { title: 'x', content: 'Taken over', path }, other);
     assert.equal(r2.isError, true, path);
   }
-  assert.ok(!readFileSync(join(dir, 'inbox', 'member', `${today} From Claude.md`), 'utf8').includes('Taken over'));
+  assert.ok(!readFileSync(join(dir, 'inbox', 'member@acme.com', `${today} From Claude.md`), 'utf8').includes('Taken over'));
   // inbox/ is searched, but not written up in the wiki as if the person's documents said it.
   const { wikiDocuments } = await import('../src/plugins/knowledge/wiki.js');
   assert.ok(!(await wikiDocuments(dir)).some((d) => d.id.startsWith('local:inbox/')));
   const viewer = await registry.call('save_note', { title: 'x', content: 'x' }, { ok: true, org_id: 'acme', role: 'viewer', email: 'v@acme.com' });
   assert.deepEqual([viewer.isError, (viewer.content[0] as unknown as { text: string }).text], [true, '[error] A viewer may not save notes.']);
+});
+
+test('callers whose emails share the part before the @ have a folder each, and a note is replaced only by who it records', async () => {
+  const said = (r: { content: unknown[] }) => String((r.content[0] as { text: string }).text);
+  const as = (email: string) => ({ ok: true, org_id: 'acme', role: 'member' as const, email });
+  const kim = as('kim@example.com');
+  const namesake = as('kim@example.org');
+  const first = said(await registry.call('save_note', { title: 'Quarterly numbers', content: 'Revenue was 10.' }, kim));
+  // The path its answer gave (search shows the ids as well), tried by the other one.
+  const path = /with path "([^"]+)"/.exec(first)![1];
+  const taken = await registry.call('save_note', { title: 'x', content: 'Revenue was 999.', path }, namesake);
+  assert.equal(taken.isError, true, said(taken));
+  const file = join(dir, 'inbox', ...path.split('/'));
+  assert.match(readFileSync(file, 'utf8'), /\nfrom: "kim@example\.com"\n---\n# Quarterly numbers\n\nRevenue was 10\.\n$/);
+  // Its own caller still replaces it.
+  assert.match(said(await registry.call('save_note', { title: 'Quarterly numbers', content: 'Revenue was 11.', path }, kim)), /^Replaced: /);
+  // Folder names stay apart where a character had to be made safe.
+  const { fromName } = await import('../src/plugins/knowledge/notes.js');
+  assert.deepEqual([fromName('Kim@Example.com'), fromName('a.b@example.com'), fromName('a-b@example.com'), fromName('key-1a2b3c4d')], ['kim@example.com', 'a.b@example.com', 'a-b@example.com', 'key-1a2b3c4d']);
+  assert.match(fromName('a/b@example.com'), /^a-b@example\.com-[0-9a-f]{10}$/);
+  assert.notEqual(fromName('a/b@example.com'), fromName('a:b@example.com'));
+
+  // A note in the caller's folder that records someone else, or no one, is not the caller's to replace.
+  const own = join(dir, 'inbox', 'kim@example.org');
+  mkdirSync(own, { recursive: true });
+  writeFileSync(join(own, 'planted.md'), '---\ntitle: "Planted"\nfrom: "someone@example.net"\n---\nKept.\n');
+  writeFileSync(join(own, 'by hand.md'), '# By hand\n\nKept.\n');
+  for (const p of ['planted.md', 'by hand.md']) assert.equal((await registry.call('save_note', { title: 'x', content: 'Changed', path: p }, namesake)).isError, true, p);
+  // A note from before folders were one per caller (inbox/kim/) is read like any other, and replaced by no caller.
+  mkdirSync(join(dir, 'inbox', 'kim'), { recursive: true });
+  writeFileSync(join(dir, 'inbox', 'kim', 'old.md'), '---\ntitle: "Old"\nfrom: "kim"\n---\nFrom before.\n');
+  for (const p of ['kim/old.md', '../kim/old.md']) assert.equal((await registry.call('save_note', { title: 'x', content: 'Changed', path: p }, kim)).isError, true, p);
+  const { readNote } = await import('../src/plugins/knowledge/notes.js');
+  assert.match(readNote('inbox', 'kim/old.md', dir), /From before\./);
+  assert.ok(![join(own, 'planted.md'), join(own, 'by hand.md'), join(dir, 'inbox', 'kim', 'old.md')].some((f) => readFileSync(f, 'utf8').includes('Changed')));
 });
 
 test('POST /inbox takes a note from a program with a key: a member, not a viewer, and nothing without a key', async () => {
@@ -154,8 +189,8 @@ test('POST /inbox takes a note from a program with a key: a member, not a viewer
   const ok = await send(memberKey, note);
   assert.equal(ok.status, 201);
   // The folder is who sent it (the key's owner); what the note says it is from is kept as `via`.
-  assert.deepEqual(await ok.json(), { saved: `inbox/member/${today} Course page, week 4.md` });
-  assert.match(readFileSync(join(dir, 'inbox', 'member', `${today} Course page, week 4.md`), 'utf8'), /from: "member"\nvia: "Aside"\nsource: "https:\/\/school\.example\/course\/week-4"\n---/);
+  assert.deepEqual(await ok.json(), { saved: `inbox/member@acme.com/${today} Course page, week 4.md` });
+  assert.match(readFileSync(join(dir, 'inbox', 'member@acme.com', `${today} Course page, week 4.md`), 'utf8'), /from: "member@acme\.com"\nvia: "Aside"\nsource: "https:\/\/school\.example\/course\/week-4"\n---/);
   // A failure on the server says nothing of where its files are.
   const broken = await send(memberKey, { title: 'bad\u0000name', content: 'x' });
   assert.equal(broken.status, 500);

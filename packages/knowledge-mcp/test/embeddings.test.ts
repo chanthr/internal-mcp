@@ -33,7 +33,7 @@ Object.assign(process.env, {
   EMBED_QUERY_RETRIES: '0',
   EMBED_INDEX_RETRIES: '0',
 });
-const { embedTexts, embedQuery, embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } = await import('../src/plugins/drive/embeddings.js');
+const { embedTexts, embedQuery, embeddingKey, embeddingsConfigured, EMBEDDING_DIM, EMBEDDING_MODEL } = await import('../src/plugins/drive/embeddings.js');
 
 test('embeddings: custom endpoint, model and size from env, no key needed', async () => {
   assert.equal(embeddingsConfigured(), true);
@@ -56,6 +56,22 @@ test('embeddings: a key is sent as a bearer token when set', async () => {
   } finally {
     delete process.env.EMBEDDING_API_KEY;
   }
+});
+
+test('embeddings: the OpenAI key is sent to OpenAI only, never to another address', async () => {
+  // A person who used OpenAI and then changed only the address: the key they gave OpenAI stays in .env.
+  process.env.OPENAI_API_KEY = 'sk-given-for-openai-only';
+  try {
+    await embedQuery('q');
+    await embedTexts(['a']);
+    assert.deepEqual(seen.slice(-2).map((c) => c.auth), [undefined, undefined]);
+  } finally {
+    delete process.env.OPENAI_API_KEY;
+  }
+  assert.equal(embeddingKey({ OPENAI_API_KEY: 'sk-openai' }), 'sk-openai');
+  assert.equal(embeddingKey({ OPENAI_API_KEY: 'sk-openai', EMBEDDING_BASE_URL: 'https://api.openai.com/v1/' }), 'sk-openai');
+  assert.equal(embeddingKey({ OPENAI_API_KEY: 'sk-openai', EMBEDDING_BASE_URL: 'https://embeddings.example.com/v1' }), undefined);
+  assert.equal(embeddingKey({ OPENAI_API_KEY: 'sk-openai', EMBEDDING_API_KEY: 'own', EMBEDDING_BASE_URL: 'https://embeddings.example.com/v1' }), 'own');
 });
 
 test('embeddings: a vector of another size is an error that names EMBEDDING_DIM', async () => {

@@ -6,9 +6,18 @@
  * (your project when you run `node dist/server.js`), unless that is inside node_modules (npx), in which
  * case the working directory is used.
  *
- * MCP_HOME names the folder outright and wins over both. It is what an AI client's entry sets when the server is
- * started through npx: there is no project to find, and the client's working directory is somebody else's project
- * (whose .env must not be read).
+ * The settings folder is the one folder whose .env and mcp.config.json are read:
+ *
+ *   MCP_HOME is set                          that folder, and nothing else
+ *   the app root has .env or mcp.config.json the app root
+ *   neither                                  the working directory
+ *
+ * The working directory comes last because it is not always the person's choice. An AI client starts a stdio
+ * server in the project the person has open, which may be somebody else's repository: a .env there (dotenv keeps
+ * the first value it reads) used to send every document to an address of its choosing with the person's key, and
+ * an mcp.config.json there replaced the whole config. It is still read when the app root holds no settings, so
+ * that someone who runs the program inside their own folder of settings keeps working. Every entry the console and
+ * the setup commands write names MCP_HOME, so a client never depends on that rule.
  */
 import { existsSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -46,14 +55,23 @@ export function appRoot(): string {
   return _appRoot;
 }
 
-/** Candidate paths for a file: working directory first, then the app root. Duplicates removed. With MCP_HOME, that folder only. */
-export function candidates(file: string): string[] {
-  if (home()) return [resolve(appRoot(), file)];
-  const list = [resolve(process.cwd(), file), resolve(appRoot(), file)];
-  return [...new Set(list)];
+/** The two files a settings folder holds. */
+const SETTINGS = ['.env', 'mcp.config.json'];
+
+/** The folder whose .env and mcp.config.json are read (see above). Decided on each call: the console may write the first file. */
+export function settingsFolder(): string {
+  const named = home();
+  if (named) return named;
+  const root = appRoot();
+  return SETTINGS.some((file) => existsSync(join(root, file))) ? root : process.cwd();
 }
 
-/** Data directory (SQLite store, checkpoints). MCP_DATA_DIR, else <app root>/data. */
+/** Where a settings file is read from: in the settings folder. */
+export function settingsFile(file: string): string {
+  return resolve(settingsFolder(), file);
+}
+
+/** Data directory (SQLite store, checkpoints). MCP_DATA_DIR (a relative one is in the settings folder), else <app root>/data. */
 export function dataDir(): string {
-  return process.env.MCP_DATA_DIR ? resolve(process.env.MCP_DATA_DIR) : join(appRoot(), 'data');
+  return process.env.MCP_DATA_DIR ? resolve(settingsFolder(), process.env.MCP_DATA_DIR) : join(appRoot(), 'data');
 }

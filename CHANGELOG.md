@@ -217,6 +217,23 @@ Changes that affect people who run or extend the server. Dates are release dates
     this machine.
   - *`linked_documents` told a document that is hidden from one that is not there.* For someone limited to some
     folders, a link out of them is now listed exactly like a link to a document that does not exist.
+- **A repository opened in an AI client could change this server's settings.** A client starts a local server in
+  the project the person has open, and `.env` and `mcp.config.json` were read from that folder first. A repository
+  holding only a `.env` could then send the text of every document, with the person's OpenAI key, to an address of
+  its choosing, and keep the index inside itself; its `mcp.config.json` replaced the whole config. Settings are now
+  read from one folder: `MCP_HOME` when it is set, else the project folder when it has `.env` or `mcp.config.json`,
+  else the working directory. Every entry the console and `setup` write for a client sets `MCP_HOME`, project
+  entries included, and a relative `MCP_DATA_DIR` or `MCP_CONFIG_PATH` is inside the settings folder.
+- **The OpenAI key is sent to OpenAI only.** With another embedding address set, it was sent there with every
+  request for vectors, and by `setup check`. `EMBEDDING_API_KEY` is used for another address, and the console
+  removes it when the address changes and no key is given, as it does for the language model and OCR.
+- **Two people no longer share an inbox folder.** The folder was the part of the email before the @, so
+  `kim@example.com` and `kim@example.org` wrote into `inbox/kim/` and could replace each other's notes. Each caller
+  now has a folder named after the whole account, a note records that account in `from`, and only that caller may
+  replace it. Notes already in a folder named the old way stay there and are searched; no caller can replace them.
+- **A link inside a folder no longer opens what the exclusions or a person's scope hide.** `read_document` judged a
+  path such as `docs/public/team/pay.md` by its name, while `team` could be a link to `../HR`. An id with a link at
+  any step below the configured folder is refused, as the scan already skipped it.
 - **When gcloud's sign-in has expired the console says what to run.** With an organization account Google asks
   for the sign-in again after a while, and gcloud, started by the console, has no terminal to ask in. Pressing
   *Account with gcloud* then showed gcloud's own sentence ("Reauthentication failed. cannot prompt during

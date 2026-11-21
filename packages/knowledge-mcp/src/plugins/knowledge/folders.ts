@@ -160,8 +160,12 @@ export async function listLocalFiles(folder: LocalFolder): Promise<{ files: Loca
 
 /**
  * Turn a document id back into a file, or null when the id does not name a file inside a configured folder.
- * Checks the path three ways: no ".." or skipped segment in the id, the folder must be configured, and the real
- * path (after resolving links) must still be inside the folder's real path.
+ * Checks the path four ways: no ".." or skipped segment in the id, the folder must be configured, no step below the
+ * folder may be a link, and the real path (after resolving links) must still be inside the folder's real path.
+ *
+ * Links are refused as the scan refuses them (listLocalFiles): the exclusions and a person's folder scope are judged
+ * by the path in the id, so a link inside the folder (docs/public/team -> ../HR) would have read an excluded folder,
+ * or one outside the person's scope, under a path that passes both. The folder itself may be a link.
  */
 export async function resolveLocalId(id: string): Promise<(LocalFile & { folder: LocalFolder }) | null> {
   if (!isLocalId(id)) return null;
@@ -176,7 +180,11 @@ export async function resolveLocalId(id: string): Promise<(LocalFile & { folder:
   if (!mimeType) return null;
   const abs = join(folder.path, ...segments);
   try {
-    const [realFile, realFolder, info] = await Promise.all([realpath(abs), realpath(folder.path), lstat(abs)]);
+    // Every step from the first folder below the configured one down to the file itself.
+    const steps = await Promise.all(segments.map((_, i) => lstat(join(folder.path, ...segments.slice(0, i + 1)))));
+    if (steps.some((s) => s.isSymbolicLink())) return null;
+    const [realFile, realFolder] = await Promise.all([realpath(abs), realpath(folder.path)]);
+    const info = steps[steps.length - 1];
     if (!info.isFile() || !realFile.startsWith(realFolder + sep)) return null;
     return {
       folder,

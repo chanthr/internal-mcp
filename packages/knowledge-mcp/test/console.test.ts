@@ -538,6 +538,22 @@ test('embedding model: the models of an endpoint are listed, and a saved key goe
     assert.match(envFile(), new RegExp(`^EMBEDDING_BASE_URL=${fake.base}$`, 'm'));
     assert.match(envFile(), /^EMBEDDING_MODEL=bge-m3$\n^EMBEDDING_DIM=3$/m);
     assert.ok(!envFile().includes('key-of-another-endpoint'), 'a key that was not typed in is not written');
+
+    // A new address saved without a key: the key saved for the old one is removed, or every request for vectors
+    // would carry it to the new address after the restart.
+    const { updateEnvFile } = await import('../src/setup/envfile.js');
+    const keyFor = (endpoint: string, key: string) => {
+      updateEnvFile(join(dir, '.env'), { EMBEDDING_BASE_URL: endpoint, EMBEDDING_API_KEY: key });
+      Object.assign(process.env, { EMBEDDING_BASE_URL: endpoint, EMBEDDING_API_KEY: key });
+    };
+    keyFor('https://embeddings.example.com/v1', 'key-of-the-old-endpoint-000');
+    assert.equal((await api('POST', '/services/embeddings', { baseUrl: fake.base, model: 'bge-m3' })).status, 200);
+    assert.equal(fake.seen.at(-1)!.auth, undefined);
+    assert.doesNotMatch(envFile(), /^EMBEDDING_API_KEY=/m);
+    // The same address again without a key keeps the key saved for it.
+    keyFor(fake.base, 'key-of-this-endpoint-000');
+    assert.equal((await api('POST', '/services/embeddings', { baseUrl: fake.base, model: 'bge-m3' })).status, 200);
+    assert.match(envFile(), /^EMBEDDING_API_KEY=key-of-this-endpoint-000$/m);
   } finally {
     delete process.env.EMBEDDING_API_KEY;
     delete process.env.EMBEDDING_BASE_URL;
