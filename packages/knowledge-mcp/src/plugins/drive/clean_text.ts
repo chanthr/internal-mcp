@@ -53,22 +53,77 @@ export function cleanExtractedText(text: string): string {
  * line (`[image1]: <data:image/png;base64,...>`) and leaves a reference (`![][image1]`) in the text. Removes those
  * definitions, the references to them, and inline `![alt](data:image/...)`. Pictures with a real address
  * (`![alt](https://...)`) are kept.
+ *
+ * With `written` (a Markdown or text file someone wrote): what is inside a code block or `inline code` is an example
+ * and is kept as it is, and so is a picture of less than LARGE_PICTURE characters (a dot, an icon), which costs
+ * little to index. A picture of real size is dropped as from a Google Doc: one of 1.6 MB became 374 passages of letters.
  */
-export function stripEmbeddedImages(text: string): string {
+export function stripEmbeddedImages(text: string, opts: { written?: boolean } = {}): string {
   if (!text || !text.includes('data:image/')) return text;
-  const labels = new Set<string>();
-  let t = text.replace(
-    /^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,[^\n]*\n?/gm,
-    (_m, label: string) => {
-      labels.add(label);
-      return '';
-    },
-  );
-  // A reference or a picture does not read past the next "[": a line of "![" over and over was read to its end from
-  // every one of them. Base64 has no "[" in it.
-  if (labels.size > 0) {
-    t = t.replace(/!\[[^[\]\n]*\]\[([^[\]\n]+)\]/g, (m, label: string) => (labels.has(label) ? '' : m));
+  if (!opts.written) return dropPictures(text, 0);
+  // Line by line, so that code blocks can be told apart (``` or ~~~, closed as CommonMark closes them).
+  const lines = text.split('\n');
+  const code: boolean[] = [];
+  let fence: string | null = null;
+  for (const line of lines) {
+    const f = FENCE.exec(line);
+    if (fence === null) {
+      code.push(!!f);
+      if (f) fence = f[1];
+    } else {
+      code.push(true);
+      if (f && f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
+    }
   }
-  t = t.replace(/!\[[^[\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,[^)[\n]*\)/g, '');
-  return t.replace(/\n{3,}/g, '\n\n');
+  // Definitions first (a reference can come before its definition), then references and inline pictures.
+  const labels = new Set<string>();
+  const kept: Array<{ line: string; code: boolean }> = [];
+  lines.forEach((line, i) => {
+    const m = code[i] || line.length < LARGE_PICTURE ? null : DEFINITION.exec(line);
+    if (m) labels.add(m[1]);
+    else kept.push({ line, code: code[i] });
+  });
+  const out = kept.map(({ line, code: inCode }) => (inCode || !line.includes('![') ? line : outsideInlineCode(line, (part) => dropInline(part, labels, LARGE_PICTURE))));
+  const joined = out.join('\n');
+  return joined === text ? text : joined.replace(/\n{3,}/g, '\n\n');
+}
+
+/** A picture of data, of at least this many characters, written into a Markdown or text file is dropped. */
+const LARGE_PICTURE = 1024;
+const FENCE = /^\s{0,3}(`{3,}|~{3,})/;
+const DEFINITION = /^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,/;
+
+/** Every picture of data in text: definitions, references to them and inline pictures. */
+function dropPictures(text: string, least: number): string {
+  const labels = new Set<string>();
+  const t = text.replace(/^[ \t]*\[([^\]\n]+)\]:[ \t]*<?data:image\/[a-zA-Z0-9.+-]+;base64,[^\n]*\n?/gm, (m, label: string) => {
+    if (m.length < least) return m;
+    labels.add(label);
+    return '';
+  });
+  return dropInline(t, labels, least).replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * References to dropped definitions, and inline pictures of data of at least `least` characters. A reference or a
+ * picture does not read past the next "[": a line of "![" over and over was read to its end from every one of them.
+ * Base64 has no "[" in it.
+ */
+function dropInline(text: string, labels: Set<string>, least: number): string {
+  let t = text;
+  if (labels.size > 0) t = t.replace(/!\[[^[\]\n]*\]\[([^[\]\n]+)\]/g, (m, label: string) => (labels.has(label) ? '' : m));
+  return t.replace(/!\[[^[\]\n]*\]\(<?data:image\/[a-zA-Z0-9.+-]+;base64,[^)[\n]*\)/g, (m) => (m.length < least ? m : ''));
+}
+
+/** `f` applied to the parts of a line outside `inline code` (from a backtick to the next one). */
+function outsideInlineCode(line: string, f: (part: string) => string): string {
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const open = line.indexOf('`', at);
+    const close = open < 0 ? -1 : line.indexOf('`', open + 1);
+    if (close < 0) return out + f(line.slice(at));
+    out += f(line.slice(at, open)) + line.slice(open, close + 1);
+    at = close + 1;
+  }
 }

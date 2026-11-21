@@ -49,34 +49,92 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 /** Rows read from one tab. */
 const SHEET_ROWS = 100_000;
-/** Cells one tab may span, filled or not: every one of them is visited to write the rows out. */
-const SHEET_CELLS = 2_000_000;
+/** Cells written out from one workbook, filled or empty, over all its tabs. */
+const WORKBOOK_CELLS = 2_000_000;
+
+type Cell = import('xlsx').CellObject;
 
 /**
  * A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs and empty rows are left out.
  *
- * The size a tab says it has (its <dimension>) is not believed: a file of 1.5 KB with one cell said 200,000 rows by
- * 100 columns and became 20 million commas, and one that says a million rows by 16,384 columns would have run for
- * an hour. The size comes from the cells that are there, and a tab whose cells still span more than SHEET_CELLS
- * (a cell far out at the edge of the sheet) is not read, with a line that says so.
+ * A tab is written over the range it says it has (its <dimension>), as before, when that is no larger than what is
+ * left of WORKBOOK_CELLS; a larger one is not believed (a file of 1.5 KB with one cell said 200,000 rows by 100
+ * columns and became 20 million commas, and one that says a million rows by 16,384 columns would have run for an
+ * hour), and the range comes from the cells that are there. Only rows that hold a cell are visited, and the cells
+ * written over all tabs stop at WORKBOOK_CELLS: a workbook of 1,000 tabs with two cells far apart took 12 seconds.
+ * Where reading stops, a line says so. Other work is let in between tabs.
  */
 export async function workbookText(buffer: Buffer): Promise<string> {
   const XLSX = await import('xlsx');
-  const wb = XLSX.read(buffer, { type: 'buffer', dense: true, nodim: true, sheetRows: SHEET_ROWS });
-  const tabText = (ws: import('xlsx').WorkSheet | undefined): string => {
+  // One row more than is read: whether it is there says whether the tab has more.
+  const wb = XLSX.read(buffer, { type: 'buffer', dense: true, sheetRows: SHEET_ROWS + 1 });
+  let left = WORKBOOK_CELLS;
+  const out: string[] = [];
+  for (const name of wb.SheetNames) {
+    await new Promise((resolve) => setImmediate(resolve));
+    const ws = wb.Sheets[name];
     const ref = ws?.['!ref'];
-    if (!ws || !ref) return '';
-    const r = XLSX.utils.decode_range(ref);
-    const rows = r.e.r - r.s.r + 1;
-    const cells = rows * (r.e.c - r.s.c + 1);
-    if (cells > SHEET_CELLS) return `(Not read: its cells span ${ref}, more than ${SHEET_CELLS.toLocaleString('en-US')} cells.)`;
-    const csv = XLSX.utils.sheet_to_csv(ws, { blankrows: false }).trim();
-    return csv && r.e.r + 1 >= SHEET_ROWS ? `${csv}\n(Only the first ${SHEET_ROWS.toLocaleString('en-US')} rows are read.)` : csv;
-  };
-  return wb.SheetNames.map((n) => ({ n, csv: tabText(wb.Sheets[n]) }))
-    .filter((s) => s.csv)
-    .map((s) => `## ${s.n}\n${s.csv}`)
-    .join('\n\n');
+    const data = (ws?.['!data'] ?? []) as Array<Array<Cell | undefined> | undefined>;
+    if (!ws || !ref) continue;
+    // The rows that hold a cell, and where the cells are. A dense sheet has holes where there are none; its keys are
+    // the rows and cells that are there (walking the indexes visited every empty row: 100,000 per tab).
+    const rows: number[] = [];
+    let more = false;
+    let first = Infinity;
+    let last = -1;
+    for (const key of Object.keys(data)) {
+      const r = Number(key);
+      const row = data[r];
+      if (!Number.isInteger(r) || !row) continue;
+      if (r >= SHEET_ROWS) {
+        more = true;
+        continue;
+      }
+      let any = false;
+      for (const k of Object.keys(row)) {
+        const col = Number(k);
+        if (!Number.isInteger(col) || !row[col]) continue;
+        any = true;
+        first = Math.min(first, col);
+        last = Math.max(last, col);
+      }
+      if (any) rows.push(r);
+    }
+    if (rows.length === 0) continue;
+    if (left <= 0) {
+      out.push(`## ${name}\n(Not read: the workbook holds more cells than are read, ${WORKBOOK_CELLS.toLocaleString('en-US')}.)`);
+      continue;
+    }
+    const said = XLSX.utils.decode_range(ref);
+    const believed = (said.e.r - said.s.r + 1) * (said.e.c - said.s.c + 1) <= left;
+    // Columns from where the tab says it begins when that is not after its first cell, as before.
+    const from = believed || said.s.c <= first ? said.s.c : first;
+    const to = believed ? said.e.c : last;
+    const width = to - from + 1;
+    const taken: Array<Array<Cell | undefined>> = [];
+    let stopped = false;
+    let lastRow = 0;
+    for (const r of rows) {
+      if (believed && (r < said.s.r || r > said.e.r)) continue;
+      if (width > left) {
+        stopped = true;
+        break;
+      }
+      left -= width;
+      taken.push(data[r]!);
+      lastRow = r + 1;
+    }
+    if (taken.length === 0) {
+      out.push(`## ${name}\n(Not read: the workbook holds more cells than are read, ${WORKBOOK_CELLS.toLocaleString('en-US')}.)`);
+      continue;
+    }
+    // Written by SheetJS from the rows taken only, one after another: rows without a cell are not visited.
+    const compact = { '!data': taken, '!ref': XLSX.utils.encode_range({ s: { r: 0, c: from }, e: { r: taken.length - 1, c: to } }) } as unknown as import('xlsx').WorkSheet;
+    const csv = XLSX.utils.sheet_to_csv(compact, { blankrows: false }).trim();
+    const note = stopped || more ? `\n(Only rows up to ${(stopped ? lastRow : SHEET_ROWS).toLocaleString('en-US')} are read.)` : '';
+    if (csv) out.push(`## ${name}\n${csv}${note}`);
+  }
+  return out.join('\n\n');
 }
 
 async function exportGoogle(
@@ -143,10 +201,10 @@ const OCR_MAX_PAGES = Math.max(1, Number(process.env.OCR_MAX_PAGES ?? 200) || 20
 
 /** Extraction for formats that are plain files: text, Word, PDF, PowerPoint, Excel, images. */
 async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean, progress: OcrProgress = {}): Promise<ExtractResult> {
-  // 1. Native text. Pictures embedded as base64 are dropped, as from a Google Doc: a Markdown file with one picture of
-  //    1.6 MB took 7.5 seconds to cut and became 374 passages of letters sent to the embedding model.
+  // 1. Native text. Pictures embedded as base64 are dropped (not small ones, and not examples in code): a Markdown
+  //    file with one picture of 1.6 MB took 7.5 seconds to cut and became 374 passages of letters for the embedding model.
   if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
-    return { text: stripEmbeddedImages(await src.text()), method: 'native' };
+    return { text: stripEmbeddedImages(await src.text(), { written: true }), method: 'native' };
   }
 
   // 3. Word .docx: dependency-free zip/XML reading (ooxml.ts). Blank line between paragraphs, the same shape as the former

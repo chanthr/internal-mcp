@@ -344,3 +344,23 @@ test('the graph is built again when the links change, not when a file is only sa
     writeLinkMap(saved);
   }
 });
+
+test('the graph is what links.json holds, also when the file was changed by hand', () => {
+  // The fingerprint at the head of the file was taken for what the graph was built from: a hand edit that kept it
+  // gave a graph that was not the file's, and it stayed after the next scan wrote the true map.
+  const saved = readLinkMap();
+  const path = join(dir, 'data', 'links.json');
+  const truth = { version: 1 as const, folders: { notes: { 'a.md': { modified: '1', links: [{ to: 'b' }] }, 'b.md': { modified: '1', links: [] }, 'c.md': { modified: '1', links: [] } } } };
+  const edges = () => [...getGraph().out.values()].flat().map((e) => `${e.from.split('/').pop()}->${e.to.split('/').pop()}`).join(',');
+  try {
+    writeLinkMap(truth);
+    const key = /"key":"([0-9a-f]{40})"/.exec(readFileSync(path, 'utf8'))![1];
+    const edited = { version: 1, key, folders: { notes: { ...truth.folders.notes, 'a.md': { modified: '1', links: [{ to: 'c' }] } } } };
+    writeFileSync(path, `${JSON.stringify(edited)} \n`);
+    assert.equal(edges(), 'a.md->c.md');
+    writeLinkMap(truth);
+    assert.equal(edges(), 'a.md->b.md');
+  } finally {
+    writeLinkMap(saved);
+  }
+});

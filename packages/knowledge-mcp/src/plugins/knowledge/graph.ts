@@ -390,7 +390,10 @@ export function getGraph(): Graph {
     return cached.graph;
   }
   const m = file.read();
-  cached = { stamp, key: usable(m) ? (m.key ?? null) : null, graph: buildGraph(usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} }) };
+  const map: LinkMap = usable(m) ? { version: 1, folders: m.folders } : { version: 1, folders: {} };
+  // The fingerprint of what was read, not the one the file says it has: a file changed by hand with the old one at
+  // its head would otherwise keep a graph that is not what the file holds.
+  cached = { stamp, key: linksKey(map), graph: buildGraph(map) };
   return cached.graph;
 }
 
