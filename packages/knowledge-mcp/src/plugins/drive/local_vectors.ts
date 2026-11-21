@@ -194,7 +194,7 @@ const KEYWORD_REMEMBER_SHARE = 0.2;
  * How long a chunk the embedding endpoint refused is left out of missingVectors. Then it is tried again: an endpoint
  * that refused it may have changed (another model behind the same name, a larger context, another address).
  */
-export const REFUSAL_RETRY_MS = 24 * 60 * 60 * 1000;
+const REFUSAL_RETRY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The pieces FTS5's tokenizer (unicode61) makes of a word from tokens.ts: it splits at anything but letters and
@@ -902,43 +902,56 @@ export class LocalVectorClient {
 
   /**
    * The words an unfiltered keyword search looks for first. A question of KEYWORD_MAX_TERMS words or fewer, or one in
-   * a small index, is searched with all of them, as it always was. A longer one is cut down to that many of the words
-   * the index holds by leaving out its most common words: BM25 ranks every passage that holds any word, so a long
-   * Korean question (every pair of characters is a word) took 400 ms at 70,000 passages and blocked the server
-   * meanwhile. A word of several pieces is never left out (FTS5 looks for "search_tool" as "search" next to "tool",
-   * far rarer than either piece), nor a word the index does not hold. When the words kept find fewer passages than
-   * asked for, keywordSearch looks for all of them.
+   * a small index, is searched with all of them, as it always was. A longer one is cut down to the KEYWORD_MAX_TERMS
+   * rarest of the words the index holds: BM25 ranks every passage that holds any word, so a long Korean question
+   * (every pair of characters is a word) took 400 ms at 70,000 passages and blocked the server meanwhile, and the
+   * common words left out add little to the ranking. A word of several pieces (search_tool) is counted as FTS5 looks
+   * for it, "search" next to "tool", which is far rarer than either piece. A word the index does not hold is kept: it
+   * costs nothing to look for. When the words kept find fewer passages than asked for, keywordSearch looks for all.
    */
   keywordTerms(name: string, question: string): string[] {
     const terms = queryTerms(question);
     if (terms.length <= KEYWORD_MAX_TERMS) return terms;
     const total = Number((this.db.prepare(`SELECT count(*) AS n FROM ${tableOf(name)}`).get() as { n: number }).n);
     if (total < KEYWORD_TRIM_FROM) return terms;
-    const counted: Array<{ at: number; docs: number; single: boolean }> = [];
+    const counted: Array<{ at: number; docs: number }> = [];
     for (const [at, term] of terms.entries()) {
       const pieces = ftsPieces(term);
-      let docs = Infinity;
-      for (const piece of pieces) {
-        const n = this.pieceDocs(name, piece, total);
-        if (n === null) return terms; // the word list cannot be read here: nothing is left out
-        docs = Math.min(docs, n);
-      }
-      counted.push({ at, docs: docs === Infinity ? 0 : docs, single: pieces.length === 1 });
+      const docs = pieces.length === 1 ? this.pieceDocs(name, pieces[0], total) : pieces.length > 1 ? this.phraseDocs(name, term, total) : 0;
+      if (docs === null) return terms; // the word list cannot be read here: nothing is left out
+      counted.push({ at, docs });
     }
-    const held = counted.filter((t) => t.docs > 0).length;
-    const commonest = counted.filter((t) => t.single && t.docs > 0).sort((a, b) => b.docs - a.docs || b.at - a.at);
-    const left = new Set(commonest.slice(0, Math.max(0, held - KEYWORD_MAX_TERMS)).map((t) => t.at));
+    const held = counted.filter((t) => t.docs > 0).sort((a, b) => a.docs - b.docs || a.at - b.at);
+    const left = new Set(held.slice(KEYWORD_MAX_TERMS).map((t) => t.at));
     return terms.filter((_, at) => !left.has(at));
   }
 
   /**
-   * How many passages hold one piece of a word (ftsPieces), from the keyword index's own word list (fts5vocab, made
-   * for this connection). Null when the word list cannot be made (a read-only connection).
+   * How many passages hold a word of several pieces as FTS5 looks for it: the pieces next to each other. Counted by
+   * the keyword index itself, and remembered like a common piece (pieceDocs).
    */
-  private pieceDocs(name: string, piece: string, total: number): number | null {
+  private phraseDocs(name: string, term: string, total: number): number | null {
+    const known = this.knownCounts(name, total);
+    if (!known) return null;
+    const key = `"${term}"`; // a piece never holds a quote, so a phrase and a piece never share a key
+    let docs = known.docs.get(key);
+    if (docs === undefined) {
+      docs = Number((this.db.prepare(`SELECT count(*) AS n FROM ${ftsOf(name)} WHERE ${ftsOf(name)} MATCH ?`).get(matchExpression([term])) as { n: number }).n);
+      if (docs > total * KEYWORD_REMEMBER_SHARE) {
+        if (known.docs.size >= 10_000) known.docs.clear();
+        known.docs.set(key, docs);
+      }
+    }
+    return docs;
+  }
+
+  /**
+   * What is remembered of how many passages hold a word, made afresh when another process wrote (data_version) or
+   * the index has grown or shrunk by a tenth. This process's removals drop it too (applyWrite). Null when the word
+   * list cannot be made (a read-only connection).
+   */
+  private knownCounts(name: string, total: number): { total: number; version: number; docs: Map<string, number>; count: StatementSync } | null {
     let known = this.commonTerms.get(name);
-    // What was remembered is dropped when another process wrote (data_version), and once the index has grown or
-    // shrunk by a tenth. This process's removals drop it too (applyWrite).
     const version = this.dataVersion();
     if (!known || known.version !== version || Math.abs(known.total - total) * 10 > total) {
       try {
@@ -949,6 +962,13 @@ export class LocalVectorClient {
       }
       this.commonTerms.set(name, known);
     }
+    return known;
+  }
+
+  /** How many passages hold one piece of a word (ftsPieces), from the keyword index's own word list (fts5vocab). */
+  private pieceDocs(name: string, piece: string, total: number): number | null {
+    const known = this.knownCounts(name, total);
+    if (!known) return null;
     let docs = known.docs.get(piece);
     if (docs === undefined) {
       docs = Number((known.count.get(piece) as { doc: number } | undefined)?.doc ?? 0);
@@ -981,21 +1001,23 @@ export class LocalVectorClient {
   }
 
   /**
-   * Every indexed document with the modified time recorded for it, optionally only ids that start with `prefix`.
-   * One row is read per document (its first chunk), not one per chunk.
+   * Every indexed document with the modified time and cut recorded for it, optionally only ids that start with
+   * `prefix`. They are read from the document's chunk 0 (`firstChunk` gives its id): it is written last, so it says
+   * what was indexed whole. A document without one (its first index failed half way) has an empty modified time,
+   * which no file has, so it is never taken for unchanged. One row is read per document, not one per chunk.
    */
-  async documentTimes(name: string, prefix = ''): Promise<Map<string, { modified: string; cut: string | null }>> {
+  async documentTimes(name: string, prefix: string, firstChunk: (fileId: string) => PointId): Promise<Map<string, { modified: string; cut: string | null }>> {
     const out = new Map<string, { modified: string; cut: string | null }>();
     if (this.dimOf(name) === undefined) return out;
     this.requireDim(name);
     const table = tableOf(name);
-    const rows = this.db
-      .prepare(
-        `SELECT file_id, json_extract(payload, '$.modified_time') AS modified, json_extract(payload, '$.cut') AS cut FROM ${table} ` +
-          `WHERE rowid IN (SELECT min(rowid) FROM ${table} WHERE file_id >= ? AND file_id < ? GROUP BY file_id)`,
-      )
-      .iterate(prefix, `${prefix}\u{10FFFF}`) as Iterable<{ file_id: string | null; modified: string | null; cut: string | null }>;
-    for (const r of rows) if (r.file_id) out.set(r.file_id, { modified: r.modified ?? '', cut: r.cut ?? null });
+    const files = this.db.prepare(`SELECT DISTINCT file_id FROM ${table} WHERE file_id >= ? AND file_id < ?`).iterate(prefix, `${prefix}\u{10FFFF}`) as Iterable<{ file_id: string | null }>;
+    const first = this.db.prepare(`SELECT json_extract(payload, '$.modified_time') AS modified, json_extract(payload, '$.cut') AS cut FROM ${table} WHERE id = ?`);
+    for (const f of files) {
+      if (!f.file_id) continue;
+      const r = first.get(String(firstChunk(f.file_id))) as { modified: string | null; cut: string | null } | undefined;
+      out.set(f.file_id, { modified: r?.modified ?? '', cut: r?.cut ?? null });
+    }
     return out;
   }
 
@@ -1170,6 +1192,15 @@ export class LocalVectorClient {
       throw e;
     }
     return true;
+  }
+
+  /**
+   * Whether refused chunks can be set aside in this file now (canRefuse). When they cannot, a caller should not look
+   * for them one by one: each would be asked for again at once.
+   */
+  async canMarkRefused(name: string): Promise<boolean> {
+    this.requireDim(name);
+    return this.canRefuse(name);
   }
 
   /** How many chunks have no vector because the embedding endpoint refused them (refuseVectors). */

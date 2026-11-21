@@ -184,9 +184,11 @@ test('counts, one document and paging read the indexes, and say the same as read
 
   // One folder's documents, and when each was indexed: one row per document.
   assert.equal(await local.countDocuments(B, 'local:fa/'), 15);
-  const times = await local.documentTimes(B, 'local:fa/');
+  // Read from each document's chunk 0 (here id doc × 10 + 1).
+  const firstChunk = (fileId: string) => Number(/doc(\d+)/.exec(fileId)![1]) * 10 + 1;
+  const times = await local.documentTimes(B, 'local:fa/', firstChunk);
   assert.deepEqual([times.size, times.get('local:fa/doc1.md'), times.has('local:fb/doc0.md')], [15, { modified: '2026-01-02', cut: null }, false]);
-  assert.equal((await local.documentTimes(B)).size, 30);
+  assert.equal((await local.documentTimes(B, '', firstChunk)).size, 30);
   assert.deepEqual((await local.documentChunks(B, 'local:fa/doc1.md')).map((p) => p?.chunk_index).sort(), [0, 1, 2, 3]);
   assert.deepEqual((await local.documentChunks(B, 'local:fa/nope.md')).length, 0);
   // What a filter could be asked for, counted in documents.
@@ -423,9 +425,9 @@ test('cutting a long question never loses what the whole question finds: filters
 
   // 16 words or fewer: every word, as always.
   for (const q of ['출산 휴가 규정', 'app_url guide', 'café guide', 'search_knowledge 휴가']) assert.deepEqual(local.keywordTerms(T, q), queryTerms(q));
-  // Longer: the commonest single words go, down to 16 the index holds. The identifier stays, though its pieces are
-  // common: FTS5 looks for it as "app" next to "url", which only three passages have.
-  const long = `app_url guide 휴가 ${uniq}`;
+  // Longer: the 16 rarest words the index holds are kept. The identifier is counted as FTS5 looks for it, "app" next
+  // to "url": three passages. (By its pieces, 1,800 each, it would go and the commoner 휴가, 1,500, would stay.)
+  const long = `app_url guide 휴가 ${uniq.split(' ').slice(0, 15).join(' ')}`;
   const terms = local.keywordTerms(T, long);
   assert.deepEqual(terms, ['app_url', ...Array.from({ length: 15 }, (_, i) => `uniq${i}`)]);
   assert.deepEqual(new Set((await local.keywordSearch(T, { query: long, limit: 5 })).slice(0, 3).map((h) => h.id)), new Set([11, 12, 13]));
@@ -439,6 +441,28 @@ test('cutting a long question never loses what the whole question finds: filters
   const hr = await local.keywordSearch(T, { query: `출산 ${uniq} 휴가 규정`, limit: 5, filter: { must: [{ key: 'source', match: { value: 'hr' } }] } });
   assert.equal(hr.length, 5);
   assert.ok(hr.every((h) => h.payload?.source === 'hr'), JSON.stringify(hr.map((h) => h.id)));
+});
+
+test('a long question keeps its 16 rarest words, counting an identifier by how often it occurs whole', async () => {
+  const I = 'unit_idents';
+  await client.createCollection(I, { vectors: { size: 4 } });
+  const ids = 'file_id chunk_index chunk_count content_hash file_path file_name modified_time doc_tags doc_type doc_status has_image doc_customer vector_error passage_form index_profile retry_after'.split(' ');
+  const plain = 'deploy release budget review policy access token report schedule'.split(' ');
+  let x = 99;
+  const rnd = () => (x = (Math.imul(x, 1103515245) + 12345) & 0x7fffffff) / 0x7fffffff;
+  // 6,000 passages of identifiers and plain words; each identifier occurs whole in most of them.
+  const points = Array.from({ length: 6000 }, (_, i) => ({
+    id: i + 1,
+    payload: { file_id: `d${i % 300}`, content: Array.from({ length: 40 }, () => (rnd() < 0.5 ? ids[Math.floor(rnd() * ids.length)] : plain[Math.floor(rnd() * plain.length)])).join(' ') },
+  }));
+  for (let i = 0; i < points.length; i += 1000) await client.upsert(I, { points: points.slice(i, i + 1000) });
+  await client.upsert(I, { points: [{ id: 7001, payload: { file_id: 'target', content: 'the kestrelmigration step fails when doc_tags and file_id disagree' } }] });
+  // 17 terms the index holds: the one plain word in a single passage, and 16 identifiers found in thousands.
+  const question = `kestrelmigration failed with ${ids.join(' ')}`;
+  const terms = local.keywordTerms(I, question);
+  assert.ok(terms.includes('kestrelmigration'), String(terms));
+  assert.equal(terms.filter((t) => t !== 'failed' && t !== 'with').length, 16, String(terms)); // "failed" and "with" are in no passage
+  for (const limit of [1, 10]) assert.equal((await local.keywordSearch(I, { query: question, limit }))[0].id, 7001);
 });
 
 test('a word is split and unaccented as the keyword index does it, so it is counted as itself', () => {
@@ -533,7 +557,7 @@ test('a file from before the vector_error column works read-only and while anoth
   assert.deepEqual((await ro.keywordSearch('old', { query: 'hello', limit: 3 })).map((h) => h.id), [1]);
   assert.deepEqual((await ro.search('old', { vector: [1, 0, 0, 0], limit: 3 })).map((h) => h.id), [1]);
   assert.deepEqual((await ro.missingVectors('old', 5)).map((m) => m.id), [2]);
-  assert.deepEqual([await ro.refusedVectors('old'), await ro.refuseVectors('old', [{ id: 2, reason: 'too long' }])], [0, false]);
+  assert.deepEqual([await ro.refusedVectors('old'), await ro.refuseVectors('old', [{ id: 2, reason: 'too long' }]), await ro.canMarkRefused('old')], [0, false, false]);
 
   // Another process holds a write while this one is first used: it does not wait, and the column comes later.
   const holder = new DatabaseSync(path);

@@ -278,17 +278,19 @@ Changes that affect people who run or extend the server. Dates are release dates
 - **A long question no longer holds up the server.** In a Korean question every pair of characters is a word,
   and words found in nearly every passage made the keyword index rank all of them: 361 ms for 110 characters at
   72,856 passages, during which nothing else ran. A question of more than 16 words, in an index of 5,000 passages
-  or more, is now searched first with 16 of the words the index holds: its most common single words are left out.
-  A word of several pieces (an identifier such as `app_url`) and a word the index does not hold are never left out.
-  That takes 13 ms, and the passage the question was written from still comes first. A question of 16 words or
-  fewer, a filtered search, and a long question whose words kept find fewer passages than asked for search with
-  every word, as before.
+  or more, is now searched first with the 16 rarest of the words the index holds. A word of several pieces (an
+  identifier such as `app_url`) is counted as the keyword index looks for it, the pieces next to each other, and a
+  word the index does not hold is never left out. That takes 13 ms, and the passage the question was written from
+  still comes first. A question of 16 words or fewer, a filtered search, and a long question whose words kept find
+  fewer passages than asked for search with every word, as before.
 - **Rebuilding the keyword index reads one passage at a time.** It read every passage's text into memory first.
 - **A long document is embedded and stored a batch at a time.** All of its vectors were held until the end: a
   5-million-character document took 100 MB more, and a file at the 50 MB limit could take over a gigabyte. The
-  batch that marks the document as indexed is stored last, so a run that fails half way is tried again. A run that
-  succeeds deletes every stored passage past its own count, so what a failed longer run stored goes with the next
-  success. A failed run deletes nothing: another process may have stored the same passages meanwhile.
+  batch that marks the document as indexed is stored last, so a run that fails half way is tried again: a folder
+  pass and a sync go by that batch, and a document that holds passages of two versions is never taken for
+  unchanged. A run that succeeds deletes every stored passage past its own count, so what a failed longer run stored
+  goes with the next success. A failed run deletes nothing: another process may have stored the same passages
+  meanwhile.
 - **A passage the embedding model refuses no longer stops every other from getting a vector.** llama.cpp and
   LM Studio answer "input is too large" for a passage longer than the model takes; the same batch was then asked
   for again and again, and no passage got a vector. The refused passages are now found, set aside and searched by
@@ -297,7 +299,7 @@ Changes that affect people who run or extend the server. Dates are release dates
   again whenever a round gets nothing through and once more at the end, and is not mistaken for this: nothing is
   set aside. An index file from an older version works as before when the new column cannot be added yet (the
   file is read-only, or another process is writing, or an older version made the table again); refused passages
-  are then left out for a day by the process that found them, instead of being asked for again at once.
+  are then not looked for one by one, and a refused batch fails the round and is tried again after the usual pause.
 - **The embedding timeout covers the whole answer.** It covered only the headers: an endpoint that sent them and
   then stalled held a search for five minutes, and a request that timed out kept running while the retry sent it
   again. The request is now cancelled at the deadline.

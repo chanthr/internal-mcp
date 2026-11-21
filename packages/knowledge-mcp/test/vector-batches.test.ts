@@ -243,26 +243,55 @@ test('a run that fails while another process stores the same version leaves that
   assert.equal((await local.documentChunks(DRIVE_COLLECTION, doc.id)).length, chunks.length);
 });
 
-test('refused passages the index file cannot mark are left out for the run, not asked for again and again', async () => {
+test('where refused passages cannot be set aside, a refused batch fails the round and nothing is looked for one by one', async () => {
   await fillMissingVectors(100_000); // what the tests before left without a vector
   await local.upsert(DRIVE_COLLECTION, {
     points: [0, 1, 2].map((i) => ({ id: 700_000 + i, payload: { file_id: `000-unmarked-${i}`, file_name: 'u.md', heading: 'h', content: `TOO-LARGE unmarked ${i}` } })),
   });
-  // As when the file is read-only, or another process holds the write lock: the mark cannot be stored.
-  const refuse = local.refuseVectors;
-  local.refuseVectors = async () => false;
+  // As when the file is read-only, or another process holds the write lock and the column cannot be added.
+  const can = local.canMarkRefused;
+  local.canMarkRefused = async () => false;
   try {
+    // One request and an error, as before refused passages could be set aside; the usual pause follows.
     fake.requests = [];
-    assert.deepEqual(await fillMissingVectors(20_000), { handled: 3, made: 0 });
-    assert.ok(fake.requests.length < 30, `${fake.requests.length} requests`);
-    // Not fetched again by this process: no requests at all.
+    await assert.rejects(fillMissingVectors(20_000), /input is too large/);
+    assert.equal(fake.requests.length, 1);
     fake.requests = [];
-    assert.deepEqual(await fillMissingVectors(20_000), { handled: 0, made: 0 });
-    assert.equal(fake.requests.length, 0);
+    await assert.rejects(fillMissingVectors(20_000), /input is too large/);
+    assert.equal(fake.requests.length, 1);
   } finally {
-    local.refuseVectors = refuse;
+    local.canMarkRefused = can;
   }
-  // Still there for keyword search, and waiting for a vector in the file.
-  assert.equal((await local.keywordSearch(DRIVE_COLLECTION, { query: 'unmarked', limit: 5 })).length, 3);
-  assert.equal((await local.missingVectors(DRIVE_COLLECTION, 10_000)).filter((m) => String(m.payload?.file_id).startsWith('000-unmarked')).length, 3);
+  // Once the file can hold the marks, they are set aside as usual.
+  assert.deepEqual(await fillMissingVectors(20_000), { handled: 3, made: 0 });
+  assert.ok((await local.refusedVectors(DRIVE_COLLECTION)) >= 3);
+});
+
+test('a failed change followed by a change back to the indexed text is indexed again, not taken for unchanged', async () => {
+  const doc = file('reverted');
+  const v1 = await indexText(doc, longText(100, 'vone'));
+  const before = (await local.stats(DRIVE_COLLECTION)).chunks;
+  // Version 2 fails on the round with chunk 0 (as on a full disk): chunk 0 still holds version 1's hash, while the
+  // rounds before it hold version 2's text.
+  let failing = true;
+  const upsert = local.upsert;
+  local.upsert = async function (this: typeof local, name, body) {
+    if (failing && body.points.some((p) => (p.payload as { chunk_index?: number } | undefined)?.chunk_index === 0)) throw new Error('database is full (injected)');
+    return upsert.call(this, name, body);
+  };
+  try {
+    await assert.rejects(indexText(doc, longText(200, 'vtwo')), /database is full/);
+  } finally {
+    failing = false;
+    local.upsert = upsert;
+  }
+  assert.ok((await local.stats(DRIVE_COLLECTION)).chunks > before, 'the failed run left its other chunks');
+  // The text goes back to version 1, which chunk 0 still describes: indexed again, and version 2 is gone.
+  assert.equal(await indexText(doc, longText(100, 'vone')), v1);
+  const stored = (await local.documentChunks(DRIVE_COLLECTION, doc.id)).map((p) => String(p?.content));
+  assert.equal(stored.length, v1);
+  assert.ok(stored.every((t) => !t.includes('vtwo')));
+  assert.deepEqual(await local.keywordSearch(DRIVE_COLLECTION, { query: 'vtwo150', limit: 1 }), []);
+  // A document stored whole is still skipped when its text is unchanged.
+  assert.equal(await indexText(doc, longText(100, 'vone')), 0);
 });

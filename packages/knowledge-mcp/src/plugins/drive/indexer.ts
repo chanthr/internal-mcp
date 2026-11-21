@@ -10,7 +10,6 @@ import { embedTexts, embeddingsConfigured, EMBEDDING_MODEL } from './embeddings.
 import { extractText } from './extract_text.js';
 import { getQdrantClient, getLocalIndex, vectorForm, vectorProblem, vectorStoreKind, DRIVE_COLLECTION, type ChunkPayload, type PointId, type VectorClient } from './qdrant.js';
 import { withLock } from '../../core/lock.js';
-import { REFUSAL_RETRY_MS } from './local_vectors.js';
 
 import { DRIVE_ROOTS, MAX_FILE_BYTES, usesPathMetadata } from './settings.js';
 import { normalizeFolderName } from './exclude.js';
@@ -265,7 +264,12 @@ export async function indexText(
   // time). A file that was moved or only renamed is indexed again: the payload file_path decides the per-user folder
   // scope, so a stale path would keep the file searchable by people with access to the old folder after the move.
   // Path tags (doc_tags) are also rebuilt for every chunk.
-  if (sameLocation && prev!.content_hash === hash && prev!.cut === cutMark()) return 0;
+  // Unless a run that failed half way left another version beside it: chunk 0 still says this text, but later
+  // chunks hold the failed run's, or there are more than chunk 0 counts (a change, then a change back).
+  if (sameLocation && prev!.content_hash === hash && prev!.cut === cutMark()) {
+    const stored = await storedChunks(await getQdrantClient(), file.id);
+    if (stored.every((c) => c.index < prev!.chunk_count && c.hash === hash)) return 0;
+  }
 
   const chunks = chunkMarkdown(text);
   if (chunks.length === 0) return 0;
@@ -321,12 +325,15 @@ export async function storeChunks(
 ): Promise<void> {
   const { fileId, chunks, pointOf, embedInput, wait } = doc;
   const local = await getLocalIndex();
+  // Refused passages are looked for only where they can be set aside (embedEach); otherwise a refusal fails the
+  // document as it always did, and it is read again later.
+  const isolate = !!local && (await local.canMarkRefused(DRIVE_COLLECTION));
   const starts: number[] = [];
   for (let start = STORE_BATCH; start < chunks.length; start += STORE_BATCH) starts.push(start);
   starts.push(0);
   for (const start of starts) {
     const part = chunks.slice(start, start + STORE_BATCH);
-    const vectors = embedInput ? await (local ? embedEach : embedTexts)(part.map(embedInput)) : null;
+    const vectors = embedInput ? await (isolate ? embedEach : embedTexts)(part.map(embedInput)) : null;
     const points = part.map((c, i) => {
       const v = vectors?.[i];
       return { ...pointOf(c, start + i), vector: Array.isArray(v) ? v : undefined };
@@ -343,23 +350,29 @@ export async function storeChunks(
  * chunk id from chunk 0's count missed the chunks a failed longer run had written.
  */
 async function deleteChunksFrom(client: VectorClient, fileId: string, from: number, wait: boolean): Promise<void> {
-  const stale: PointId[] = [];
+  const stale = (await storedChunks(client, fileId)).filter((c) => c.index >= from).map((c) => c.id);
+  if (stale.length) await client.delete(DRIVE_COLLECTION, { wait, points: stale });
+}
+
+/** The chunks stored for a document: id, chunk index and the content hash each was written with. */
+async function storedChunks(client: VectorClient, fileId: string): Promise<Array<{ id: PointId; index: number; hash: unknown }>> {
+  const out: Array<{ id: PointId; index: number; hash: unknown }> = [];
   let offset: PointId | null | undefined;
   do {
     const page = await client.scroll(DRIVE_COLLECTION, {
       filter: { must: [{ key: 'file_id', match: { value: fileId } }] },
       limit: 1000,
       offset: offset ?? undefined,
-      with_payload: ['chunk_index'],
+      with_payload: ['chunk_index', 'content_hash'],
       with_vector: false,
     });
     for (const p of page.points) {
-      const idx = (p.payload as { chunk_index?: unknown } | null | undefined)?.chunk_index;
-      if (typeof idx === 'number' && idx >= from) stale.push(p.id);
+      const payload = p.payload as { chunk_index?: unknown; content_hash?: unknown } | null | undefined;
+      out.push({ id: p.id, index: typeof payload?.chunk_index === 'number' ? payload.chunk_index : -1, hash: payload?.content_hash });
     }
     offset = page.next_page_offset;
   } while (offset !== null && offset !== undefined);
-  if (stale.length) await client.delete(DRIVE_COLLECTION, { wait, points: stale });
+  return out;
 }
 
 /** A passage the embedding endpoint refused, and what it said. */
@@ -455,21 +468,13 @@ async function oneByOne(inputs: string[]): Promise<Array<number[] | Refused>> {
 }
 
 /**
- * Refused passages the index file could not mark (it is read-only, or another process was writing), with when, by
- * chunk id: left out of fillMissingVectors in this process for as long as a mark would have kept them out. Without
- * this the same passages were fetched and refused again at once, tens of thousands of requests a minute.
+ * Passages the endpoint refused: kept for keyword search, and no longer offered for a vector (missingVectors).
+ * False when the index file could not mark them (it became read-only, or another process is writing).
  */
-const leftOut = new Map<number, number>();
-
-/** Passages the endpoint refused: kept for keyword search, and no longer offered for a vector (missingVectors). */
-async function setAside(index: NonNullable<Awaited<ReturnType<typeof getLocalIndex>>>, refused: Array<{ id: number; reason: string }>): Promise<void> {
-  if (!(await index.refuseVectors(DRIVE_COLLECTION, refused))) {
-    const now = Date.now();
-    for (const r of refused) leftOut.set(r.id, now);
-    console.error(`[index] the embedding endpoint refused ${refused.length} passage(s); the index file cannot mark them now (read-only, or busy), so this process leaves them out for a day`);
-    return;
-  }
+async function setAside(index: NonNullable<Awaited<ReturnType<typeof getLocalIndex>>>, refused: Array<{ id: number; reason: string }>): Promise<boolean> {
+  if (!(await index.refuseVectors(DRIVE_COLLECTION, refused))) return false;
   console.error(`[index] the embedding endpoint refused ${refused.length} passage(s); they are found by keywords only: ${refused[0].reason.slice(0, 200)}`);
+  return true;
 }
 
 /** Deletes every chunk of a file from Qdrant (when the file is deleted or trashed). */
@@ -501,25 +506,27 @@ export async function fillMissingVectors(max: number): Promise<{ handled: number
   if (!index) return { handled: 0, made: 0 };
   let handled = 0;
   let made = 0;
-  const now = Date.now();
-  for (const [id, at] of leftOut) if (now - at > REFUSAL_RETRY_MS) leftOut.delete(id);
+  // Where refused passages cannot be set aside (the file is read-only, or another process is writing), looking for
+  // them one by one only to fetch them again at once made thousands of requests at every start. Then a refused batch
+  // fails the round, as it always did, and is tried again after the usual pause (backfillVectors).
+  const isolate = await index.canMarkRefused(DRIVE_COLLECTION);
   while (handled < max) {
-    const want = Math.min(STORE_BATCH, max - handled);
-    // Past the passages this process could not mark as refused (setAside), which would come first again.
-    const batch = (await index.missingVectors(DRIVE_COLLECTION, want + leftOut.size)).filter((b) => !leftOut.has(b.id)).slice(0, want);
+    const batch = await index.missingVectors(DRIVE_COLLECTION, Math.min(STORE_BATCH, max - handled));
     if (batch.length === 0) break;
     const form = await vectorForm();
     const inputs = batch.map((b) =>
       embedInputForChunk({ heading: String(b.payload?.heading ?? ''), content: String(b.payload?.content ?? '') }, String(b.payload?.file_name ?? ''), form),
     );
-    const vectors = await embedEach(inputs);
+    const vectors = isolate ? await embedEach(inputs) : await embedTexts(inputs);
     const good = batch.flatMap((b, i) => (Array.isArray(vectors[i]) ? [{ id: b.id, vector: vectors[i] as number[] }] : []));
     if (good.length) {
       await index.setVectors(DRIVE_COLLECTION, good);
       await index.noteModel(DRIVE_COLLECTION, EMBEDDING_MODEL, passageMark(form));
     }
     const refused = batch.flatMap((b, i) => (Array.isArray(vectors[i]) ? [] : [{ id: b.id, reason: (vectors[i] as Refused).refused }]));
-    if (refused.length) await setAside(index, refused);
+    if (refused.length && !(await setAside(index, refused))) {
+      throw new Error(`[index] the embedding endpoint refused ${refused.length} passage(s), and the index file cannot set them aside now (read-only, or another process is writing)`);
+    }
     handled += batch.length;
     made += good.length;
   }

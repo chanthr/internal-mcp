@@ -26,7 +26,7 @@ import { appRoot, dataDir } from '../../core/paths.js';
 import { withLock } from '../../core/lock.js';
 import { isExcludedName } from '../drive/exclude.js';
 import { extractLocalFile, mimeForFileName } from '../drive/extract_text.js';
-import { backfillVectors, deleteFileVectors, indexText } from '../drive/indexer.js';
+import { backfillVectors, deleteFileVectors, indexText, makeChunkId } from '../drive/indexer.js';
 import { DRIVE_COLLECTION, ensureCollection, getLocalIndex, getQdrantClient, vectorProblem } from '../drive/qdrant.js';
 import { embeddingsConfigured } from '../drive/embeddings.js';
 import { MAX_FILE_BYTES } from '../drive/settings.js';
@@ -193,12 +193,16 @@ export async function resolveLocalId(id: string): Promise<(LocalFile & { folder:
   }
 }
 
-/** Indexed local documents: id → the modified time recorded when each was indexed. */
+/**
+ * Indexed local documents: id → the modified time recorded when each was indexed, read from its chunk 0. Chunk 0 is
+ * written last, so a document whose index failed half way has none, and its modified time is empty: it is read again.
+ * (Its other chunks carry the new modified time already, and taking the time from them left it partly indexed for good.)
+ */
 async function indexedLocalDocs(): Promise<Map<string, { modified: string; cut: string | null }>> {
   // The built-in index answers from its document index. (Paging through every chunk to learn the same thing read
   // the text of the whole index on every pass.)
   const local = await getLocalIndex();
-  if (local) return local.documentTimes(DRIVE_COLLECTION, LOCAL_PREFIX);
+  if (local) return local.documentTimes(DRIVE_COLLECTION, LOCAL_PREFIX, (id) => makeChunkId(id, 0));
   const client = await getQdrantClient();
   const out = new Map<string, { modified: string; cut: string | null }>();
   let offset: string | number | null | undefined;
@@ -206,12 +210,14 @@ async function indexedLocalDocs(): Promise<Map<string, { modified: string; cut: 
     const page = await client.scroll(DRIVE_COLLECTION, {
       limit: 2000,
       offset: offset ?? undefined,
-      with_payload: ['file_id', 'modified_time', 'cut'],
+      with_payload: ['file_id', 'modified_time', 'cut', 'chunk_index'],
       with_vector: false,
     });
     for (const pt of page.points) {
       const id = String(pt.payload?.file_id ?? '');
-      if (isLocalId(id) && !out.has(id)) out.set(id, { modified: String(pt.payload?.modified_time ?? ''), cut: typeof pt.payload?.cut === 'string' ? pt.payload.cut : null });
+      if (!isLocalId(id)) continue;
+      if (pt.payload?.chunk_index === 0) out.set(id, { modified: String(pt.payload?.modified_time ?? ''), cut: typeof pt.payload?.cut === 'string' ? pt.payload.cut : null });
+      else if (!out.has(id)) out.set(id, { modified: '', cut: null }); // known, but not whole until its chunk 0 is seen
     }
     offset = page.next_page_offset ?? null;
   } while (offset !== null);
