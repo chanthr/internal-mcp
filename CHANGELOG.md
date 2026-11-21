@@ -269,13 +269,15 @@ Changes that affect people who run or extend the server. Dates are release dates
   must now be cloudflared and have started when the one this server started did (on Linux by the boot and the
   kernel's count of its start, which a clock change does not move); another program is forgotten and never
   signalled. A cloudflared that cannot be checked at that moment (ps failed on a busy machine) is not forgotten: it
-  is shown as still running, never signalled, and no second one is started beside it.
+  is shown as still running, never signalled, and no second one is started beside it. At start it is checked
+  again a few times over half a minute, so a tunnel that was on comes back once its old process is known to be gone.
 - **A save that cannot finish no longer cuts `mcp.config.json` or `.env` short.** With a full disk the console's
   folder save left half a config, and the next start failed on it ("JSON at position 4096"); a `.env` cut short
   lost the keys after the cut. Both files are now written beside themselves, flushed, and swapped in whole. They
   keep their permissions, and a config that is a link stays a link, also when the file it names does not exist
-  yet. A file that cannot be swapped is written in place, as before: in a folder that may not be written, mounted
-  on its own into a container, on another device, or with a second name (a hard link).
+  yet, and keeps its owner and group (a `.env` saved by `sudo … setup` stays readable to its owner). A file that
+  cannot be swapped is written in place, as before: in a folder that may not be written, mounted on its own into a
+  container, on another device, with a second name (a hard link), or of an owner the new file cannot be given.
 - **A data folder inside a watched folder no longer makes the scans run without end.** With `setup folder .`, or
   a settings folder inside a notes vault, every pass made and removed its lock file there, and that change started
   the next pass three seconds later. What the server writes in its own data folder is no longer a change.
@@ -292,12 +294,16 @@ Changes that affect people who run or extend the server. Dates are release dates
   lock while it works, and a lock whose process started after the last touch is taken over at once. A holder that
   runs and started before keeps its lock, however long ago the last touch (the machine slept), until it has had it
   for 12 hours as before; only where the start of a process cannot be known (Windows, or ps failed) does a lock
-  nobody touched for five minutes count as left behind. Two processes that find the same lock left behind no longer both take it.
+  nobody touched for five minutes count as left behind. Processes that find the same lock left behind take turns,
+  so only one takes it over, and a lock is made whole, so one being made is not taken for one left behind.
 - **A scan the OCR cannot read is no longer read again after every pass.** One page the model could not read
   failed the file, and with *Read new scans after each folder scan* on, every pass read up to 200 of its pages
   again. A run that starts by itself now leaves a file alone after three failures of its own, until the file or
-  the OCR changes; a run started from the console still tries it. An OCR that is not running, too slow or failing
-  for a moment (5xx) gives up on no file, and once it reads something again every file is tried again.
+  the OCR changes; a run started from the console still tries it. A refusal of the model counts against the file;
+  a timeout or a server error counts only when the model reads other pages, or its test page, at the time; an OCR
+  that is not running counts against nothing. A file that failed is read last in the next run, so that the files
+  behind it are not held up, and a page is asked for with a bound on its length, so a model cannot write on until
+  the five minutes are up.
 - **A ChatGPT sign-in that cannot be saved no longer stops the server.** When the data folder could not be written
   (a full disk, a read-only volume) as the browser came back, the error was not caught and the process exited. The
   tab now says the sign-in could not be finished.

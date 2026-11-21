@@ -85,12 +85,20 @@ function pageText(raw: string): string {
 }
 
 /**
- * The OCR could not be used at all: not reached, too slow, broken for a moment (5xx), or set up wrong (a key it
- * does not take, a model it does not have). Not a fault of the file being read: a file that failed this way is
- * not given up on (ocr_run.ts).
+ * Why the OCR did not answer with a page, when that may not be the file's fault: not reached at all, too slow, an
+ * error of the server (5xx, or busy), or set up wrong (a key it does not take, a model it does not have). On a model
+ * of this computer the slow and the server error can still be the file's (a page that makes the model run on until
+ * the time is up, an image it cannot decode): ocr_run.ts tells the two apart by whether the OCR reads other pages.
  */
-const unavailable = (message: string): Error => Object.assign(new Error(message), { ocrUnavailable: true });
-export const ocrUnavailable = (e: unknown): boolean => !!(e as { ocrUnavailable?: boolean } | null)?.ocrUnavailable;
+export type OcrUnavailable = 'unreachable' | 'slow' | 'server' | 'setup';
+const unavailable = (message: string, why: OcrUnavailable): Error => Object.assign(new Error(message), { ocrUnavailable: why });
+export const ocrUnavailable = (e: unknown): OcrUnavailable | null => (e as { ocrUnavailable?: OcrUnavailable } | null)?.ocrUnavailable ?? null;
+
+/**
+ * The most a model writes for one page: a dense page of text is a few thousand tokens. Without a bound, a model that
+ * starts repeating itself on a page writes until the five minutes are up, every time the file is read.
+ */
+const PAGE_TOKENS = 4096;
 
 /** One image to text through the model. */
 export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSettings, signal?: AbortSignal): Promise<string> {
@@ -103,6 +111,7 @@ export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSetti
       body: JSON.stringify({
         model: s.model,
         temperature: 0,
+        max_tokens: PAGE_TOKENS,
         messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${mime};base64,${image.toString('base64')}` } }, { type: 'text', text: s.prompt }] }],
       }),
       signal: signal ? AbortSignal.any([signal, limit]) : limit,
@@ -110,15 +119,17 @@ export async function ocrImageWithModel(image: Buffer, mime: string, s: OcrSetti
   } catch (e) {
     if (signal?.aborted) throw e;
     const cause = (e as { cause?: { code?: string } }).cause;
-    throw unavailable(`${host(s.baseUrl)} could not be reached (${cause?.code ?? (e instanceof Error ? e.message : String(e))}).`);
+    const why = `${host(s.baseUrl)} could not be reached (${cause?.code ?? (e instanceof Error ? e.message : String(e))}).`;
+    throw unavailable(why, limit.aborted ? 'slow' : 'unreachable');
   }
   const body = (await res.json().catch(() => ({}))) as { choices?: Array<{ message?: { content?: unknown } }>; error?: { message?: string } | string };
   if (res.status !== 200) {
     const said = String((typeof body.error === 'string' ? body.error : body.error?.message) ?? '').slice(0, 200);
-    if (res.status === 401 || res.status === 403) throw unavailable(`${host(s.baseUrl)} did not accept the key.`);
-    if (res.status === 404) throw unavailable(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`);
+    if (res.status === 401 || res.status === 403) throw unavailable(`${host(s.baseUrl)} did not accept the key.`, 'setup');
+    if (res.status === 404) throw unavailable(`${host(s.baseUrl)} does not know the model ${s.model}${said ? ` (${said})` : ''}.`, 'setup');
     const why = `${host(s.baseUrl)} answered ${res.status}${said ? `: ${said}` : ''}`;
-    throw res.status >= 500 || res.status === 408 || res.status === 429 ? unavailable(why) : new Error(why);
+    if (res.status === 408) throw unavailable(why, 'slow');
+    throw res.status >= 500 || res.status === 429 ? unavailable(why, 'server') : new Error(why);
   }
   const content = body.choices?.[0]?.message?.content;
   const text = typeof content === 'string' ? content : Array.isArray(content) ? content.map((p) => (p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string' ? (p as { text: string }).text : '')).join('') : '';

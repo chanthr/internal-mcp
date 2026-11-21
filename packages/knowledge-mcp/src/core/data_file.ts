@@ -8,6 +8,8 @@ import {
   closeSync,
   constants,
   fchmodSync,
+  fchownSync,
+  fstatSync,
   fsyncSync,
   ftruncateSync,
   lstatSync,
@@ -89,8 +91,9 @@ function renameOver(from: string, to: string): void {
  * read-only) is refused, as a write in place would be: a rename could replace it all the same.
  *
  * Some files cannot be swapped, and are written in place as before, without that protection: one in a folder that
- * may not be written, one mounted on its own (a config mounted into a container), one on another device, and one
- * with more than one name (a hard link: a new file would leave the other names on the old text). A link is written
+ * may not be written, one mounted on its own (a config mounted into a container), one on another device, one with
+ * more than one name (a hard link: a new file would leave the other names on the old text), and one of another
+ * owner that the new file cannot be given. A link is written
  * where it points, also when that file does not exist yet, so the link stays.
  */
 export function writeFileAtomic(path: string, data: string | Uint8Array, opts: { mode?: number } = {}): void {
@@ -108,6 +111,21 @@ export function writeFileAtomic(path: string, data: string | Uint8Array, opts: {
   } catch (e) {
     if (st && IN_PLACE.has(code(e))) return writeInPlace(target, bytes, opts.mode);
     throw e;
+  }
+  // The new file is the writer's: one written by root for someone else (`sudo … setup`) would leave a .env its owner
+  // can no longer read. It is given the file's owner and group, or, where that is not allowed, the file is written
+  // in place, as before.
+  if (st && process.platform !== 'win32') {
+    const made = fstatSync(fd);
+    if (made.uid !== st.uid || made.gid !== st.gid) {
+      try {
+        fchownSync(fd, st.uid, st.gid);
+      } catch {
+        closeSync(fd);
+        rmSync(tmp, { force: true });
+        return writeInPlace(target, bytes, opts.mode);
+      }
+    }
   }
   try {
     try {

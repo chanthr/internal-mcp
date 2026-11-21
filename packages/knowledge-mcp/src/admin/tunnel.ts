@@ -508,15 +508,25 @@ export async function recheckTunnel(): Promise<TunnelView> {
   return why ? { ...view, problem: `https://${s.hostname} does not answer yet (${why}).` } : view;
 }
 
+/** How often, and how long apart, a cloudflared that could not be checked is checked again at start. A test shortens it. */
+export const resumeChecks: { tries: number; ms: number } = { tries: 6, ms: 5_000 };
+
 /**
  * At start: a tunnel that was on comes back. The cloudflared of before a restart is still there and is kept; one
  * that is gone (the machine was restarted) is started again, on the port the server has now. One that could not be
- * checked is left as it is: a second one beside it would serve the address twice.
+ * checked (ps fails while the machine is busy starting up) is checked again a few times, a while apart: a second
+ * one beside it would serve the address twice, and given up on, the tunnel would stay off until the next start.
  */
 export async function resumeTunnel(port: number): Promise<void> {
-  const s = saved.read();
+  let s = saved.read();
   if (!s?.on) return;
-  const who = whose(s);
+  let who = whose(s);
+  for (let tries = 0; who === 'unknown' && tries < resumeChecks.tries; tries++) {
+    await wait(resumeChecks.ms);
+    s = saved.read();
+    if (!s?.on) return; // turned off from the console meanwhile
+    who = whose(s);
+  }
   if (who === 'unknown' || (who === 'ours' && s.port === port)) return;
   try {
     if (s.mode === 'named' && s.hostname) await startNamedTunnel(port, s.hostname);

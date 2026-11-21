@@ -64,7 +64,9 @@ const { consoleToken } = await import('../src/admin/auth.js');
 const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
-const { certPath, cloudflareApi, cloudflaredHome, lookup, processes, reach, resumeTunnel, startQuickTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
+const { certPath, cloudflareApi, cloudflaredHome, lookup, processes, reach, resumeChecks, resumeTunnel, startQuickTunnel, stopTunnel, tunnelHostname, tunnelView } = await import('../src/admin/tunnel.js');
+// A cloudflared that cannot be checked at start is checked again a while later: a moment, here.
+Object.assign(resumeChecks ?? {}, { ms: 10 });
 
 // Public DNS, Cloudflare's API and the address seen from outside, as the tests need them.
 const NS: Record<string, string[]> = { 'example.com': ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], 'other.org': ['ns1.other-host.net', 'ns2.other-host.net'] };
@@ -366,4 +368,25 @@ test('a cloudflared that cannot be checked (ps failed) is kept, shown as running
   stopTunnel();
   assert.ok(await gone(pid));
   assert.equal((await tunnelView()).running, false);
+});
+
+test('at start, a cloudflared that cannot be checked yet is checked again, and the tunnel comes back once it is known to be gone', async () => {
+  // After a restart its id belongs to another program; ps fails twice while the machine is busy starting up.
+  const other = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(other, 'spawn');
+  const real = processes.info;
+  let failures = 2;
+  processes.info = (pid) => (failures-- > 0 ? null : real(pid));
+  try {
+    writeFileSync(join(data, 'tunnel.json'), JSON.stringify({ mode: 'quick', on: true, pid: other.pid, port: server.port, url: 'https://old-words.trycloudflare.com' }));
+    await resumeTunnel(server.port);
+    const back = await tunnelView();
+    assert.deepEqual([back.running, back.url], [true, 'https://calm-river-demo.trycloudflare.com']);
+    assert.notEqual(pidOf(), other.pid);
+    assert.ok(alive(other.pid!), 'the other program was left alone');
+  } finally {
+    processes.info = real;
+    other.kill();
+    stopTunnel();
+  }
 });

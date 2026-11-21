@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -29,10 +29,10 @@ Object.assign(process.env, {
 });
 
 // A vision model: it "reads" a page by answering with what the test says the page holds, and keeps what it was sent.
-const seen: Array<{ model: string; prompt: string; image: string }> = [];
+const seen: Array<{ model: string; prompt: string; image: string; maxTokens: number }> = [];
 let reads: (n: number) => string = () => '';
-/** The status the model answers its n-th request with (counted from the start of the file). */
-let status: (n: number) => number = () => 200;
+/** The status the model answers its n-th request with (counted from the start of the file), and the image it was sent. */
+let status: (n: number, image: Buffer) => number = () => 200;
 const read = (req: IncomingMessage) =>
   new Promise<string>((resolve) => {
     let body = '';
@@ -42,8 +42,9 @@ const read = (req: IncomingMessage) =>
 const model = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   const body = JSON.parse(await read(req));
   const parts = body.messages[0].content;
-  seen.push({ model: body.model, prompt: parts.find((p: any) => p.type === 'text').text, image: parts.find((p: any) => p.type === 'image_url').image_url.url.slice(0, 22) });
-  const code = status(seen.length);
+  const url: string = parts.find((p: any) => p.type === 'image_url').image_url.url;
+  seen.push({ model: body.model, prompt: parts.find((p: any) => p.type === 'text').text, image: url.slice(0, 22), maxTokens: body.max_tokens });
+  const code = status(seen.length, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
   if (code !== 200) return void res.writeHead(code, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'the page could not be read' } }));
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ choices: [{ message: { content: reads(seen.length) } }] }));
@@ -250,6 +251,82 @@ test('an OCR that is not running, or broken for a moment, gives up on no file: o
     status = () => 200;
     delete process.env.OCR_AUTO;
     useModel();
+  }
+});
+
+test('scans the model refuses do not hold up the ones behind them, and are left alone after a few passes', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  // Three images first in the list that the model refuses (the file's fault), and one it reads behind them.
+  for (const name of ['a1', 'a2', 'a3']) writeFileSync(join(docs, `${name}.png`), `BAD-${name}`);
+  writeFileSync(join(docs, 'z-good.png'), 'GOOD-z');
+  const before = seen.length;
+  status = (_n, image) => (image.toString().startsWith('BAD') ? 400 : 200);
+  reads = () => 'Receipt for coffee and cake.';
+  try {
+    await scanFolders();
+    assert.equal(ocrWaiting(), 4);
+    // The first run stops after three failures in a row; the next takes the one it can read first.
+    assert.equal(await autoPasses(1), 1);
+    assert.equal(ocrWaiting(), 4);
+    assert.equal(await autoPasses(1), 1);
+    assert.equal(ocrWaiting(), 3, 'the good one was read');
+    // Three tries each, then they are left alone.
+    assert.equal(await autoPasses(4), 1);
+    assert.equal(seen.length - before, 10, 'three tries of three files, and the good one');
+    assert.equal(seen.at(-1)!.maxTokens, 4096, 'one page is asked for with a bound');
+  } finally {
+    status = () => 200;
+    delete process.env.OCR_AUTO;
+    for (const name of ['a1', 'a2', 'a3']) rmSync(join(docs, `${name}.png`));
+    await scanFolders();
+  }
+});
+
+test('a file the model fails on while it reads other scans keeps its count, and is left alone after three passes', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  writeFileSync(join(docs, 'torn.pdf'), twoPages('Torn copy', 'Torn page two'));
+  // Its second page is refused: what is sent is a page drawn from the PDF (a PNG), so the PDF's pages are counted.
+  let pages = 0;
+  status = (_n, image) => (image[0] === 0x89 && ++pages % 2 === 0 ? 400 : 200);
+  reads = () => 'Receipt for coffee and cake.';
+  try {
+    let started = 0;
+    for (let pass = 1; pass <= 6; pass++) {
+      writeFileSync(join(docs, `new-${pass}.png`), `GOOD-${pass}`); // a new scan arrives before each pass
+      await scanFolders();
+      started += await autoPasses(1);
+    }
+    assert.equal(started, 6, 'every pass reads the new scan');
+    assert.equal(pages, 6, 'the torn scan was tried three times, two pages each');
+    assert.equal(ocrWaiting(), 1, 'only the torn scan waits');
+  } finally {
+    status = () => 200;
+    delete process.env.OCR_AUTO;
+    for (let pass = 1; pass <= 6; pass++) rmSync(join(docs, `new-${pass}.png`), { force: true });
+    rmSync(join(docs, 'torn.pdf'));
+    await scanFolders();
+  }
+});
+
+test('a scan that the model on this computer fails on with a server error, while it reads its test page, is left alone after three passes', async () => {
+  useModel();
+  process.env.OCR_AUTO = 'true';
+  // An image this model cannot decode: it answers 500 for it, and reads anything else (its test page too).
+  writeFileSync(join(docs, 'broken.png'), 'BAD-broken');
+  status = (_n, image) => (image.toString().startsWith('BAD') ? 500 : 200);
+  reads = () => Array.from({ length: 9000 }, (_, i) => String(1000 + i)).join(' ');
+  try {
+    await scanFolders();
+    assert.equal(ocrWaiting(), 1);
+    assert.equal(await autoPasses(5), 3);
+    assert.equal(ocrWaiting(), 1, 'it still waits for a run from the console');
+  } finally {
+    status = () => 200;
+    delete process.env.OCR_AUTO;
+    rmSync(join(docs, 'broken.png'));
+    await scanFolders();
   }
 });
 

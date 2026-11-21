@@ -14,15 +14,19 @@
  * slept, or because it is an older version that does not touch it. Only where the start of a process cannot be
  * known (Windows, or ps failed) does a lock nobody touched for SILENT_MS count as left behind.
  *
- * Two processes may find the same lock left behind at once. It is taken over by moving it aside under a name of
- * one's own first: only one of them moves it, and the one who moved something else (a lock just made by the
- * other) puts it back.
+ * A lock is made whole: its process id is written to a file of its own, which is then given the lock's name (a
+ * hard link, refused when the name is taken). Made empty and written after, it could be read in between as a lock
+ * without a holder. Where a file system has no hard links (FAT, exFAT, some network shares) it is made directly.
+ *
+ * Several processes may find the same lock left behind at once. They take turns (`<lock>.takeover`, made the same
+ * way): only the one whose turn it is removes the lock, after looking again that it is still the one found left
+ * behind, and makes its own. Nobody moves or removes a lock it did not find left behind.
  *
  * This covers processes on one machine sharing one data directory. Servers on different machines are not
  * coordinated by it.
  */
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, utimesSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { dataDir } from './paths.js';
 import { processInfo } from './process_info.js';
@@ -30,15 +34,51 @@ import { processInfo } from './process_info.js';
 const DEFAULT_STALE_MS = 12 * 60 * 60_000;
 const BEAT_MS = 30_000;
 const SILENT_MS = 5 * 60_000;
+/** A lock without a readable process id is one being made, for this long: after that it is left behind. */
+const MAKING_MS = 10_000;
+/** A takeover takes milliseconds: a turn held for this long was left by a process that died in the middle of it. */
+const TURN_MS = 10_000;
 const lockPath = (name: string) => join(dataDir(), `${name}.lock`);
 const beats = new Map<string, NodeJS.Timeout>();
 const code = (e: unknown): string => String((e as NodeJS.ErrnoException)?.code ?? '');
+/** What a file system without hard links answers to one. */
+const NO_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EMLINK']);
 
-/** When a process started (milliseconds since 1970, or null when not known), and a pause before a takeover. Tests replace them. */
-export const lockHooks: { startedAt: (pid: number) => number | null; beforeTakeover: () => void } = {
+/**
+ * When a process started (milliseconds since 1970, or null when not known), and a pause at two moments of a
+ * takeover: after a lock was found left behind, and after it was removed. Tests replace them.
+ */
+export const lockHooks: { startedAt: (pid: number) => number | null; pause: (at: 'found' | 'removed') => void } = {
   startedAt: (pid) => processInfo(pid)?.startedAt ?? null,
-  beforeTakeover: () => {},
+  pause: () => {},
 };
+
+/** Make the file with this process's id, whole, unless one of that name exists. False when it exists. */
+function publish(path: string): boolean {
+  const draft = `${path}.${process.pid}.${randomBytes(4).toString('hex')}`;
+  writeFileSync(draft, String(process.pid), { mode: 0o600, flag: 'wx' });
+  try {
+    linkSync(draft, path);
+    return true;
+  } catch (e) {
+    if (code(e) === 'EEXIST') return false;
+    if (!NO_LINKS.has(code(e))) throw e;
+  } finally {
+    rmSync(draft, { force: true });
+  }
+  try {
+    const fd = openSync(path, 'wx', 0o600);
+    try {
+      writeSync(fd, String(process.pid));
+    } finally {
+      closeSync(fd);
+    }
+    return true;
+  } catch (e) {
+    if (code(e) === 'EEXIST') return false;
+    throw e;
+  }
+}
 
 interface Seen {
   pid: number;
@@ -61,11 +101,14 @@ function look(path: string): Seen | null {
     closeSync(fd);
   }
 }
+const same = (a: Seen, b: Seen): boolean => a.ino === b.ino && a.touched === b.touched && a.pid === b.pid;
 
 /** Was this lock left behind by a holder that is gone (or that has had it for longer than `staleMs`)? */
 function leftBehind(lock: Seen, staleMs: number): boolean {
   const age = Date.now() - lock.touched;
-  if (!Number.isInteger(lock.pid) || lock.pid <= 0 || age >= staleMs) return true;
+  if (age >= staleMs) return true;
+  // No process id in it: one being made right now (where it cannot be made whole), or a file that was cut short.
+  if (!Number.isInteger(lock.pid) || lock.pid <= 0) return age >= MAKING_MS;
   try {
     process.kill(lock.pid, 0);
   } catch (e) {
@@ -76,6 +119,36 @@ function leftBehind(lock: Seen, staleMs: number): boolean {
   // A start time is read to the second: a little slack, so that a holder is never taken for a later process.
   if (started !== null) return started > lock.touched + 2000;
   return age >= Math.min(staleMs, SILENT_MS);
+}
+
+/** This process's turn to take a lock over, or false while another process has it. */
+function takeTurn(turn: string): boolean {
+  if (publish(turn)) return true;
+  try {
+    if (Date.now() - statSync(turn).mtimeMs < TURN_MS) return false;
+    unlinkSync(turn); // left by a process that died while taking the lock over
+  } catch {
+    /* finished meanwhile */
+  }
+  return publish(turn);
+}
+
+/**
+ * Take over the lock found left behind, in turn with other processes. True when this process holds it now, false when
+ * another one does, null when it should be looked at again (it changed since it was found).
+ */
+function takeOver(path: string, found: Seen): boolean | null {
+  const turn = `${path}.takeover`;
+  if (!takeTurn(turn)) return false; // another process is taking it over right now
+  try {
+    const now = look(path);
+    if (!now || !same(now, found)) return null;
+    unlinkSync(path);
+    lockHooks.pause('removed');
+    return publish(path);
+  } finally {
+    rmSync(turn, { force: true });
+  }
 }
 
 /**
@@ -115,41 +188,18 @@ export function acquireLock(name: string, staleMs = DEFAULT_STALE_MS): boolean {
   mkdirSync(dataDir(), { recursive: true, mode: 0o700 });
   const path = lockPath(name);
   for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const fd = openSync(path, 'wx', 0o600);
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      // A short lock goes stale within SILENT_MS anyway: only a long one needs touching to show it is still held.
-      if (staleMs > SILENT_MS) keepTouching(name, staleMs);
-      return true;
-    } catch (e) {
-      if (code(e) !== 'EEXIST') throw e;
+    let got: boolean | null = publish(path);
+    if (!got) {
+      const found = look(path);
+      if (!found) continue; // released meanwhile: try again
+      if (!leftBehind(found, staleMs)) return false;
+      lockHooks.pause('found');
+      got = takeOver(path, found);
+      if (got === null) continue;
     }
-    const seen = look(path);
-    if (!seen) continue; // released meanwhile: try again
-    if (!leftBehind(seen, staleMs)) return false;
-    lockHooks.beforeTakeover();
-    // Moved aside under a name of its own: of two processes taking it over, only one moves it.
-    const aside = `${path}.${process.pid}.${randomBytes(4).toString('hex')}`;
-    try {
-      renameSync(path, aside);
-    } catch (e) {
-      if (code(e) === 'ENOENT') continue; // another process took it first: look at what it made
-      throw e;
-    }
-    const moved = look(aside);
-    if (moved && (moved.ino !== seen.ino || moved.touched !== seen.touched || moved.pid !== seen.pid)) {
-      // Not the lock that was found left behind: another process took that over in between, and this is its new
-      // lock. It is theirs, and goes back where it was.
-      try {
-        linkSync(aside, path);
-      } catch {
-        /* a third process made one meanwhile */
-      }
-      rmSync(aside, { force: true });
-      return false;
-    }
-    rmSync(aside, { force: true });
+    // A short lock goes stale within SILENT_MS anyway: only a long one needs touching to show it is still held.
+    if (got && staleMs > SILENT_MS) keepTouching(name, staleMs);
+    return got;
   }
   return false;
 }

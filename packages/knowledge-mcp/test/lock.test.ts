@@ -1,8 +1,8 @@
 /**
  * The lock that lets one process at a time scan the folders, sync Drive or fill in vectors: a lock left by a
  * holder that is gone is taken over, also when its process id now belongs to another program; a holder that runs
- * keeps its lock however long ago it last touched it (the machine slept); and of two processes that find the same
- * lock left behind, only one takes it.
+ * keeps its lock however long ago it last touched it (the machine slept); a lock being made is not taken for one
+ * left behind; and of several processes that find the same lock left behind, or ask for a free one, only one gets it.
  */
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,20 +98,33 @@ test('a holder at work touches its lock; one that has had it for staleMs is take
   }
 });
 
-test('two processes that find the same lock left behind at the same moment: only one of them takes it', { skip: process.platform === 'win32' ? 'the slow ps below is a shell script' : false }, async () => {
+test('a lock being made (no process id in it yet) is held for a few seconds, then counts as left behind', () => {
+  // Where a lock cannot be made whole (no hard links), it exists empty for an instant before its id is written.
+  writeFileSync(lockFile('making'), '');
+  assert.equal(acquireLock('making'), false);
+  const at = new Date(Date.now() - 60_000);
+  utimesSync(lockFile('making'), at, at);
+  assert.equal(acquireLock('making'), true);
+  releaseLock('making');
+});
+
+/**
+ * Racers: processes that wait for the moment they are given and then ask for the lock, round after round. Taking a
+ * lock over is drawn out at random (a ps that answers after up to 60 ms, as on a busy machine, and pauses inside the
+ * takeover), so that the processes overlap in every way they can. Returns how many held it after each round.
+ */
+async function race(racers: number, rounds: number, before: (dir: string, round: number) => void): Promise<{ holders: number[]; dir: string; stop: () => void }> {
   const dir = mkdtempSync(join(tmpdir(), 'kmcp-race-'));
-  // A ps that answers after up to 60 ms, as on a busy machine: looking at the holder takes a while.
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const ps = spawnSync('/bin/sh', ['-c', 'command -v ps'], { encoding: 'utf8' }).stdout.trim();
   writeFileSync(join(bin, 'ps'), `#!/bin/sh\nsleep 0.0$(( $$ % 7 ))\nexec ${ps} "$@"\n`);
   chmodSync(join(bin, 'ps'), 0o755);
   const lock = pathToFileURL(resolve(import.meta.dirname, '..', 'src', 'core', 'lock.ts')).href;
-  // Each process waits for the moment it is given, then asks for the lock; the moment between finding the lock left
-  // behind and taking it over is drawn out at random as well.
   const script = [
     `const { acquireLock, lockHooks } = await import(${JSON.stringify(lock)});`,
-    `if (lockHooks) lockHooks.beforeTakeover = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.random() * 30);`,
+    `const nap = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.random() * 20);`,
+    `if (lockHooks) lockHooks.pause = nap;`,
     `const { createInterface } = await import('node:readline');`,
     `console.log('ready');`,
     `for await (const line of createInterface({ input: process.stdin })) {`,
@@ -120,38 +133,64 @@ test('two processes that find the same lock left behind at the same moment: only
     `  console.log(JSON.stringify({ got: acquireLock('race') }));`,
     `}`,
   ].join('\n');
-  const racers: ChildProcessWithoutNullStreams[] = [0, 1].map(() =>
+  const children: ChildProcessWithoutNullStreams[] = Array.from({ length: racers }, () =>
     spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       cwd: resolve(import.meta.dirname, '..'),
       env: { ...process.env, MCP_DATA_DIR: dir, PATH: `${bin}:${process.env.PATH}` },
     }),
   );
-  const answers = racers.map((r) => createInterface({ input: r.stdout })[Symbol.asyncIterator]());
-  const next = async (i: number) => {
-    const timeout = new Promise<never>((_, fail) => setTimeout(() => fail(new Error('no answer in 20 s')), 20_000).unref());
-    return String((await Promise.race([answers[i].next(), timeout])).value);
+  const stop = () => {
+    for (const c of children) c.kill();
   };
+  try {
+    const answers = children.map((c) => createInterface({ input: c.stdout })[Symbol.asyncIterator]());
+    const next = async (i: number) => {
+      const timeout = new Promise<never>((_, fail) => setTimeout(() => fail(new Error('no answer in 20 s')), 20_000).unref());
+      return String((await Promise.race([answers[i].next(), timeout])).value);
+    };
+    for (let i = 0; i < racers; i++) assert.equal(await next(i), 'ready');
+    const holders: number[] = [];
+    for (let round = 0; round < rounds; round++) {
+      rmSync(join(dir, 'race.lock'), { force: true });
+      before(dir, round);
+      const go = Date.now() + 100;
+      for (const c of children) c.stdin.write(`${go}\n`);
+      const got = await Promise.all(children.map((_, i) => next(i)));
+      holders.push(got.filter((a) => JSON.parse(a).got).length);
+    }
+    return { holders, dir, stop };
+  } catch (e) {
+    stop();
+    throw e;
+  }
+}
+
+test('three processes that find the same lock left behind at the same moment: only one of them takes it', { skip: process.platform === 'win32' ? 'the slow ps is a shell script' : false }, async () => {
   // The holder that is gone: its id now belongs to a program started after the lock was last touched.
   const reused = spawn('sleep', ['300'], { stdio: 'ignore' });
+  await once(reused, 'spawn');
+  let run: Awaited<ReturnType<typeof race>> | undefined;
   try {
-    await once(reused, 'spawn');
-    for (const i of [0, 1]) assert.equal(await next(i), 'ready');
-    let both = 0;
-    for (let round = 0; round < 15; round++) {
+    run = await race(3, 20, (dir) => {
       writeFileSync(join(dir, 'race.lock'), String(reused.pid));
       const at = new Date(Date.now() - 60_000);
       utimesSync(join(dir, 'race.lock'), at, at);
-      const go = Date.now() + 150;
-      for (const r of racers) r.stdin.write(`${go}\n`);
-      const got = (await Promise.all([next(0), next(1)])).map((a) => JSON.parse(a).got as boolean);
-      if (got[0] && got[1]) both++;
-      assert.ok(got[0] || got[1], `round ${round + 1}: one of them takes it`);
-    }
-    assert.equal(both, 0, 'rounds in which both took the lock');
-    assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('race.lock.')), [], 'nothing moved aside is left');
+    });
+    assert.deepEqual(run.holders.filter((n) => n !== 1), [], `holders in each round: ${run.holders.join(' ')}`);
+    assert.deepEqual(readdirSync(run.dir).filter((f) => f.startsWith('race.lock.')), [], 'no draft or turn is left behind');
   } finally {
     reused.kill();
-    for (const r of racers) r.kill();
-    rmSync(dir, { recursive: true, force: true });
+    run?.stop();
+    if (run) rmSync(run.dir, { recursive: true, force: true });
+  }
+});
+
+test('four processes asking for a lock nobody holds, at the same moment: one of them gets it', { skip: process.platform === 'win32' ? 'the slow ps is a shell script' : false }, async () => {
+  const run = await race(4, 20, () => undefined);
+  try {
+    assert.deepEqual(run.holders.filter((n) => n !== 1), [], `holders in each round: ${run.holders.join(' ')}`);
+  } finally {
+    run.stop();
+    rmSync(run.dir, { recursive: true, force: true });
   }
 });

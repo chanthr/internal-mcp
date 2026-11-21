@@ -5,7 +5,7 @@
  */
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { chmodSync, chownSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -79,4 +79,16 @@ test('an ordinary file is swapped in whole: its permissions are kept, and no tem
   assert.equal(statSync(join(dir, 'mcp.config.json')).mode & 0o777, 0o640);
   assert.notEqual(statSync(join(dir, 'mcp.config.json')).ino, before, 'a new file took its place');
   assert.deepEqual(readdirSync(dir), ['mcp.config.json']);
+});
+
+// A group of this user other than the one a new file in the folder gets: what root writing for someone else needs.
+const otherGroup = process.platform === 'win32' ? undefined : process.getgroups?.().find((g) => g !== statSync(root).gid);
+test('a file of another group keeps its owner and group, as a write in place would', { skip: otherGroup === undefined ? 'this user is in no other group' : false }, () => {
+  const dir = folder('owner');
+  writeFileSync(join(dir, '.env'), 'A=1\n', { mode: 0o640 });
+  chownSync(join(dir, '.env'), process.getuid!(), otherGroup!);
+  writeFileAtomic(join(dir, '.env'), 'A=2\n', { mode: 0o640 });
+  const after = statSync(join(dir, '.env'));
+  assert.deepEqual([after.uid, after.gid, after.mode & 0o777], [process.getuid!(), otherGroup, 0o640]);
+  assert.equal(readFileSync(join(dir, '.env'), 'utf8'), 'A=2\n');
 });
