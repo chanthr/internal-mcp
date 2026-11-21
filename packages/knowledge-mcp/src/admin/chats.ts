@@ -9,9 +9,10 @@
  * What the model is given of a conversation is its text, newest first, up to HISTORY_CHARS characters: a long
  * conversation does not grow what every new message costs without end.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { dataFile } from '../core/data_file.js';
 import { dataDir } from '../core/paths.js';
 
 export interface StoredCall {
@@ -61,6 +62,32 @@ const fileOf = (id: string): string => {
   return join(dir(), `${id}.json`);
 };
 
+/**
+ * What the list shows of each conversation, kept beside them (chats-list.json in the data directory) so that the
+ * list does not read every conversation: 500 of 150 KB each are 74 MB, read and parsed in a quarter of a second, and
+ * the page asks for the list after every answer. Each entry keeps the size and time of the file it was read from; an
+ * entry that does not match its file, or a list that is missing or cannot be read, is made again from the files.
+ */
+interface Listed {
+  stamp: string;
+  /** Missing when the file could not be read as a conversation. */
+  summary?: Omit<ChatSummary, 'id'>;
+}
+const listFile = dataFile<{ version: 1; chats: Record<string, Listed> }>('chats-list.json');
+const readList = (): Record<string, Listed> => {
+  const l = listFile.read();
+  return l?.version === 1 && l.chats && typeof l.chats === 'object' ? l.chats : {};
+};
+const stampOf = (f: string): string | null => {
+  try {
+    const st = statSync(f);
+    return `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+};
+const summaryOf = (c: Chat): Omit<ChatSummary, 'id'> => ({ title: c.title, updated: c.updated, messages: c.turns.length });
+
 /** When this server started: an answer that was being written before then was cut off by a restart. */
 const STARTED = new Date().toISOString();
 
@@ -84,26 +111,47 @@ export function writeChat(chat: Chat): void {
   const trimmed: Chat = { ...chat, turns: chat.turns.map((t) => (t.calls ? { ...t, calls: t.calls.map((c) => ({ ...c, text: c.text && c.text.length > TOOL_TEXT ? `${c.text.slice(0, TOOL_TEXT)}\n… [${c.text.length - TOOL_TEXT} more characters]` : c.text })) } : t)) };
   writeFileSync(`${f}.tmp`, JSON.stringify(trimmed), { mode: 0o600 });
   renameSync(`${f}.tmp`, f);
+  const stamp = stampOf(f);
+  if (stamp) listFile.write({ version: 1, chats: { ...readList(), [chat.id]: { stamp, summary: summaryOf(chat) } } });
 }
 
 export function deleteChat(id: string): boolean {
   const f = fileOf(id);
   if (!existsSync(f)) return false;
   rmSync(f);
+  const { [id]: _gone, ...rest } = readList();
+  listFile.write({ version: 1, chats: rest });
   return true;
 }
 
 /** The conversations, newest first. The oldest beyond MOST are removed. */
 export function listChats(): ChatSummary[] {
   if (!existsSync(dir())) return [];
-  const all: ChatSummary[] = [];
+  const kept = readList();
+  const now: Record<string, Listed> = {};
+  let changed = false;
   for (const name of readdirSync(dir())) {
-    if (!name.endsWith('.json')) continue;
-    const c = readChat(name.slice(0, -5));
-    if (c) all.push({ id: c.id, title: c.title, updated: c.updated, messages: c.turns.length });
+    const id = name.slice(0, -5);
+    if (!name.endsWith('.json') || !ID.test(id)) continue;
+    const stamp = stampOf(join(dir(), name));
+    if (!stamp) continue;
+    if (kept[id]?.stamp === stamp) {
+      now[id] = kept[id];
+      continue;
+    }
+    // New, changed, or not in the list: read from its file, once.
+    const c = readChat(id);
+    now[id] = { stamp, ...(c ? { summary: summaryOf(c) } : {}) };
+    changed = true;
   }
+  const all: ChatSummary[] = Object.entries(now).flatMap(([id, l]) => (l.summary ? [{ id, ...l.summary }] : []));
   all.sort((a, b) => b.updated.localeCompare(a.updated));
-  for (const old of all.splice(MOST)) deleteChat(old.id);
+  for (const old of all.splice(MOST)) {
+    rmSync(fileOf(old.id), { force: true });
+    delete now[old.id];
+    changed = true;
+  }
+  if (changed || Object.keys(kept).length !== Object.keys(now).length) listFile.write({ version: 1, chats: now });
   return all;
 }
 

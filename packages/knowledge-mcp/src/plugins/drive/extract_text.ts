@@ -47,11 +47,33 @@ async function downloadBuffer(drive: DriveClient, fileId: string): Promise<Buffe
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
-/** A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs are left out. */
+/** Rows read from one tab. */
+const SHEET_ROWS = 100_000;
+/** Cells one tab may span, filled or not: every one of them is visited to write the rows out. */
+const SHEET_CELLS = 2_000_000;
+
+/**
+ * A workbook as text: one "## <tab name>" section per tab, rows as CSV. Empty tabs and empty rows are left out.
+ *
+ * The size a tab says it has (its <dimension>) is not believed: a file of 1.5 KB with one cell said 200,000 rows by
+ * 100 columns and became 20 million commas, and one that says a million rows by 16,384 columns would have run for
+ * an hour. The size comes from the cells that are there, and a tab whose cells still span more than SHEET_CELLS
+ * (a cell far out at the edge of the sheet) is not read, with a line that says so.
+ */
 export async function workbookText(buffer: Buffer): Promise<string> {
   const XLSX = await import('xlsx');
-  const wb = XLSX.read(buffer, { type: 'buffer' });
-  return wb.SheetNames.map((n) => ({ n, csv: XLSX.utils.sheet_to_csv(wb.Sheets[n]).trim() }))
+  const wb = XLSX.read(buffer, { type: 'buffer', dense: true, nodim: true, sheetRows: SHEET_ROWS });
+  const tabText = (ws: import('xlsx').WorkSheet | undefined): string => {
+    const ref = ws?.['!ref'];
+    if (!ws || !ref) return '';
+    const r = XLSX.utils.decode_range(ref);
+    const rows = r.e.r - r.s.r + 1;
+    const cells = rows * (r.e.c - r.s.c + 1);
+    if (cells > SHEET_CELLS) return `(Not read: its cells span ${ref}, more than ${SHEET_CELLS.toLocaleString('en-US')} cells.)`;
+    const csv = XLSX.utils.sheet_to_csv(ws, { blankrows: false }).trim();
+    return csv && r.e.r + 1 >= SHEET_ROWS ? `${csv}\n(Only the first ${SHEET_ROWS.toLocaleString('en-US')} rows are read.)` : csv;
+  };
+  return wb.SheetNames.map((n) => ({ n, csv: tabText(wb.Sheets[n]) }))
     .filter((s) => s.csv)
     .map((s) => `## ${s.n}\n${s.csv}`)
     .join('\n\n');
@@ -121,9 +143,10 @@ const OCR_MAX_PAGES = Math.max(1, Number(process.env.OCR_MAX_PAGES ?? 200) || 20
 
 /** Extraction for formats that are plain files: text, Word, PDF, PowerPoint, Excel, images. */
 async function extractBytes(mimeType: string, src: ByteSource, ocr: boolean, progress: OcrProgress = {}): Promise<ExtractResult> {
-  // 1. Native text
+  // 1. Native text. Pictures embedded as base64 are dropped, as from a Google Doc: a Markdown file with one picture of
+  //    1.6 MB took 7.5 seconds to cut and became 374 passages of letters sent to the embedding model.
   if (mimeType === 'text/markdown' || mimeType === 'text/plain') {
-    return { text: await src.text(), method: 'native' };
+    return { text: stripEmbeddedImages(await src.text()), method: 'native' };
   }
 
   // 3. Word .docx: dependency-free zip/XML reading (ooxml.ts). Blank line between paragraphs, the same shape as the former

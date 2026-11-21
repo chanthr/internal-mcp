@@ -7,7 +7,7 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -61,7 +61,7 @@ const { runHttp } = await import('../src/server/http.js');
 const { Registry } = await import('../src/plugin/registry.js');
 const { builtinPlugins } = await import('../src/plugins/index.js');
 const { scanFolders, scanFoldersSoon } = await import('../src/plugins/knowledge/folders.js');
-const { writeChat, readChat, historyOf } = await import('../src/admin/chats.js');
+const { writeChat, readChat, historyOf, listChats, newChat, deleteChat } = await import('../src/admin/chats.js');
 
 await scanFolders();
 const registry = new Registry(builtinPlugins);
@@ -213,4 +213,40 @@ test('conversations are kept, picked up again with what was said, and removed', 
   assert.equal((await api('DELETE', `/chats/${fresh}`)).status, 200);
   assert.deepEqual((await api('GET', '/chats')).json.chats, []);
   assert.equal(readdirSync(join(dir, 'data', 'chats')).filter((f) => f.endsWith('.json')).length, 0);
+});
+
+test('the list of conversations is kept beside them, and listing does not read every conversation again', () => {
+  // 500 conversations of 150 KB were read and parsed on every answer (a quarter of a second each time).
+  const chats = join(dir, 'data', 'chats');
+  const list = join(dir, 'data', 'chats-list.json');
+  const made = ['First question', 'Second question'].map((q) => {
+    const c = newChat(q);
+    c.turns.push({ role: 'user', text: q, at: c.created });
+    writeChat(c);
+    return c;
+  });
+  const titles = () => listChats().map((c) => c.title).sort();
+  assert.deepEqual(titles(), ['First question', 'Second question']);
+  const file = join(chats, `${made[0].id}.json`);
+  // A file whose size and time are as the list has them is not read: here it is made unreadable, and still listed.
+  const at = new Date('2026-05-01T00:00:00Z');
+  utimesSync(file, at, at);
+  assert.deepEqual(titles(), ['First question', 'Second question']); // the new time is noted
+  const body = readFileSync(file, 'utf8');
+  writeFileSync(file, ' '.repeat(body.length));
+  utimesSync(file, at, at);
+  assert.deepEqual(titles(), ['First question', 'Second question']);
+  // Changed in size or time: read again (an unreadable one is left out, as before).
+  writeFileSync(file, body.replace('First question', 'Another question'));
+  assert.deepEqual(titles(), ['Another question', 'Second question']);
+  // No list, or one that cannot be read: made again from the files.
+  rmSync(list);
+  assert.deepEqual(titles(), ['Another question', 'Second question']);
+  writeFileSync(list, '{ not json');
+  assert.deepEqual(titles(), ['Another question', 'Second question']);
+  // A conversation removed, by the page or by hand, leaves the list.
+  assert.equal(deleteChat(made[0].id), true);
+  rmSync(join(chats, `${made[1].id}.json`));
+  assert.deepEqual(listChats(), []);
+  assert.deepEqual(JSON.parse(readFileSync(list, 'utf8')).chats, {});
 });

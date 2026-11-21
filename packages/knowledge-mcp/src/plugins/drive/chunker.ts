@@ -124,9 +124,121 @@ function parseDocMeta(fm: Record<string, unknown>): DocMeta {
   };
 }
 
-function countTokens(text: string): number {
-  // gpt-tokenizer defaults to cl100k_base (compatible with text-embedding-3)
-  return encode(text).length;
+/**
+ * A string such as "<|endoftext|>" in a document is read as the text it is. By default the tokenizer refuses one, and
+ * a document that held one was never indexed.
+ */
+const AS_TEXT = { disallowedSpecial: new Set<string>() };
+
+/**
+ * Places where the tokenizer always ends a token, and reads the text before and after the same way when the text is
+ * cut there: a space or a tab after anything but white space, anything but a letter, a mark or an apostrophe after a
+ * letter, anything after a digit, a digit after anything but a digit or white space, and anything but white space or
+ * "/" after a line break. (Spaces at the end of a part are read differently from the same spaces before a word.)
+ * Text cut at these places counts the same in parts as whole.
+ */
+const WORD_END = /(?<=\S)(?=[^\S\r\n])|(?<=\p{L})(?=[^\p{L}\p{M}'])|(?<=\p{N})(?=\P{N})|(?<=[^\p{N}\s])(?=\p{N})|(?<=[\r\n])(?=[^\s/])/gu;
+/**
+ * A stretch of more than LONGEST_WORD bytes (in UTF-8) with no such place in it is not prose (a line of one
+ * character, a page of Korean or Chinese with no space or punctuation in it), and is read in pieces of WORD_PIECE
+ * characters. The tokenizer's work on one word grows with the square of its bytes: 100 KB of "a" took 29 seconds to
+ * cut, and 8,000 Korean characters without a space took a second. Ordinary text has no such stretch (the padding of
+ * a wide table is a few hundred spaces), so it counts the same as before.
+ */
+const LONGEST_WORD = 1024;
+const WORD_PIECE = 32;
+/** Characters of text given to the tokenizer at once when counting, and when a cut is searched for. */
+const COUNT_PART = 2000;
+const SEARCH_PART = 64;
+
+/** UTF-8 bytes of text.slice(from, to), counted no further than just past `most`. */
+function utf8Bytes(text: string, from: number, to: number, most: number): number {
+  let n = 0;
+  for (let i = from; i < to && n <= most; i++) {
+    const c = text.charCodeAt(i);
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c <= 0xdfff ? 2 : 3;
+  }
+  return n;
+}
+
+/** The places text is cut for counting, in order, each with whether it must be cut there (inside a long stretch). */
+function* cutPlaces(text: string): Generator<[at: number, must: boolean]> {
+  let last = 0;
+  // Three bytes at most to a UTF-16 unit: a stretch of no more than a third of LONGEST_WORD units is never long.
+  const long = (to: number) => to - last > LONGEST_WORD / 3 && utf8Bytes(text, last, to, LONGEST_WORD) > LONGEST_WORD;
+  function* inside(to: number): Generator<[number, boolean]> {
+    let at = last;
+    while (to - at > WORD_PIECE) {
+      at += WORD_PIECE;
+      // Not between the two halves of a character outside the basic plane (an emoji).
+      const c = text.charCodeAt(at - 1);
+      if (c >= 0xd800 && c <= 0xdbff) at--;
+      yield [at, true];
+    }
+  }
+  for (const m of text.matchAll(WORD_END)) {
+    if (long(m.index!)) yield* inside(m.index!);
+    yield [m.index!, false];
+    last = m.index!;
+  }
+  if (long(text.length)) yield* inside(text.length);
+}
+
+/**
+ * Text in consecutive parts of about `most` characters, cut only at cutPlaces. `piece` is set on a part that begins
+ * or ends where a long stretch was cut by force (a part of something that is not prose).
+ */
+function* tokenParts(text: string, most: number): Generator<{ text: string; piece: boolean }> {
+  if (text.length <= Math.min(most, LONGEST_WORD / 3)) {
+    yield { text, piece: false };
+    return;
+  }
+  let start = 0;
+  let prev = 0; // the last place passed, after start
+  let forcedStart = false;
+  const part = (end: number, forcedEnd: boolean) => {
+    const p = { text: text.slice(start, end), piece: forcedStart || forcedEnd };
+    start = end;
+    forcedStart = forcedEnd;
+    return p;
+  };
+  for (const [at, must] of cutPlaces(text)) {
+    if (at - start > most && prev > start) yield part(prev, false);
+    if (must) yield part(at, true);
+    prev = at;
+  }
+  if (text.length - start > most && prev > start) yield part(prev, false);
+  yield part(text.length, false);
+}
+
+/**
+ * Tokens of the parts met while one document is cut. A part met again (a long run of one character is cut into many
+ * equal ones) is not given to the tokenizer again: its own cache moves a word it is asked for again to the end of a
+ * Map, which grows slow (some microseconds each time) once the Map holds thousands of words.
+ */
+let seenParts: Map<string, number> | null = null;
+
+/** Tokens of text the tokenizer is given whole: a part from tokenParts, or less. */
+function tokensOf(part: string): number {
+  let n = seenParts?.get(part);
+  if (n === undefined) {
+    n = encode(part, AS_TEXT).length;
+    seenParts?.set(part, n);
+  }
+  return n;
+}
+
+/**
+ * Tokens in text (gpt-tokenizer's default encoding). Counted in parts (tokenParts), the same total as whole for
+ * prose. With `stop`, counting ends once there are more than that: what is over a cap is not counted to its end.
+ */
+function countTokens(text: string, stop = Infinity): number {
+  let n = 0;
+  for (const part of tokenParts(text, COUNT_PART)) {
+    n += tokensOf(part.text);
+    if (n > stop) break;
+  }
+  return n;
 }
 
 // Removes lone surrogates (unpaired UTF-16 surrogates). A cut on a token boundary can split an emoji (surrogate pair)
@@ -137,8 +249,9 @@ function stripLoneSurrogates(text: string): string {
 }
 
 // ![alt](url) is image markdown. The URL moves to image_urls and only alt stays in content, so English URL tokens
-// do not skew the embedding vector of Korean text. If alt is empty, the image is removed entirely.
-const IMAGE_RE = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
+// do not skew the embedding vector of Korean text. If alt is empty, the image is removed entirely. The alt text does
+// not read past the next "[": a chunk of "![" over and over was read to its end from every one of them.
+const IMAGE_RE = /!\[([^[\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 function extractImages(content: string): { content: string; image_urls: string[] } {
   const urls: string[] = [];
   const cleaned = content.replace(IMAGE_RE, (_full, alt: string, url: string) => {
@@ -148,9 +261,12 @@ function extractImages(content: string): { content: string; image_urls: string[]
   return { content: cleaned, image_urls: urls };
 }
 
-/** Number of markdown tables in the chunk (approximated by counting `|---|` separator rows). */
+/**
+ * Number of markdown tables in the chunk (approximated by counting `|---|` separator rows). Spaces and tabs only:
+ * \s crossed lines, and every line of a run of blank lines read the whole run.
+ */
 function countTables(content: string): number {
-  return (content.match(/^\s*\|[\s:|-]+\|\s*$/gm) ?? []).length;
+  return (content.match(/^[ \t]*\|[ \t:|-]+\|[ \t]*$/gm) ?? []).length;
 }
 
 /** Whether the text is a markdown table block (70% or more of the rows have the |...| form). */
@@ -214,51 +330,159 @@ function splitSentences(text: string): string[] {
   return parts.length > 0 ? parts : [text];
 }
 
+/** Text in parts (tokenParts) with the tokens of each, so that any stretch of it is counted part by part. */
+interface Counted {
+  text: string;
+  /** Where each part begins, then the end of the text. */
+  starts: number[];
+  tokens: number[];
+  /** before[i]: the tokens of the parts before part i. */
+  before: number[];
+  /** The part is a piece of a long stretch cut by force (tokenParts). */
+  piece: boolean[];
+  /** Tokens of stretches that end inside a part, counted once. */
+  seen: Map<string, number>;
+}
+
+function counted(text: string): Counted {
+  const c: Counted = { text, starts: [0], tokens: [], before: [0], piece: [], seen: new Map() };
+  for (const part of tokenParts(text, SEARCH_PART)) {
+    const n = tokensOf(part.text);
+    c.tokens.push(n);
+    c.before.push(c.before[c.before.length - 1] + n);
+    c.starts.push(c.starts[c.starts.length - 1] + part.text.length);
+    c.piece.push(part.piece);
+  }
+  return c;
+}
+
+/** The part that holds the character at `at`. */
+function partAt(c: Counted, at: number): number {
+  let lo = 0;
+  let hi = c.tokens.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (c.starts[mid] <= at) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * A part of more bytes than this (a stretch with no place to cut in it, too short to be cut by force) is not searched
+ * one character at a time: the tokens of a piece of it are taken in proportion to its length, and the cut that comes
+ * of that is checked once at the end. Searching such parts one character at a time took over a second for 200 KB
+ * of Korean in runs of 300 characters.
+ */
+const LONG_PART = 256;
+
+/**
+ * Whether text.slice(from, to) is within max tokens, counted as its parts are. The whole parts in it are added up;
+ * a part it cuts at either end is given to the tokenizer only when the sum leaves the answer open (a UTF-16 unit is
+ * at most three bytes, so at most three tokens), and, unless `exact`, a long part is estimated (LONG_PART).
+ */
+function fits(c: Counted, from: number, to: number, max: number, exact = false): boolean {
+  if (to <= from) return true;
+  const i = partAt(c, from);
+  const j = partAt(c, to - 1);
+  let n = 0;
+  const ends: Array<[number, number, number]> = [];
+  const add = (k: number, a: number, b: number) => {
+    if (a === c.starts[k] && b === c.starts[k + 1]) n += c.tokens[k];
+    else ends.push([k, a, b]);
+  };
+  if (i === j) add(i, from, to);
+  else {
+    add(i, from, c.starts[i + 1]);
+    n += c.before[j] - c.before[i + 1];
+    add(j, c.starts[j], to);
+  }
+  if (n > max) return false;
+  if (ends.reduce((most, [, a, b]) => most + 3 * (b - a), n) <= max) return true;
+  for (const [k, a, b] of ends) {
+    const length = c.starts[k + 1] - c.starts[k];
+    if (!exact && length > LONG_PART / 3 && utf8Bytes(c.text, c.starts[k], c.starts[k + 1], LONG_PART) > LONG_PART) {
+      // In proportion, with two to spare: the check at the end then seldom has to move the cut.
+      n += Math.ceil((c.tokens[k] * (b - a)) / length) + 2;
+      continue;
+    }
+    const key = `${a}:${b}`;
+    let t = c.seen.get(key);
+    if (t === undefined) c.seen.set(key, (t = tokensOf(c.text.slice(a, b))));
+    n += t;
+  }
+  return n <= max;
+}
+
 /**
  * Hard cut by characters (last resort when even a sentence exceeds the cap).
- * A binary search finds the longest prefix within maxTokens.
+ * A binary search finds the longest prefix within maxTokens. The text is counted once, in parts (counted); a step of
+ * the search adds up parts and gives the tokenizer only the part it ends in. (Counting the whole rest again for
+ * every cut and every step took minutes on 100 KB.)
  */
 function hardCutByChars(text: string, maxTokens: number): string[] {
-  if (countTokens(text) <= maxTokens) return [text];
+  const c = counted(text);
+  if (fits(c, 0, text.length, maxTokens)) return [text];
   const out: string[] = [];
-  let rest = text;
-  while (rest.length > 0) {
-    if (countTokens(rest) <= maxTokens) {
-      out.push(rest);
+  let at = 0;
+  while (at < text.length) {
+    if (fits(c, at, text.length, maxTokens, true)) {
+      out.push(text.slice(at));
       break;
     }
     let lo = 1;
-    let hi = rest.length;
+    let hi = text.length - at;
     let cut = 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
-      if (countTokens(rest.slice(0, mid)) <= maxTokens) {
+      if (fits(c, at, at + mid, maxTokens)) {
         cut = mid;
         lo = mid + 1;
       } else {
         hi = mid - 1;
       }
     }
-    out.push(rest.slice(0, cut));
-    rest = rest.slice(cut);
+    const j = partAt(c, at + cut);
+    const inside = c.starts[j] > at && c.starts[j] < at + cut;
+    if (c.piece[j] && inside) {
+      // Inside a stretch that is not prose, the cut goes where its pieces begin: the rest then begins where they do,
+      // and is counted from the same pieces again instead of new ones.
+      cut = c.starts[j] - at;
+    } else {
+      // A cut that an estimate placed inside a long part is moved back, a tenth of what it takes of that part at a
+      // time, while what it leaves holds too much.
+      while (cut > 1 && !fits(c, at, at + cut, maxTokens, true)) {
+        const base = Math.max(at, c.starts[partAt(c, at + cut - 1)]);
+        cut = Math.max(1, Math.min(cut - 1, base - at + Math.floor((at + cut - base) * 0.9)));
+      }
+    }
+    out.push(text.slice(at, at + cut));
+    at += cut;
   }
   return out;
 }
 
-/** The suffix of text that fits in the last maxTokens tokens (for the overlap, binary search). */
+/** The suffix of text that fits in the last maxTokens tokens (for the overlap, binary search, counted as above). */
 function tailByTokens(text: string, maxTokens: number): string {
-  if (countTokens(text) <= maxTokens) return text;
+  const c = counted(text);
+  if (fits(c, 0, text.length, maxTokens, true)) return text;
   let lo = 0;
   let hi = text.length - 1;
   let cut = text.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (countTokens(text.slice(mid)) <= maxTokens) {
+    if (fits(c, mid, text.length, maxTokens)) {
       cut = mid;
       hi = mid - 1;
     } else {
       lo = mid + 1;
     }
+  }
+  // A start that an estimate placed inside a long part is moved on, a tenth of the rest of that part at a time, while
+  // what follows it holds too much.
+  while (cut < text.length - 1 && !fits(c, cut, text.length, maxTokens, true)) {
+    const end = c.starts[partAt(c, cut) + 1];
+    cut = Math.min(text.length - 1, Math.max(cut + 1, end - Math.floor((end - cut) * 0.9)));
   }
   return text.slice(cut);
 }
@@ -269,7 +493,7 @@ function tailByTokens(text: string, maxTokens: number): string {
  * Every returned unit is guaranteed to be within maxTokens.
  */
 function splitLongText(text: string, maxTokens: number): string[] {
-  if (countTokens(text) <= maxTokens) return [text];
+  if (countTokens(text, maxTokens) <= maxTokens) return [text];
   // Tables are split by row (the header is prepended to each piece)
   if (isTableBlock(text)) return splitTable(text, maxTokens);
 
@@ -285,7 +509,7 @@ function splitLongText(text: string, maxTokens: number): string[] {
   };
 
   for (const sentence of splitSentences(text)) {
-    const st = countTokens(sentence);
+    const st = countTokens(sentence, maxTokens);
     if (st > maxTokens) {
       flush();
       out.push(...hardCutByChars(sentence, maxTokens));
@@ -345,6 +569,15 @@ interface PreChunk {
  * Full markdown to an array of chunks. Keeps the heading context and image/table/code/front matter metadata.
  */
 export function chunkMarkdown(markdown: string, profile: IndexProfile = indexProfile()): RawChunk[] {
+  seenParts = new Map();
+  try {
+    return cutDocument(markdown, profile);
+  } finally {
+    seenParts = null;
+  }
+}
+
+function cutDocument(markdown: string, profile: IndexProfile): RawChunk[] {
   const { frontmatter, body } = parseFrontmatter(markdown);
   const docMeta = parseDocMeta(frontmatter);
   if (body.trim().length === 0) return [];
@@ -371,14 +604,14 @@ export function chunkMarkdown(markdown: string, profile: IndexProfile = indexPro
       if (crumb) currentHeading = crumb;
     }
 
-    const tokens = countTokens(section);
+    const tokens = countTokens(section, MAX_TOKENS);
     if (tokens <= MAX_TOKENS) {
       chunks.push({ heading: currentHeading, content: section.trim(), tokens });
       continue;
     }
 
     const paragraphs = splitParagraphs(section).flatMap((p) =>
-      countTokens(p) > HARD_MAX_TOKENS ? splitLongText(p, HARD_MAX_TOKENS) : [p],
+      countTokens(p, HARD_MAX_TOKENS) > HARD_MAX_TOKENS ? splitLongText(p, HARD_MAX_TOKENS) : [p],
     );
     let buf: string[] = [];
     let bufTokens = 0;

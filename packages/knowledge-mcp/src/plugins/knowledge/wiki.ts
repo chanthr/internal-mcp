@@ -556,10 +556,20 @@ export interface WikiRun {
   /** Documents it began to read: what it cost, whether or not they were read. */
   attempted: number;
 }
-let run: (WikiRun & { abort: AbortController }) | null = null;
+/**
+ * The run in this process. While it goes it keeps what it works from: the documents as listed when it started, and
+ * the state it writes to. The page asks how far it is every second and a half, and listing every folder for that
+ * read and stat-ed every file again (20,000 files: a quarter of a second, each time, for the whole run).
+ */
+interface RunHere extends WikiRun {
+  abort: AbortController;
+  listing?: { docs: WikiDoc[]; unsure: string[] };
+  state?: WikiState;
+}
+let run: RunHere | null = null;
 export const wikiRun = (): WikiRun | null => {
   if (!run) return null;
-  const { abort: _abort, ...view } = run;
+  const { abort: _abort, listing: _listing, state: _state, ...view } = run;
   return view;
 };
 export function stopWikiRun(): void {
@@ -581,7 +591,7 @@ export function startWikiRun(
 ): WikiRun {
   if (run?.running) return wikiRun()!;
   const abort = new AbortController();
-  const mine: WikiRun & { abort: AbortController } = {
+  const mine: RunHere = {
     running: true,
     done: 0,
     total: 0,
@@ -601,10 +611,12 @@ export function startWikiRun(
   const root = wikiDir(dir);
   const work = async () => {
     const state = readWikiState();
+    mine.state = state;
     mine.repaired = repairWiki(dir, state);
     const rules = readFileSync(join(root, 'AGENTS.md'), 'utf8');
     const limits = wikiLimits();
     const listing = await wikiListing(dir);
+    mine.listing = listing;
     const { toRead, gone } = wikiWaiting(listing.docs, state, listing.unsure);
     const touched = { sources: new Set<string>(), topics: new Set<string>() };
     // One line per document, written as it is read. Lines of the log follow each other; the first after the head
@@ -735,6 +747,8 @@ export function startWikiRun(
     .finally(() => {
       mine.running = false;
       mine.current = null;
+      mine.listing = undefined;
+      mine.state = undefined;
       mine.finishedAt = new Date().toISOString();
       try {
         opts.onEnd?.(wikiRun()!);
@@ -757,9 +771,12 @@ export async function wikiStatus(dir: string): Promise<{
   failed: Array<{ document: string; why: string; tries: number; at: string }>;
 }> {
   const exists = wikiExists(dir);
-  const listing = exists ? await wikiListing(dir) : { docs: [], unsure: [] };
+  // A run that goes on answers from what it works from: the documents as it listed them, and its state as it is now.
+  // Documents added meanwhile are counted when it ends.
+  const going = run?.running && run.listing && run.state ? run : null;
+  const listing = going ? going.listing! : exists ? await wikiListing(dir) : { docs: [], unsure: [] };
   // Read after the listing: a run that ended meanwhile has its last failures in it.
-  const state = readWikiState();
+  const state = going ? going.state! : readWikiState();
   const docs = listing.docs;
   const { toRead, gone } = exists ? wikiWaiting(docs, state, listing.unsure) : { toRead: [], gone: [] };
   // Only failures of documents that are still there and still as they were when they failed.
